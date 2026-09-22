@@ -1,0 +1,16 @@
+# Virtuelle Umgebung - 296 MB, gehoert nicht ins Repository
+.venv/
+
+# Arbeitsstand der Sitzung (manuelle NOTAMs, Bestaetigungen, Ausblendungen)
+notam_workspace.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# Lokale NOTAM-Rohdaten (bei Bedarf einzeln freigeben)
+fnsNotams_*.xls
+fnsNotams_*.xlsx

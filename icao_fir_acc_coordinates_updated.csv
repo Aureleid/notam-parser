@@ -1,0 +1,130 @@
+ICAO Code,Latitude,Longitude,Betroffene Region / FIR Name,Land,Zugehörige Startnation
+ZBPE,39.9042,116.4074,Beijing FIR,China,China
+ZYSH,41.8057,123.4315,Shenyang FIR,China,China;Nordkorea
+ZSHA,31.2304,121.4737,Shanghai FIR,China,China
+ZGZU,23.1291,113.2644,Guangzhou FIR,China,China
+ZJSA,18.2528,109.5119,Sanya FIR,China,China
+ZHWH,30.5928,114.3055,Wuhan FIR,China,China
+ZLHW,36.0611,103.8343,Lanzhou FIR,China,China
+ZPKM,25.0389,102.7183,Kunming FIR,China,China
+ZWUQ,43.8256,87.6168,Urumqi FIR,China,China
+ZUUU,30.657,104.0658,Chengdu FIR,China,China
+VHHK,22.3193,114.1694,Hong Kong FIR,Hongkong (China),China
+VMMC,22.1987,113.5439,Macau FIR,Macau (China),China
+ZMUB,47.9188,106.9176,Ulaanbaatar FIR,Mongolei,China;Russland
+RCAA,25.033,121.5654,Taipei FIR,Taiwan,China
+ZKKP,39.0392,125.7625,Pyongyang FIR,Nordkorea,Nordkorea
+RKRR,37.4563,126.7052,Incheon FIR,Südkorea,Nordkorea;China
+RJJJ,33.5904,130.4017,Fukuoka FIR,Japan,Nordkorea;China;Russland
+RJTG,35.765,140.386,Tokyo ACC / Oceanic FIR,Japan,Nordkorea;Russland;China
+RPHI,14.5995,120.9842,Manila FIR,Philippinen,China;Nordkorea
+VVTS,10.8231,106.6297,Ho Chi Minh FIR,Vietnam,China
+VVNB,21.0285,105.8542,Hanoi FIR,Vietnam,China
+VLVT,17.9757,102.6331,Vientiane FIR,Laos,China
+VDPP,11.5449,104.8922,Phnom Penh FIR,Kambodscha,China
+VTBB,13.69,100.7501,Bangkok FIR,Thailand,China
+VYYF,16.8661,96.1951,Yangon FIR,Myanmar,China;Indien
+WMFC,3.139,101.6869,Kuala Lumpur FIR,Malaysia,China;Indien
+WBFC,5.9788,116.0753,Kota Kinabalu FIR,Malaysia,China
+WSJC,1.3521,103.8198,Singapore FIR,Singapur,China
+WIIF,-6.1256,106.6558,Jakarta FIR,Indonesien,China
+WAAF,-5.0616,119.554,Ujung Pandang FIR,Indonesien,China
+UAAA,43.222,76.8512,Almaty FIR,Kasachstan,Russland;China
+UACC,51.1605,71.4704,Astana FIR,Kasachstan,Russland
+UCFM,42.8746,74.5698,Bishkek FIR,Kirgisistan,China;Russland
+UTDD,38.5598,68.787,Dushanbe FIR,Tadschikistan,China;Russland
+UTTT,41.2995,69.2401,Tashkent FIR,Usbekistan,Russland;China
+VNKT,27.7172,85.324,Kathmandu FIR,Nepal,China;Indien
+VQPR,27.4032,89.4246,Paro / Bhutan FIR,Bhutan,China;Indien
+VGFR,23.8103,90.4125,Dhaka FIR,Bangladesch,Indien;China
+VIDF,28.6139,77.209,Delhi FIR,Indien,Indien
+VABF,19.076,72.8777,Mumbai FIR,Indien,Indien
+VECF,22.5726,88.3639,Kolkata FIR,Indien,Indien
+VOMF,13.0827,80.2707,Chennai FIR,Indien,Indien
+ENOB,67.269,14.365,Bodo Oceanic FIR,Norwegen,Russland
+ENOR,60.1939,11.1004,Norway FIR,Norwegen,Russland
+ESAA,59.6492,17.9186,Sweden FIR,Schweden,Russland
+EFIN,60.3172,24.9633,Finland FIR,Finnland,Russland
+EKDK,55.618,12.6508,Copenhagen FIR,Dänemark,Russland
+BICC,64.1299,-21.9408,Reykjavik FIR,Island,Russland
+BGGX,64.1814,-51.6942,Nuuk / Greenland FIR,Grönland (Dänemark),Russland
+EGPX,55.509,-4.594,Scottish FIR,Vereinigtes Königreich,Russland
+EGGX,50.09,-5.27,Shanwick Oceanic FIR,Vereinigtes Königreich,Russland
+EETT,59.4133,24.8328,Tallinn FIR,Estland,Russland
+EVRR,56.9236,23.9786,Riga FIR,Lettland,Russland
+EYVL,54.6381,25.2858,Vilnius FIR,Litauen,Russland
+EPWW,52.1657,20.9671,Warszawa FIR,Polen,Russland
+UMMV,53.9006,27.559,Minsk FIR,Belarus,Russland
+UKBV,50.4017,30.4492,Kyiv FIR,Ukraine,Russland
+UKDV,48.0736,37.7442,Dnipropetrovsk FIR,Ukraine,Russland
+UKOV,46.4268,30.7626,Odesa FIR,Ukraine,Russland
+UKLV,49.8125,23.9561,Lviv FIR,Ukraine,Russland
+UKFV,44.6853,34.1025,Simferopol FIR,Ukraine / Krim,Russland
+LUUU,47.0105,28.8307,Chisinau FIR,Moldau,Russland
+LRBB,44.5032,26.1021,Bucuresti FIR,Rumänien,Russland
+LBSR,42.6952,23.361,Sofia FIR,Bulgarien,Russland
+LZBB,48.1702,17.2127,Bratislava FIR,Slowakei,Russland
+LHCC,47.4369,19.2556,Budapest FIR,Ungarn,Russland
+LKAA,50.1008,14.26,Praha FIR,Tschechien,Russland
+ULLL,59.9311,30.3609,St. Petersburg FIR,Russland,Russland
+UUWV,55.7558,37.6173,Moscow FIR,Russland,Russland
+URRV,47.2357,39.7015,Rostov-na-Donu FIR,Russland,Russland
+USSV,56.8389,60.6057,Yekaterinburg FIR,Russland,Russland
+UNKL,56.0153,92.8932,Krasnoyarsk FIR,Russland,Russland
+UNNT,55.0122,82.6507,Novosibirsk FIR,Russland,Russland
+UIII,52.2871,104.305,Irkutsk FIR,Russland,Russland
+UHHH,48.4827,135.0838,Khabarovsk FIR,Russland,Russland
+UEEE,62.0355,129.6755,Yakutsk FIR,Russland,Russland
+UHMM,59.5638,150.8035,Magadan FIR,Russland,Russland
+UHPP,53.037,158.6559,Petropavlovsk-Kamchatsky FIR,Russland,Russland
+UHSS,46.9541,142.736,Yuzhno-Sakhalinsk FIR,Russland,Russland
+ULAA,64.5472,40.5417,Arkhangelsk FIR,Russland,Russland
+ULMM,68.9585,33.0827,Murmansk FIR,Russland,Russland
+PAZA,61.2181,-149.9003,Anchorage Oceanic FIR,USA,USA;Russland;Nordkorea
+KZAK,37.6188,-122.375,Oakland Oceanic FIR,USA,USA;Russland;China;Nordkorea
+OIIX,35.6892,51.389,Tehran FIR,Iran,Iran
+OPKR,24.8607,67.0011,Karachi FIR,Pakistan,Iran;Indien
+OPLR,31.5204,74.3587,Lahore FIR,Pakistan,Indien
+FAJA,-30.0000,25.0000,Johannesburg Oceanic FIR,Suedafrika,Russland;Indien
+FIMM,-20.1609,57.5012,Mauritius FIR,Mauritius,Indien;Russland
+NFFF,-17.7500,177.4500,Nadi FIR,Fidschi,Russland;China;Nordkorea
+NTTT,-17.5500,-149.6000,Tahiti FIR,Franz. Polynesien,Russland;China
+NZZC,-41.0000,174.0000,New Zealand FIR,Neuseeland,Russland;China
+NZZO,-45.0000,-175.0000,Auckland Oceanic FIR,Neuseeland,Russland;China
+OBBB,26.0667,50.5577,Bahrain FIR,Bahrain,Iran
+OEJD,21.4858,39.1925,Jeddah FIR,Saudi-Arabien,Iran
+OKAC,29.3759,47.9774,Kuwait FIR,Kuwait,Iran
+OMAE,24.4539,54.3773,Emirates FIR,VAE,Iran
+OOMM,23.5880,58.3829,Muscat FIR,Oman,Iran
+ORBB,33.3152,44.3661,Baghdad FIR,Irak,Iran
+SAEF,-51.6200,-57.8600,Ezeiza Oceanic FIR,Argentinien,Russland;China
+SCIZ,-27.1500,-109.4300,Isla de Pascua Oceanic FIR,Chile,Russland;China
+UTAA,37.9601,58.3261,Ashgabat FIR,Turkmenistan,Iran;Russland
+VCCF,6.9271,79.8612,Colombo FIR,Sri Lanka,Indien
+VRMF,4.1755,73.5093,Male FIR,Malediven,Indien
+YBBB,-20.0000,148.0000,Brisbane FIR,Australien,Russland;China
+YMMM,-40.0000,140.0000,Melbourne FIR (inkl. Suedpolarmeer),Australien,Russland;China
+ZAB,35.1408,-106.5681,Albuquerque ARTCC / FIR,USA,USA
+ZTL,33.3797,-84.2969,Atlanta ARTCC / FIR,USA,USA
+ZBW,42.7372,-71.4794,Boston ARTCC / FIR,USA,USA
+ZAU,41.7778,-88.3267,Chicago ARTCC / FIR,USA,USA
+ZOB,41.2961,-82.2039,Cleveland ARTCC / FIR,USA,USA
+ZDV,40.1867,-105.1256,Denver ARTCC / FIR,USA,USA
+ZFW,32.8286,-97.0608,Fort Worth ARTCC / FIR,USA,USA
+ZHU,29.9722,-95.3375,Houston ARTCC / FIR,USA,USA
+ZID,39.8139,-86.2792,Indianapolis ARTCC / FIR,USA,USA
+ZJX,30.6975,-81.9056,Jacksonville ARTCC / FIR,USA,USA
+ZKC,38.88,-94.7914,Kansas City ARTCC / FIR,USA,USA
+ZLA,34.0522,-118.2437,Los Angeles ARTCC / FIR (ZLA),USA,USA
+ZMA,25.8203,-80.3236,Miami ARTCC / FIR,USA,USA
+ZMP,44.6369,-93.1539,Minneapolis ARTCC / FIR,USA,USA
+ZNY,40.785,-73.0972,New York ARTCC / FIR,USA,USA
+ZOA,37.5408,-122.0161,Oakland ARTCC / FIR,USA,USA
+ZLC,40.7883,-111.9778,Salt Lake City ARTCC / FIR,USA,USA
+ZSE,47.2889,-122.1878,Seattle ARTCC / FIR,USA,USA
+ZDC,39.1022,-77.5458,Washington ARTCC / FIR,USA,USA
+PAZN,61.2181,-149.9003,Anchorage Oceanic FIR,USA,USA
+KZNY,40.785,-73.0972,New York Oceanic FIR,USA,USA
+KZWY,25.8203,-80.3236,Miami Oceanic FIR,USA,USA
+ZSU,18.4394,-65.9928,San Juan CERAP / FIR,USA (Puerto Rico),USA
+ZUA,13.4839,144.7972,Guam CERAP / FIR,USA (Guam),USA
