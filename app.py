@@ -1853,6 +1853,130 @@ def apply_manual_attribute(
             setattr(group, attribut, MIXED_VALUE)
 
 
+def mark_site_alternatives(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    spaceports: pd.DataFrame,
+) -> int:
+    """
+    Vermerkt bei jedem Start, ob sein Platz nicht unterscheidbare Nachbarn hat.
+
+    Eigener Durchgang statt ein Vermerk an jeder Stelle, die einen Startplatz
+    setzt - davon gibt es mehrere, und eine vergessene waere ein stiller Fehler.
+    Rueckgabe: Zahl der Starts mit Nachbarplaetzen.
+    """
+    betroffen = 0
+    for group in groups:
+        # Nur beim ersten Durchgang: danach steht hier moeglicherweise schon
+        # eine Handentscheidung, und die darf den Urzustand nicht ueberschreiben.
+        if not group.auto_spaceport_code and group.spaceport_code:
+            group.auto_spaceport_code = group.spaceport_code
+        group.site_alternatives = site_alternatives_for(group.spaceport_code, spaceports)
+        if group.site_alternatives:
+            betroffen += 1
+    for event in events:
+        event.site_alternatives = site_alternatives_for(event.spaceport_code, spaceports)
+    return betroffen
+
+
+def apply_launch_site_assignments(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    spaceports: pd.DataFrame,
+    assignments: Dict[str, str],
+) -> None:
+    """
+    Traegt eine von Hand gesetzte Startplatzwahl ein und schreibt sie durch.
+
+    Sinnvoll nur bei nebeneinanderliegenden Plaetzen: dort kann die Geometrie
+    nicht entscheiden, also entscheidet der Benutzer. Die Wahl ueberschreibt
+    Kuerzel, Name und Koordinaten des Starts und aller seiner NOTAMs.
+
+    Azimut und Inklination werden NICHT neu gerechnet. Der Unterschied liegt
+    bei 0,06 bis 0,22 Grad und damit weit unter der Genauigkeit der
+    Abschaetzung, die ihre Inklination selbst nur auf wenige Grad angibt. Eine
+    Neurechnung erzeugte Scheingenauigkeit und wuerde zwei Zahlen fuer dieselbe
+    Bahn liefern, je nachdem ob das Pad gesetzt wurde.
+    """
+    apply_manual_attribute(events, groups, assignments, "launch_site")
+    nach_kurzel = {str(r["Kurzel"]): r for _, r in spaceports.iterrows()}
+    per_row = {e.row_index: e for e in events}
+    for group in groups:
+        wahl = group.launch_site
+        if wahl == MIXED_VALUE or (wahl and wahl not in nach_kurzel):
+            continue
+        # Keine Wahl mehr: zurueck auf das, was die Geometrie ergeben hatte.
+        # Ohne diesen Zweig bliebe eine zurueckgenommene Wahl stehen.
+        ziel = wahl or group.auto_spaceport_code
+        if not ziel or ziel not in nach_kurzel or ziel == group.spaceport_code:
+            continue
+        row = nach_kurzel[ziel]
+        group.spaceport_code = str(row["Kurzel"])
+        group.spaceport_name = str(row["Name"])
+        group.spaceport_lat = float(row["Latitude"])
+        group.spaceport_lon = float(row["Longitude"])
+        for r in list(group.row_indices) + list(group.advance_row_indices):
+            event = per_row.get(r)
+            if event is None:
+                continue
+            event.spaceport_code = group.spaceport_code
+            event.spaceport_name = group.spaceport_name
+            event.spaceport_lat = group.spaceport_lat
+            event.spaceport_lon = group.spaceport_lon
+    # Die Wahl kann den Platz veraendert haben - die Nachbarschaft neu vermerken.
+    mark_site_alternatives(events, groups, spaceports)
+
+
+def launch_site_history(
+    archiv: Optional[pd.DataFrame],
+    vehicle: str,
+    code: Optional[str],
+    spaceports: pd.DataFrame,
+) -> str:
+    """
+    Was das eigene Archiv ueber dieses Traegersystem sagt.
+
+    Bewusst eine Rechnung auf den eigenen Daten statt einer Tabelle im Code:
+    welche Rakete von welchem Pad fliegt, ist keine Eigenschaft der Rakete,
+    sondern eine Momentaufnahme der Praxis. CZ-8 flog von Anfang an von beiden
+    Wenchang-Gelaenden. Eine fest verdrahtete Zuordnung wuerde veralten, und
+    zwar unbemerkt - diese Zaehlung verschiebt sich stattdessen sichtbar.
+
+    Ein Hinweis, keine Vorgabe: gesetzt wird nichts.
+
+    Eine Schieflage gehoert dazugesagt: der nachrangige Platz einer
+    Nachbarschaftsgruppe kann nur von Hand gesetzt worden sein, denn die
+    Geometrie waehlt ihn nie. Der erstverzeichnete kann dagegen auch bedeuten,
+    dass das Pad nie bestimmt wurde. Beim ersten Durchlauf sagt die Zaehlung
+    deshalb noch nichts - sie verdient sich die Aussage.
+    """
+    if archiv is None or archiv.empty or not vehicle or not code:
+        return ""
+    if not {"Trägersystem", "Weltraumbahnhof"} <= set(archiv.columns):
+        return ""
+    gruppe = co_located_groups(spaceports).get(code, ())
+    if not gruppe:
+        return ""
+    passend = archiv[archiv["Trägersystem"].astype(str).str.strip() == str(vehicle).strip()]
+    if passend.empty:
+        return ""
+    zaehler: Dict[str, int] = {}
+    for wert in passend["Weltraumbahnhof"].astype(str).str.strip():
+        if wert:
+            zaehler[wert] = zaehler.get(wert, 0) + 1
+    if not zaehler:
+        return ""
+    teile = ", ".join(
+        "{}x {}".format(n, k) for k, n in sorted(zaehler.items(), key=lambda p: (-p[1], p[0]))
+    )
+    satz = "Your archive: {} flew {}.".format(vehicle, teile)
+    # Nur der erstverzeichnete Platz der Gruppe kann "nicht bestimmt" meinen.
+    vorrangig = gruppe[0]
+    if zaehler.get(vorrangig):
+        satz += " {} may also mean the pad was never determined.".format(vorrangig)
+    return satz
+
+
 def apply_vehicle_assignments(
     events: Sequence["LaunchEvent"],
     groups: Sequence["LaunchGroup"],
@@ -1937,6 +2061,7 @@ def save_workspace(
     rejected: Sequence[str] = (),
     vehicle_assignments: Optional[Dict[str, str]] = None,
     payload_assignments: Optional[Dict[str, str]] = None,
+    launch_site_assignments: Optional[Dict[str, str]] = None,
     archiv_removed: Sequence[str] = (),
     restored: Sequence[str] = (),
     seestarts_removed: Sequence[str] = (),
@@ -1959,6 +2084,11 @@ def save_workspace(
                     "payload_assignments": {
                         k: v
                         for k, v in sorted((payload_assignments or {}).items())
+                        if v
+                    },
+                    "launch_site_assignments": {
+                        k: v
+                        for k, v in sorted((launch_site_assignments or {}).items())
                         if v
                     },
                     "archiv_removed": sorted(archiv_removed),
@@ -2153,6 +2283,11 @@ class LaunchEvent:
     auto_hidden_reason: str = ""
     vehicle: str = ""
     payload: str = ""
+    #: Von Hand gewaehlter Startplatz. Nur dort sinnvoll, wo Plaetze so nah
+    #: beieinanderliegen, dass die Geometrie nicht entscheiden kann.
+    launch_site: str = ""
+    #: Nachbarplaetze des zugeordneten Platzes, die nicht unterscheidbar sind.
+    site_alternatives: List[str] = field(default_factory=list)
 
     @property
     def launch_window(self) -> str:
@@ -2283,16 +2418,131 @@ def _find_fir(
 IMPLAUSIBLE_AZIMUTH_SECTOR = (225.0, 325.0)
 
 
+# --- Nebeneinanderliegende Startplaetze -------------------------------------
+#
+# Wenchang hat zwei Startgelaende: die staatlichen Pads und den kommerziellen
+# Platz unmittelbar noerdlich davon. Sie liegen 1,92 km auseinander. Der Azimut
+# zu einer Dropzone unterscheidet sich dadurch um 0,06 bis 0,22 Grad - bei
+# einer Auswahlschwelle von 15 Grad.
+#
+# Die Startplatzwahl rechnet "Streuung x 100 + mittlere Entfernung". Bei diesem
+# Abstand entscheidet also verhundertfachtes Rauschen. Gemessen an vier
+# realistischen Startkorridoren kippte das Ergebnis zwischen den beiden
+# Plaetzen je nach Dropzone-Muster - zwei Starts derselben Rakete vom selben
+# Pad waeren auf verschiedene Plaetze gebucht worden.
+#
+# Deshalb darf die Geometrie zwischen solchen Plaetzen nie entscheiden. Der
+# zuerst verzeichnete bleibt automatisch waehlbar, spaeter danebengelegte nur
+# von Hand oder bei ausdruecklicher Nennung im NOTAM-Text.
+
+#: Ab diesem Abstand gelten zwei Plaetze derselben Nation als unterscheidbar.
+#:
+#: Gemessen an der Referenz: engstes Paar 1,92 km (WSLC/HAIN), naechstes
+#: 10,45 km (KXMR/KTTS). Die Schwelle sitzt in dieser Luecke. Die Floridagruppe
+#: bei 10 bis 20 km ist mit 0,3 bis 2,3 Grad ebenfalls schwach getrennt; sie
+#: bleibt bewusst unberuehrt, weil dort keine bestehende Zuordnung zur Debatte
+#: steht und eine Aenderung Zuordnungen betreffen wuerde, die niemand in Frage
+#: gestellt hat.
+CO_LOCATED_SITE_KM = 5.0
+
+
+@lru_cache(maxsize=16)
+def _co_located_from_rows(
+    rows: Tuple[Tuple[str, float, float, str], ...]
+) -> Dict[str, Tuple[str, ...]]:
+    """Rechnet die Nachbarschaftsgruppen; getrennt wegen des Zwischenspeichers."""
+    gruppen: List[List[int]] = []
+    for pos, (_kurzel, lat, lon, land) in enumerate(rows):
+        ziel: Optional[int] = None
+        for nummer, mitglieder in enumerate(gruppen):
+            for m in mitglieder:
+                _k2, lat2, lon2, land2 = rows[m]
+                if land2 != land:
+                    continue
+                if surface_distance_km(lat, lon, lat2, lon2) <= CO_LOCATED_SITE_KM:
+                    ziel = nummer
+                    break
+            if ziel is not None:
+                break
+        if ziel is None:
+            gruppen.append([pos])
+        else:
+            gruppen[ziel].append(pos)
+
+    ergebnis: Dict[str, Tuple[str, ...]] = {}
+    for mitglieder in gruppen:
+        if len(mitglieder) < 2:
+            continue
+        kuerzel = tuple(rows[m][0] for m in mitglieder)
+        for k in kuerzel:
+            ergebnis[k] = kuerzel
+    return ergebnis
+
+
+def co_located_groups(spaceports: pd.DataFrame) -> Dict[str, Tuple[str, ...]]:
+    """
+    Startplaetze, die zu nah beieinanderliegen, um sie an der Geometrie der
+    Sperrzonen zu unterscheiden.
+
+    Rueckgabe: je Kuerzel die Kuerzel seiner ganzen Gruppe, in der Reihenfolge
+    der Referenz. Das erste ist der automatisch waehlbare. Plaetze ohne Nachbarn
+    kommen nicht vor.
+    """
+    if spaceports is None or spaceports.empty:
+        return {}
+    rows = tuple(
+        (str(r["Kurzel"]), float(r["Latitude"]), float(r["Longitude"]), str(r["Land"]))
+        for _, r in spaceports.iterrows()
+    )
+    return _co_located_from_rows(rows)
+
+
+def _auto_selectable(spaceports: pd.DataFrame) -> pd.DataFrame:
+    """Die Plaetze, unter denen die Geometrie waehlen darf."""
+    gruppen = co_located_groups(spaceports)
+    nachrangig = {k for k, mitglieder in gruppen.items() if mitglieder[0] != k}
+    if not nachrangig:
+        return spaceports
+    return spaceports[~spaceports["Kurzel"].isin(nachrangig)]
+
+
+def site_alternatives_for(
+    code: Optional[str], spaceports: pd.DataFrame
+) -> List[str]:
+    """Nachbarplaetze eines Startplatzes - leer, wenn er allein steht."""
+    if not code:
+        return []
+    return [k for k in co_located_groups(spaceports).get(code, ()) if k != code]
+
+
+def site_separation_km(codes: Sequence[str], spaceports: pd.DataFrame) -> float:
+    """Groesster Abstand innerhalb einer Nachbarschaftsgruppe, in Kilometern."""
+    punkte = [
+        (float(r["Latitude"]), float(r["Longitude"]))
+        for _, r in spaceports.iterrows()
+        if str(r["Kurzel"]) in set(codes)
+    ]
+    weit = 0.0
+    for i in range(len(punkte)):
+        for j in range(i + 1, len(punkte)):
+            weit = max(weit, surface_distance_km(*punkte[i], *punkte[j]))
+    return weit
+
+
 def _restrict_candidates(
     spaceports: pd.DataFrame, nations: Sequence[str], hint: Sequence[str]
 ) -> pd.DataFrame:
     """
     Schraenkt die Startplatz-Auswahl ein: zuerst auf die im Text genannten
     Startplaetze, sonst auf die Kandidaten-Nationen.
+
+    Nebeneinanderliegende Plaetze sind von der automatischen Wahl ausgenommen -
+    siehe CO_LOCATED_SITE_KM. Nennt der Text einen davon ausdruecklich, gilt er
+    trotzdem: der Text ist die staerkere Quelle als die Geometrie.
     """
-    candidates = spaceports
+    candidates = _auto_selectable(spaceports)
     if nations:
-        gefiltert = spaceports[spaceports["Land"].isin(list(nations))]
+        gefiltert = candidates[candidates["Land"].isin(list(nations))]
         if not gefiltert.empty:
             candidates = gefiltert
     if hint:
@@ -2534,10 +2784,29 @@ class LaunchGroup:
     advance_row_indices: List[int] = field(default_factory=list)
     #: Frueheste Gueltigkeit dieser Meldungen.
     advance_from: Optional[datetime] = None
+    #: Von Hand gewaehlter Startplatz, siehe CO_LOCATED_SITE_KM.
+    launch_site: str = ""
+    #: Der Platz, den die Geometrie gewaehlt hat - vor jeder Handentscheidung.
+    #: Wird gebraucht, um eine zurueckgenommene Wahl wieder aufzuloesen, ohne
+    #: sich darauf zu verlassen, dass der Aufrufer die Gruppe neu baut.
+    auto_spaceport_code: str = ""
+    #: Nachbarplaetze, die die Geometrie nicht von diesem unterscheiden kann.
+    site_alternatives: List[str] = field(default_factory=list)
 
     @property
     def zone_count(self) -> int:
         return len(self.row_indices)
+
+    @property
+    def site_determined(self) -> bool:
+        """
+        Steht fest, von welchem Pad gestartet wurde?
+
+        Ohne Nachbarplaetze ist nichts zu bestimmen - dann ja. Mit Nachbarn nur
+        dann, wenn es von Hand gesetzt wurde. Die Geometrie zaehlt hier nicht
+        als Beleg: 1,92 km Abstand ergeben 0,06 bis 0,22 Grad Azimutunterschied.
+        """
+        return not self.site_alternatives or bool(self.launch_site)
 
     @property
     def advance_notice_hours(self) -> Optional[float]:
@@ -3718,6 +3987,10 @@ def analyze_notams(
     # Tage vorher reserviert haben, an ihren Start haengen. Die Gruppen selbst
     # bleiben unveraendert - es ist dieselbe Flaeche, nicht eine weitere Zone.
     stats["advance"] = len(pair_advance_announcements(events, groups))
+    # Vermerken, wo zwei Plaetze so nah beieinanderliegen, dass die Geometrie
+    # sie nicht unterscheiden kann. Entschieden wird das nicht hier, sondern
+    # von Hand - siehe apply_launch_site_assignments.
+    stats["site_ambiguous"] = mark_site_alternatives(events, groups, spaceports)
     stats["groups"] = groups
     stats["launches"] = sum(1 for g in groups if g.spaceport_code)
     stats["grouped"] = sum(1 for g in groups if g.zone_count > 1)
@@ -3886,6 +4159,7 @@ COLUMN_LABELS = {
     "Trigger": "Triggers",
     "Hinweis": "Note",
     "Sperrzonen": "Zones",
+    "Pad": "Pad",
     "Vorank\u00fcndigung": "Advance Notice",
     "Reichweite (km)": "Range",
     "Azimut-Streuung (\u00b0)": "Spread",
@@ -3909,7 +4183,7 @@ GROUP_COLUMN_ORDER = (
     "Startfenster (UTC)", "Orbit-Typ", "Est. Inklination (\u00b0)",
     "Launch Azimut (\u00b0)", "Sperrzonen", "Reichweite (km)",
     "Azimut-Streuung (\u00b0)", "Konfidenz", "Zuverl\u00e4ssigkeit", "Art",
-    "Gepr\u00fcft", "FIR", "NOTAMs", "Vorank\u00fcndigung", "Quelle",
+    "Gepr\u00fcft", "FIR", "Pad", "NOTAMs", "Vorank\u00fcndigung", "Quelle",
 )
 
 #: Dasselbe auf NOTAM-Ebene.
@@ -4067,9 +4341,16 @@ def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
     if group.zone_count > 1:
         lines.append(
             "**Why this launch site:** Seen from {}, all {} closure zones lie in "
-            "the same direction (spread {:.1f}°). No other launch site explains all "
-            "zones together.".format(
-                group.spaceport_code, group.zone_count, group.azimuth_spread_deg
+            "the same direction (spread {:.1f}°). {}".format(
+                group.spaceport_code, group.zone_count, group.azimuth_spread_deg,
+                # Mit einem Nachbarplatz waere "kein anderer erklaert sie" falsch:
+                # er erklaert sie genauso gut, deshalb steht er ja zur Wahl.
+                "Apart from its immediate neighbour {}, no other launch site "
+                "explains all zones together.".format(
+                    ", ".join(group.site_alternatives)
+                )
+                if group.site_alternatives
+                else "No other launch site explains all zones together.",
             )
             if group.azimuth_spread_deg <= LAUNCH_GROUP_MAX_SPREAD_DEG
             # Bei weit auseinanderliegenden Zonen - typisch fuer mehrere
@@ -4090,6 +4371,30 @@ def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
             "**Why this launch site:** Nearest launch site of that nation with a "
             "plausible launch direction.{}".format(" " + hinweis if hinweis else "")
         )
+
+    # Pad. Nur wenn es ueberhaupt zwei gibt - sonst ist nichts zu sagen.
+    if group.site_alternatives:
+        if group.launch_site:
+            lines.append(
+                "**Which pad:** Set by hand to {}. {} lies {} away and cannot be "
+                "told apart from the closure zones.".format(
+                    group.spaceport_code,
+                    ", ".join(group.site_alternatives),
+                    "less than 2 km",
+                )
+            )
+        else:
+            lines.append(
+                "**Which pad:** Not determined. {} and {} lie side by side; the "
+                "azimuth to a drop zone differs between them by less than a "
+                "quarter of a degree, so the closure zones cannot decide it. "
+                "{} is shown because it is the longer-established site, not "
+                "because it was established for this launch.".format(
+                    group.spaceport_code,
+                    ", ".join(group.site_alternatives),
+                    group.spaceport_code,
+                )
+            )
 
     # Folgerung
     if group.kind == KIND_REENTRY:
@@ -4159,6 +4464,10 @@ def groups_to_dataframe(
                 ),
                 "Startfenster (UTC)": g.launch_window,
                 "Sperrzonen": g.zone_count,
+                "Pad": (
+                    "-" if not g.site_alternatives
+                    else ("by hand" if g.launch_site else "not determined")
+                ),
                 "NOTAMs": ", ".join(g.notam_ids),
                 "Vorankündigung": (
                     "{} ({:.0f} h)".format(
@@ -4196,6 +4505,7 @@ def groups_to_dataframe(
         "Weltraumbahnhof",
         "Startfenster (UTC)",
         "Sperrzonen",
+        "Pad",
         "NOTAMs",
         "Vorankündigung",
         "Geprüft",
@@ -4880,16 +5190,19 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
 # --------------------------------------------------------------------------- #
 def _persist_workspace() -> None:
     """Sichert den Arbeitsstand nach jeder Aenderung."""
+    # Benannt statt nach Position: ein spaeter eingeschobener Parameter hat die
+    # Argumente sonst stillschweigend verschoben.
     save_workspace(
         st.session_state.get("manual_notams", []),
         st.session_state.get("confirmed_launches", set()),
         st.session_state.get("hidden_events", set()),
-        st.session_state.get("rejected_launches", set()),
-        st.session_state.get("vehicle_assignments", {}),
-        st.session_state.get("payload_assignments", {}),
-        st.session_state.get("archiv_removed", set()),
-        st.session_state.get("restored_events", set()),
-        st.session_state.get("seestarts_removed", set()),
+        rejected=st.session_state.get("rejected_launches", set()),
+        vehicle_assignments=st.session_state.get("vehicle_assignments", {}),
+        payload_assignments=st.session_state.get("payload_assignments", {}),
+        launch_site_assignments=st.session_state.get("launch_site_assignments", {}),
+        archiv_removed=st.session_state.get("archiv_removed", set()),
+        restored=st.session_state.get("restored_events", set()),
+        seestarts_removed=st.session_state.get("seestarts_removed", set()),
     )
 
 
@@ -5458,6 +5771,75 @@ def _payload_field(
     )
 
 
+def _set_launch_site(widget_key: str, event_keys: Sequence[str]) -> None:
+    """Uebernimmt die Pad-Wahl - fuer alle Sperrzonen desselben Starts."""
+    gewaehlt = str(st.session_state.get(widget_key, "") or "")
+    zuweisungen = st.session_state.setdefault("launch_site_assignments", {})
+    for schluessel in event_keys:
+        if gewaehlt:
+            zuweisungen[schluessel] = gewaehlt
+        else:
+            zuweisungen.pop(schluessel, None)
+    _persist_workspace()
+
+
+def _launch_site_picker(
+    event: "LaunchEvent",
+    spaceports: pd.DataFrame,
+    archiv: Optional[pd.DataFrame],
+    group_keys: Dict[str, List[str]],
+    prefix: str,
+) -> None:
+    """
+    Auswahlliste fuer das Startgelaende - nur dort, wo es zwei gibt.
+
+    Erscheint ausschliesslich, wenn der zugeordnete Platz nicht unterscheidbare
+    Nachbarn hat. Ueberall sonst waere die Liste eine Scheinfrage: dort gibt es
+    nichts zu waehlen.
+
+    Die Vorgabe ist "not determined", nicht der naechstliegende Platz. Eine
+    Vorgabe, die zufaellig oft richtig ist, waere eine Behauptung ohne Beleg -
+    und spaeter nicht mehr von einer geprueften Angabe zu unterscheiden.
+    """
+    nachbarn = event.site_alternatives
+    if not nachbarn:
+        return
+    schluessel = group_keys.get(event.key) or [event.key]
+    gruppe = list(co_located_groups(spaceports).get(event.spaceport_code, ()))
+    if not gruppe:
+        return
+    namen = {
+        str(r["Kurzel"]): str(r["Name"])
+        for _, r in spaceports.iterrows()
+        if str(r["Kurzel"]) in gruppe
+    }
+    optionen = [""] + gruppe
+    abstand = site_separation_km(gruppe, spaceports)
+    widget_key = "{}_site_{}".format(prefix, event.key)
+    st.session_state[widget_key] = event.launch_site if event.launch_site in optionen else ""
+    st.selectbox(
+        "Launch site",
+        optionen,
+        key=widget_key,
+        format_func=lambda code: (
+            "not determined" if not code
+            else "{} - {}".format(code, namen.get(code, code))
+        ),
+        on_change=_set_launch_site,
+        args=(widget_key, schluessel),
+        help="These sites lie {:.1f} km apart. The closure zones cannot tell "
+        "them apart - the azimuth differs by less than a quarter of a degree. "
+        "Only you can decide this.".format(abstand),
+    )
+    hinweis = launch_site_history(archiv, event.vehicle, event.spaceport_code, spaceports)
+    if hinweis:
+        st.caption(hinweis)
+    if len(schluessel) > 1:
+        st.caption(
+            "Applies to all {} closure zones of this launch.".format(len(schluessel))
+        )
+
+
 def _vehicle_picker(
     event: "LaunchEvent",
     vehicles: pd.DataFrame,
@@ -5767,14 +6149,18 @@ h1, h2, h3, h4, h5, h6 {{
    dient der Lesbarkeit, nicht der Dekoration - sie bleibt unbunt. */
 .nola-kopf {{ margin: 0.5rem 0 2.2rem 0; }}
 .nola-marke {{
+  --nola-mh: clamp(5.2rem, 12vw, 7.4rem);
   display: flex;
   align-items: flex-end;
-  gap: 1.25rem;
 }}
+/* Die Katze liegt in der SVG nicht am linken Rand (ca. 20 % Leerraum). Der
+   negative Aussenabstand holt diesen Rand zurueck und laesst bewusst nur
+   rund 0.9rem sichtbaren Abstand zur Wortmarke - enger als die Vorlage. */
 .nola-maskottchen {{
-  height: clamp(5.2rem, 12vw, 7.4rem);
+  height: var(--nola-mh);
   width: auto;
   flex: none;
+  margin-left: calc(var(--nola-mh) * -0.197 + 0.9rem);
 }}
 .nola-wort {{
   font-family: var(--nola-grotesk);
@@ -5895,7 +6281,9 @@ def main() -> None:
         st.session_state["confirmed_launches"] = set(gespeichert.get("confirmed_launches", []))
         st.session_state["hidden_events"] = set(gespeichert.get("hidden_events", []))
         st.session_state["rejected_launches"] = set(gespeichert.get("rejected_launches", []))
-        for feld in ("vehicle_assignments", "payload_assignments"):
+        for feld in (
+            "vehicle_assignments", "payload_assignments", "launch_site_assignments",
+        ):
             roh = gespeichert.get(feld, {})
             st.session_state[feld] = (
                 {str(k): str(v) for k, v in roh.items() if v}
@@ -5915,6 +6303,7 @@ def main() -> None:
     st.session_state.setdefault("rejected_launches", set())
     st.session_state.setdefault("vehicle_assignments", {})
     st.session_state.setdefault("payload_assignments", {})
+    st.session_state.setdefault("launch_site_assignments", {})
     st.session_state.setdefault("archiv_removed", set())
     st.session_state.setdefault("restored_events", set())
     st.session_state.setdefault("seestarts_removed", set())
@@ -6129,6 +6518,17 @@ def main() -> None:
     apply_payload_assignments(
         events, stats.get("groups", []), st.session_state["payload_assignments"]
     )
+    # Vor der Tabelle und vor dem Archivschreiben: die Pad-Wahl veraendert
+    # Kuerzel und Name des Startplatzes und muss in beiden stehen.
+    apply_launch_site_assignments(
+        events,
+        stats.get("groups", []),
+        spaceports,
+        st.session_state["launch_site_assignments"],
+    )
+    # Einmal je Durchlauf gelesen: der Pad-Hinweis rechnet darauf, und je Zeile
+    # zu lesen hiesse, dieselbe Datei dutzendfach anzufassen.
+    pad_historie = load_archive(ARCHIVE_CSV)
     table = events_to_dataframe(visible_events, vehicles)
     _update_archive(events, stats.get("groups", []), table)
     _update_sea_launches(events, stats.get("groups", []), table, spaceports)
@@ -6470,6 +6870,9 @@ def main() -> None:
                         )
                     st.divider()
                     _vehicle_picker(event, vehicles, group_keys, "data")
+                    _launch_site_picker(
+                        event, spaceports, pad_historie, group_keys, "data"
+                    )
                     _payload_field(event, group_keys, "data")
                     st.divider()
                     zu_review, zu_versteckt = st.columns(2)
@@ -6625,6 +7028,9 @@ def main() -> None:
                     )
                     st.markdown("**Reason for review:** {}".format(event.review_reason))
                     _vehicle_picker(event, vehicles, group_keys, "review")
+                    _launch_site_picker(
+                        event, spaceports, pad_historie, group_keys, "review"
+                    )
                     zurueckgestellt = event.key in st.session_state["rejected_launches"]
                     if zurueckgestellt:
                         st.button(

@@ -563,6 +563,96 @@ behebt. Ein Test wacht darüber.
 `HIIS` und `HYOS` bleiben in der Startplatz-Referenz, sind aber als **Heimathäfen** zu
 lesen, nicht als Startpunkte — bei diesem Start hat `HYOS` die falsche Antwort geliefert.
 
+## Zwei Startplätze an einem Ort: Wenchang und Hainan
+
+In Wenchang liegen zwei Startgelände: die staatlichen Pads (`WSLC`) und der kommerzielle
+Platz unmittelbar nördlich davon (`HAIN`, *Hainan Commercial Launch Site*).
+
+### Warum die Geometrie das nicht entscheiden darf
+
+Sie liegen **1,92 km** auseinander.
+
+| Abstand der Plätze | Zone 500 km | Zone 1000 km | Zone 2000 km |
+|---|---|---|---|
+| 1,92 km (WSLC/HAIN) | 0,220° | 0,110° | 0,055° |
+
+Die Auswahlschwelle des Programms liegt bei **15°**. Drei Größenordnungen zu grob.
+
+Schlimmer: die Startplatzwahl rechnet `Streuung × 100 + mittlere Entfernung`. Bei diesem
+Abstand entscheidet also **verhundertfachtes Rauschen**. Ein Versuch mit einer zweiten
+gewöhnlichen Referenzzeile, gemessen an vier realistischen Startkorridoren:
+
+| Korridor | gewählter Platz | Score-Vorsprung |
+|---|---|---|
+| Südkurs, 2 Zonen | Hainan | 0,5 |
+| Südostkurs, 2 Zonen | Hainan | 17,2 |
+| Ostkurs, 2 Zonen | Wenchang | 34,7 |
+| eine Zone südlich | Wenchang | 1,9 |
+
+Es kippt mit dem Dropzone-Muster. Zwei Starts derselben Rakete vom selben Pad wären auf
+verschiedene Plätze gebucht worden — die falsche Zuordnung, die in diesem Programm
+schwerer wiegt als ein Fall im Review.
+
+**Deshalb ist `HAIN` von der automatischen Wahl ausgenommen.** Nennt ein NOTAM den Platz
+ausdrücklich im Text, gilt er trotzdem: der Text ist die stärkere Quelle als die Geometrie.
+
+Die Regel ist allgemein, nicht auf Wenchang verdrahtet: Plätze derselben Nation, die näher
+als `CO_LOCATED_SITE_KM` = **5 km** beieinanderliegen, bilden eine Nachbarschaftsgruppe; der
+zuerst verzeichnete bleibt automatisch wählbar, spätere nur von Hand. Die Schwelle sitzt in
+der gemessenen Lücke der Referenz: engstes Paar 1,92 km, nächstes 10,45 km (`KXMR`/`KTTS`).
+
+> Die Floridagruppe bei 10–20 km ist mit 0,3–2,3° **ebenfalls** schwach getrennt. Sie bleibt
+> bewusst unberührt: dort steht keine Zuordnung zur Debatte, und eine Änderung würde
+> Ergebnisse betreffen, die niemand in Frage gestellt hat.
+
+### Was keine Lösung war
+
+Eine Tabelle *Trägersystem → Pad* lag nahe und ist falsch. **CZ-8 flog von Anfang an von
+beiden Geländen** — Debüt 2020 von `WSLC`, erster Start vom kommerziellen Pad 1 ebenfalls
+eine CZ-8. Die Tabelle wäre am Tag ihrer Entstehung schon gebrochen.
+
+Der allgemeine Fall ist schlimmer: welche Rakete von welchem Pad fliegt, ist **keine
+Eigenschaft der Rakete, sondern eine Momentaufnahme der Praxis**. Derselbe Fehlertyp wie der
+Archivschlüssel, der den Analysestand einfror, und wie die Verzweigung auf übersetzten Text.
+Und er verrottet **lautlos**: fliegt CZ-12 nächstes Jahr von Jiuquan, sagt NOLA „Hainan" und
+niemand merkt es. Ein Test verbietet deshalb jede Zeile, die ein Trägersystem auf ein
+Platzkürzel abbildet.
+
+### Wie es stattdessen geht
+
+**Von Hand, mit Vorgabe „nicht bestimmt".** Eine Auswahlliste erscheint unter NOTAM Data und
+Review — aber nur bei Startplätzen mit Nachbarn; überall sonst wäre sie eine Scheinfrage.
+Die Wahl gilt für alle Sperrzonen desselben Starts, wird im Arbeitsstand gesichert und ist
+zurücknehmbar: ohne Wahl gilt wieder, was die Geometrie ergeben hatte.
+
+Die Vorgabe ist **nicht** der naheliegende Platz. Eine Vorgabe, die zufällig oft richtig ist,
+wäre eine Behauptung ohne Beleg — und später nicht mehr von einer geprüften Angabe zu
+unterscheiden. Die Spalte `Pad` in der Startansicht sagt deshalb `not determined`, `by hand`
+oder `-` (kein Nachbar vorhanden), und der Klartext schreibt es aus.
+
+**Azimut und Inklination werden bei einer Pad-Wahl nicht neu gerechnet.** Der Unterschied
+liegt bei 0,06–0,22° und damit weit unter der Genauigkeit einer Abschätzung, die ihre
+Inklination selbst nur auf wenige Grad angibt. Sonst gäbe es zwei Zahlen für dieselbe Bahn,
+je nachdem ob jemand das Pad gesetzt hat.
+
+### Der Hinweis rechnet, statt zu behaupten
+
+Neben der Auswahlliste steht, was das **eigene Archiv** sagt:
+
+```
+Your archive: CZ-12 flew 2x HAIN.
+Your archive: CZ-8 flew 1x HAIN, 1x WSLC. WSLC may also mean the pad was never determined.
+```
+
+Keine Tabelle im Code, sondern eine Zählung über `Trägersystem` und `Weltraumbahnhof` im
+Startarchiv — zwei Spalten, die es schon gibt, also **ohne Schemaänderung**. Sie aktualisiert
+sich selbst: fliegt ein Träger einmal von woanders, verschiebt sich die Zahl und man sieht es.
+
+Eine Schieflage gehört dazugesagt und steht im Hinweis: `HAIN` kann nur von Hand gesetzt
+worden sein, denn die Geometrie wählt es nie. `WSLC` kann dagegen auch bedeuten, dass das Pad
+nie bestimmt wurde. Beim ersten Durchlauf sagt die Zählung noch nichts — sie verdient sich
+die Aussage.
+
 ## Vorankündigungen
 
 Derselbe Luftraum wird oft Tage vor dem Start reserviert: eine mehrtägige Meldung mit

@@ -1,4 +1,4 @@
-import os, sys, math
+import os, sys, math, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import app
 
@@ -1657,7 +1657,7 @@ tmp_w = Path(_tempfile.mkdtemp())
 echt_w = app.WORKSPACE_FILE
 try:
     app.WORKSPACE_FILE = tmp_w / "notam_workspace.json"
-    app.save_workspace([], [], [], [], {"k1": "CZ-2D", "k2": "CZ-2D", "k3": ""})
+    app.save_workspace([], [], [], vehicle_assignments={"k1": "CZ-2D", "k2": "CZ-2D", "k3": ""})
     daten = _json.loads(app.WORKSPACE_FILE.read_text(encoding="utf-8"))
     check("Zuweisungen stehen in der Datei",
           daten["vehicle_assignments"] == {"k1": "CZ-2D", "k2": "CZ-2D"},
@@ -1724,7 +1724,8 @@ tmp_p = Path(_tempfile.mkdtemp())
 echt_p = app.WORKSPACE_FILE
 try:
     app.WORKSPACE_FILE = tmp_p / "notam_workspace.json"
-    app.save_workspace([], [], [], [], {"p1": "CZ-2D"}, {"p1": "Yaogan-XX", "p2": ""})
+    app.save_workspace([], [], [], vehicle_assignments={"p1": "CZ-2D"},
+                   payload_assignments={"p1": "Yaogan-XX", "p2": ""})
     daten_p = _json.loads(app.WORKSPACE_FILE.read_text(encoding="utf-8"))
     check("Payload steht in der Arbeitsdatei",
           daten_p["payload_assignments"] == {"p1": "Yaogan-XX"}, daten_p["payload_assignments"])
@@ -1867,7 +1868,7 @@ tmp_w2 = Path(_tempfile.mkdtemp())
 echt_w2 = app.WORKSPACE_FILE
 try:
     app.WORKSPACE_FILE = tmp_w2 / "w.json"
-    app.save_workspace([], [], [], [], {}, {}, ["k-a", "k-b"])
+    app.save_workspace([], [], [], archiv_removed=["k-a", "k-b"])
     check("geloeschte Archivzeilen ueberleben den Neustart",
           app.load_workspace()["archiv_removed"] == ["k-a", "k-b"])
 finally:
@@ -2133,7 +2134,7 @@ check("  ... und die Begruendung", "e.auto_hidden_reason if e.key in auto_hidden
 tmp_h = Path(_tempfile.mkdtemp()); echt_h = app.WORKSPACE_FILE
 try:
     app.WORKSPACE_FILE = tmp_h / "w.json"
-    app.save_workspace([], [], [], [], {}, {}, [], ["key-x"])
+    app.save_workspace([], [], [], restored=["key-x"])
     check("zurueckgeholte NOTAMs ueberleben den Neustart",
           app.load_workspace()["restored_events"] == ["key-x"])
     app.WORKSPACE_FILE.write_text(_json.dumps({"manual_notams": []}), encoding="utf-8")
@@ -2833,6 +2834,202 @@ if xls:
           st_v["advance"] == 0, st_v["advance"])
     check("  ... und die Starts bleiben vollzaehlig", st_v["launches"] >= 8,
           st_v["launches"])
+
+print("== 88. Nebeneinanderliegende Startplaetze (Wenchang / Hainan) ==")
+
+print("-- Die Referenz kennt beide --")
+check("Hainan steht als eigener Platz", "HAIN" in set(sp["Kurzel"]), sorted(sp["Kurzel"])[:4])
+check("  ... unter eigenem Namen",
+      sp[sp["Kurzel"] == "HAIN"]["Name"].iloc[0] == "Hainan Commercial Launch Site",
+      sp[sp["Kurzel"] == "HAIN"]["Name"].iloc[0])
+check("  ... und Wenchang behaelt seinen",
+      sp[sp["Kurzel"] == "WSLC"]["Name"].iloc[0] == "Wenchang Space Launch Site")
+check("sie liegen unter 2 km auseinander",
+      app.site_separation_km(["WSLC", "HAIN"], sp) < 2.0,
+      round(app.site_separation_km(["WSLC", "HAIN"], sp), 2))
+
+print("-- Die Geometrie darf hier nicht entscheiden --")
+# Gemessen: 1,92 km ergeben 0,06 bis 0,22 Grad Azimutunterschied, gegen eine
+# Auswahlschwelle von 15 Grad. Der Score rechnet Streuung x 100 - also wuerde
+# verhundertfachtes Rauschen entscheiden. An vier Startkorridoren gemessen
+# kippte das Ergebnis je nach Dropzone-Muster.
+check("die Nachbarschaft wird erkannt",
+      app.co_located_groups(sp).get("WSLC") == ("WSLC", "HAIN"),
+      app.co_located_groups(sp).get("WSLC"))
+check("  ... und sonst niemand - die Floridagruppe bleibt unberuehrt",
+      set(app.co_located_groups(sp)) == {"WSLC", "HAIN"},
+      sorted(app.co_located_groups(sp)))
+check("der nachrangige Platz ist von der automatischen Wahl ausgenommen",
+      "HAIN" not in set(app._auto_selectable(sp)["Kurzel"]))
+check("  ... der erstverzeichnete nicht",
+      "WSLC" in set(app._auto_selectable(sp)["Kurzel"]))
+check("Schwelle ist benannt und gemessen", app.CO_LOCATED_SITE_KM == 5.0)
+# Die Schwelle sitzt in der Luecke der Referenz: 1,92 km dann 10,45 km.
+paare = []
+for i in range(len(sp)):
+    for j in range(i + 1, len(sp)):
+        a, b = sp.iloc[i], sp.iloc[j]
+        if a["Land"] == b["Land"]:
+            paare.append(app.surface_distance_km(
+                a["Latitude"], a["Longitude"], b["Latitude"], b["Longitude"]))
+paare.sort()
+check("  ... zwischen engstem und zweitengstem Paar",
+      paare[0] < app.CO_LOCATED_SITE_KM < paare[1],
+      (round(paare[0], 2), app.CO_LOCATED_SITE_KM, round(paare[1], 2)))
+# Vier Startkorridore: ohne die Regel kippte die Wahl, mit ihr steht sie.
+for name, zonen in (
+    ("Suedkurs",   [(17.0, 112.0), (12.0, 113.5)]),
+    ("Suedostkurs", [(18.2, 112.6), (14.0, 116.0)]),
+    ("Ostkurs",    [(19.4, 113.0), (19.0, 118.5)]),
+    ("eine Zone",  [(17.0, 112.0)]),
+):
+    wahl = app._select_spaceport_for_zones(zonen, sp, ["China"], [])
+    check("  ... {} waehlt WSLC, nicht das Pad daneben".format(name),
+          wahl is not None and wahl[0]["Kurzel"] == "WSLC",
+          wahl[0]["Kurzel"] if wahl else None)
+
+print("-- Nennt der Text den Platz, gilt er trotzdem --")
+# Der Text ist die staerkere Quelle als die Geometrie - diese Regel darf die
+# Ausnahme nicht aushebeln.
+genannt = app._restrict_candidates(sp, ["China"], ["HAIN"])
+check("ausdrueckliche Nennung erreicht auch den nachrangigen Platz",
+      list(genannt["Kurzel"]) == ["HAIN"], list(genannt["Kurzel"]))
+
+check("  ... und der Texthinweis WENCHANG laesst das Pad offen",
+      app.SPACEPORT_HINTS.get("WENCHANG") == ("WSLC",),
+      app.SPACEPORT_HINTS.get("WENCHANG"))
+# Wuerde er beide nennen, duerfte die Geometrie zwischen ihnen waehlen - genau
+# das soll die Regel verhindern.
+check("  ... und damit bleibt der Nachbar vermerkt",
+      app.site_alternatives_for("WSLC", sp) == ["HAIN"])
+
+print("-- Ohne Zutun: unbestimmt, nicht geraten --")
+WEN = {
+ "W1": """A3301/26 NOTAMN
+Q)ZJSA/QRDCA/IV/BO/W/000/999/1900N11100E050
+A)ZJSA B)2610050230 C)2610050310
+E) A TEMPORARY DANGER AREA ESTABLISHED FOR SPACE LAUNCH,THE AREA
+BOUNDED BY 1830N11130E - 1800N11230E - 1700N11200E - 1730N11100E.
+F)SFC G)UNL""",
+ "W2": """A3302/26 NOTAMN
+Q)ZJSA/QRDCA/IV/BO/W/000/999/1500N11300E090
+A)ZJSA B)2610050235 C)2610050320
+E) A TEMPORARY DANGER AREA ESTABLISHED FOR SPACE LAUNCH,THE AREA
+BOUNDED BY 1300N11400E - 1230N11500E - 1130N11430E - 1200N11330E.
+F)SFC G)UNL""",
+}
+df_w = app.manual_entries_to_dataframe(
+    [{"text": t, "added": "x"} for t in WEN.values()], "NOTAM Text")
+ev_w, st_w = app.analyze_notams(df_w, sp, fir, min_confidence="MEDIUM")
+g_w = [x for x in st_w["groups"] if x.spaceport_code][0]
+az_vorher, inkl_vorher = g_w.azimuth_deg, g_w.inclination_deg
+check("der Start landet auf WSLC", g_w.spaceport_code == "WSLC", g_w.spaceport_code)
+check("  ... mit vermerktem Nachbarn", g_w.site_alternatives == ["HAIN"],
+      g_w.site_alternatives)
+check("  ... und gilt als nicht bestimmt", not g_w.site_determined)
+check("die Statistik zaehlt den Fall", st_w["site_ambiguous"] == 1, st_w["site_ambiguous"])
+check("die Spalte Pad sagt es",
+      app.groups_to_dataframe([g_w])["Pad"].iloc[0] == "not determined",
+      app.groups_to_dataframe([g_w])["Pad"].iloc[0])
+klar_w = app.describe_launch(g_w, ev_w)
+check("der Klartext sagt es auch", "**Which pad:** Not determined." in klar_w)
+check("  ... und begruendet es mit der Geometrie",
+      "less than a quarter of a degree" in klar_w)
+check("  ... und sagt, warum trotzdem WSLC dasteht",
+      "longer-established site, not because it was established" in klar_w)
+check("  ... und behauptet keine Eindeutigkeit mehr",
+      "Apart from its immediate neighbour HAIN" in klar_w)
+
+print("-- Von Hand gesetzt --")
+app.apply_launch_site_assignments(ev_w, st_w["groups"], sp, {ev_w[0].key: "HAIN"})
+check("der Platz wechselt", g_w.spaceport_code == "HAIN", g_w.spaceport_code)
+check("  ... samt Namen", g_w.spaceport_name == "Hainan Commercial Launch Site")
+check("  ... und Koordinaten", abs(g_w.spaceport_lat - 19.6310) < 1e-6)
+check("  ... gilt nun als bestimmt", g_w.site_determined)
+check("  ... und die Spalte zeigt es",
+      app.groups_to_dataframe([g_w])["Pad"].iloc[0] == "by hand")
+check("die Wahl gilt fuer alle Zonen des Starts",
+      all(e.spaceport_code == "HAIN" for e in ev_w), [e.spaceport_code for e in ev_w])
+# Entscheidend: keine Scheingenauigkeit. 1,92 km aendern den Azimut um 0,2 Grad,
+# die Inklination gibt das Programm selbst nur auf wenige Grad an.
+check("Azimut wird NICHT neu gerechnet", g_w.azimuth_deg == az_vorher,
+      (az_vorher, g_w.azimuth_deg))
+check("  ... und die Inklination auch nicht", g_w.inclination_deg == inkl_vorher)
+app.apply_launch_site_assignments(ev_w, st_w["groups"], sp, {})
+check("zuruecknehmen fuehrt auf WSLC zurueck", g_w.spaceport_code == "WSLC",
+      g_w.spaceport_code)
+check("  ... und wieder auf unbestimmt", not g_w.site_determined)
+
+print("-- Der Hinweis kommt aus dem Archiv, nicht aus dem Code --")
+# Eine Tabelle "Rakete X startet von Pad Y" waere eine Momentaufnahme der
+# Praxis, keine Eigenschaft der Rakete - CZ-8 flog von Anfang an von beiden
+# Gelaenden. Sie wuerde unbemerkt veralten. Diese Zaehlung nicht.
+arc_h = pd.DataFrame([
+    {"Trägersystem": "CZ-12", "Weltraumbahnhof": "HAIN"},
+    {"Trägersystem": "CZ-12", "Weltraumbahnhof": "HAIN"},
+    {"Trägersystem": "CZ-8",  "Weltraumbahnhof": "HAIN"},
+    {"Trägersystem": "CZ-8",  "Weltraumbahnhof": "WSLC"},
+])
+check("eindeutige Historie wird gezaehlt",
+      app.launch_site_history(arc_h, "CZ-12", "WSLC", sp)
+      == "Your archive: CZ-12 flew 2x HAIN.",
+      app.launch_site_history(arc_h, "CZ-12", "WSLC", sp))
+gemischt = app.launch_site_history(arc_h, "CZ-8", "WSLC", sp)
+check("gemischte Historie wird als gemischt gezeigt",
+      "1x HAIN" in gemischt and "1x WSLC" in gemischt, gemischt)
+check("  ... mit dem Vorbehalt zum erstverzeichneten Platz",
+      "WSLC may also mean the pad was never determined" in gemischt, gemischt)
+check("  ... und der Vorbehalt gilt nicht fuer den nachrangigen",
+      "HAIN may also mean" not in gemischt, gemischt)
+check("ohne Archivzeilen kein Hinweis",
+      app.launch_site_history(arc_h, "CZ-5B", "WSLC", sp) == "")
+check("ohne Traegersystem kein Hinweis",
+      app.launch_site_history(arc_h, "", "WSLC", sp) == "")
+check("an einem Platz ohne Nachbarn kein Hinweis",
+      app.launch_site_history(arc_h, "CZ-12", "JSLC", sp) == "")
+check("leeres Archiv bricht nicht",
+      app.launch_site_history(pd.DataFrame(), "CZ-12", "WSLC", sp) == "")
+# Keine Zeile darf ein Traegersystem auf ein Platzkuerzel abbilden - genau das
+# waere die Momentaufnahme, die unbemerkt veraltet.
+_platzcodes = set(sp["Kurzel"])
+_verdrahtet = [
+    z for z in quelle_x.splitlines()
+    if not z.lstrip().startswith(("#", "*"))
+    and re.search(r"\b(CZ|KZ|GSX|SD|ZQ|YL|SQX)-\w+", z)
+    and any('"{}"'.format(c) in z or "'{}'".format(c) in z for c in _platzcodes)
+]
+check("keine Zeile bildet ein Traegersystem auf ein Platzkuerzel ab",
+      _verdrahtet == [], _verdrahtet[:2])
+check("  ... die Historie liest stattdessen die Archivspalten",
+      'archiv["Trägersystem"]' in quelle_x and 'archiv["Weltraumbahnhof"]' in quelle_x
+      or '{"Trägersystem", "Weltraumbahnhof"}' in quelle_x)
+
+print("-- Bedienung und Arbeitsstand --")
+check("Auswahlliste nur bei Nachbarplaetzen",
+      "nachbarn = event.site_alternatives" in quelle_x
+      and "if not nachbarn:" in quelle_x)
+check("Vorgabe ist 'not determined'", '"not determined" if not code' in quelle_x)
+check("die Wahl wird im Arbeitsstand gesichert",
+      "launch_site_assignments" in quelle_x)
+echt_w2 = app.WORKSPACE_FILE
+app.WORKSPACE_FILE = Path("test_workspace_pad.json")
+try:
+    app.save_workspace([], [], [], launch_site_assignments={"kx": "HAIN", "ky": ""})
+    wieder = app.load_workspace()
+    check("gespeichert und wieder gelesen",
+          wieder.get("launch_site_assignments") == {"kx": "HAIN"},
+          wieder.get("launch_site_assignments"))
+finally:
+    app.WORKSPACE_FILE.unlink(missing_ok=True)
+    app.WORKSPACE_FILE = echt_w2
+check("save_workspace wird benannt aufgerufen - nicht nach Position",
+      "launch_site_assignments=st.session_state" in quelle_x)
+check("die Pad-Wahl greift vor Tabelle und Archiv",
+      quelle_x.index("apply_launch_site_assignments(")
+      < quelle_x.index("table = events_to_dataframe(visible_events, vehicles)"))
+check("das Archiv wird einmal je Durchlauf gelesen, nicht je Zeile",
+      quelle_x.count("pad_historie = load_archive(ARCHIVE_CSV)") == 1
+      and quelle_x.count("pad_historie, group_keys") == 2)
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

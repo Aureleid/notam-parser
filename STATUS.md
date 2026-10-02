@@ -18,11 +18,12 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 | Eingabe | Datei-Import (CSV/XLS/XLSX mit Vorspann-Erkennung) und Freitext-Feld; beide identisch verarbeitet |
 | Zuordnung | Drittstaaten-Regel über Spalte `Land`, Trägersystem → Startplatz, Startrichtungs-Prüfung (Sektor 225–325° ausgeschlossen), Fernzonen-Behandlung |
 | Gruppierung | Mehrere Dropzonen eines Starts werden zusammengefasst, Anker-Regel gegen Selbstbestätigung, Ausreißer-Trennung |
-| Nationen | China, Russland, Indien, Iran, Nordkorea, USA — 31 Startplätze, 130 FIRs, 51 Trägersysteme |
+| Nationen | China, Russland, Indien, Iran, Nordkorea, USA — 32 Startplätze, 130 FIRs, 51 Trägersysteme |
 | Bedienung | 6 Reiter, Klartext-Auswertung, manuelle Prüfung (Space Launch / Ausblenden), Optionsmenü zur Referenzpflege |
 | Trägersystem | Dropdown unter NOTAM Data und Review, gestaffelt nach Nation; gilt für alle Zonen eines Starts; lesbare Spalte in der Launch Overview |
 | Prüfung | Externe Prüfung gegen `docs/intent/nola-massstab.md` am 25.09.2026; sechs Befunde behoben, einer als Vertragsfrage eingeordnet |
 | Seestarts | Startpunkt aus der Geometrie abgeleitet, wenn eine kleine Kreiszone die übrigen Sperrgebiete auf einer Bahn erklärt; eigenes Protokoll `seestarts_updated.csv`, das bewusst nicht in die Startplatz-Suche zurückfließt |
+| Startplätze am selben Ort | Wenchang (`WSLC`) und der kommerzielle Platz Hainan (`HAIN`) liegen 1,92 km auseinander — 0,06–0,22° Azimutunterschied gegen eine Auswahlschwelle von 15°. Die Geometrie darf dort nie entscheiden; gewählt wird von Hand, Vorgabe „nicht bestimmt". Der Hinweis wird aus dem eigenen Archiv gerechnet statt als Tabelle verdrahtet. |
 | Vorankündigungen | Mehrtägige Meldungen, die denselben Luftraum vor dem Starttag reservieren, werden über Geometrie und Zeit an ihren Start gehängt — sechs Bedingungen, alle sprachfrei; Eindeutigkeit ist Bedingung. Die Gruppe bleibt unberührt: dieselbe Fläche ist keine weitere Zone. |
 | Bahnrechnung | Inklination mit Erdrotation (`orbital_azimuth_deg`); Orbitbänder auf die Streuung der Abschätzung geweitet (SSO 93–103°) |
 | Vorfilterung | `LOW` + Ausschlussbegriff → direkt unter *Excluded*; auf der Echtdatei 148 von 275 Review-Fällen, ohne einen Start zu verlieren. Zurückholen gewinnt dauerhaft. |
@@ -75,4 +76,14 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
   folgenlos (die Meldungen erreichten HIGH über SFC/UNL und Q-Code), könnte aber in einem
   schwächeren Fall den Ausschlag geben.
 - **Automatische `.bak`-Kopie** der Referenzdateien beim Start (angeboten, nicht umgesetzt).
+  Eine einmalige, geprüfte Sicherung liegt unter
+  `iCloud/Claude/Claude Code/NOTAM Parser Backups/`.
+- **Das Pad eines Wenchang-Starts** bleibt `nicht bestimmt`, bis es von Hand gesetzt wird.
+  NOLA kann es nicht wissen: nicht aus der Geometrie (1,92 km), nicht aus dem NOTAM-Text
+  (chinesische Startmeldungen nennen kein Pad), nicht aus dem Trägersystem (CZ-8 fliegt von
+  beiden). Die Archivzählung neben der Auswahlliste braucht erst eigene Einträge, um etwas
+  zu sagen.
+- **Altes Archiv kennt die Unterscheidung nicht.** Die 16 bestehenden Zeilen mit `WSLC`
+  heißen weiter „Wenchang, Pad nicht unterschieden" — rückwirkend lässt sich das nicht
+  klären.
 - Lokale Änderungen erreichen die veröffentlichte App erst nach `git push`.
