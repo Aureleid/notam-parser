@@ -16,6 +16,7 @@ Lizenz:     MIT
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import io
@@ -23,6 +24,7 @@ import json
 import math
 import re
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -62,6 +64,39 @@ EARTH_RADIUS_KM = 6371.0088
 NM_TO_KM = 1.852
 
 TARGET_NATIONS = ["China", "Russland", "Indien", "Iran", "Nordkorea", "USA"]
+
+#: Anzeigenamen der Zielnationen.
+#:
+#: Die Werte selbst bleiben deutsch, weil sie die Spalte `Land` der FIR-Referenz
+#: treffen muessen - das ist der Vertrag mit einer Datei, die der Benutzer
+#: pflegt. Uebersetzt wird nur, was auf dem Bildschirm und im Archiv landet.
+NATION_LABELS = {
+    "Russland": "Russia",
+    "Indien": "India",
+    "Nordkorea": "North Korea",
+}
+
+
+def nation_label(nation: Optional[str]) -> str:
+    """Englischer Anzeigename einer Nation; unbekannte bleiben unveraendert."""
+    if not nation:
+        return ""
+    return NATION_LABELS.get(nation, nation)
+
+
+#: Bahntypen. Sie sind reine Anzeigewerte - in den Referenzdateien kommen sie
+#: nicht vor, deshalb stehen sie direkt auf Englisch.
+ORBIT_UNKNOWN = "Undetermined"
+ORBIT_RETROGRADE = "Retrograde"
+ORBIT_SSO = "Sun-synchronous (SSO / polar)"
+ORBIT_HIGH_INC = "High inclination / near-polar"
+ORBIT_LEO_MEO = "Standard LEO / MEO (station corridor)"
+ORBIT_GTO = "Equatorial / low inclination (GTO transit)"
+
+#: Belastbarkeit der Bahnabschaetzung.
+RELIABILITY_HIGH = "high"
+RELIABILITY_MEDIUM = "medium"
+RELIABILITY_LOW = "low"
 
 #: Primaere Weltraum-Indikatoren im E-Item / Freitext.
 SPACE_KEYWORDS: Tuple[str, ...] = (
@@ -231,17 +266,50 @@ def initial_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+#: Bahngeschwindigkeit einer niedrigen Erdumlaufbahn, fuer die Umrechnung von
+#: Start- in Bahnazimut. Die Abschaetzung reagiert schwach darauf: zwischen
+#: 7,5 und 8,0 km/s aendert sich das Ergebnis um weniger als ein halbes Grad.
+ORBITAL_VELOCITY_MS = 7800.0
+
+#: Umfangsgeschwindigkeit der Erde am Aequator.
+EARTH_ROTATION_MS = 465.1
+
+
+def orbital_azimuth_deg(site_lat: float, azimuth_deg: float) -> float:
+    """
+    Rechnet den Startazimut in den Bahnazimut um.
+
+    Zur Startgeschwindigkeit addiert sich die Ostkomponente der Erddrehung,
+    V_erde * cos(phi). Bei einem Start nach Osten verstaerkt sie die Bewegung
+    und aendert die Richtung nicht; bei einem Start nach Sueden oder Norden
+    dreht sie die Bahn nach Osten.
+    """
+    phi = math.radians(site_lat)
+    alpha = math.radians(azimuth_deg)
+    v_ost = ORBITAL_VELOCITY_MS * math.sin(alpha) + EARTH_ROTATION_MS * math.cos(phi)
+    v_nord = ORBITAL_VELOCITY_MS * math.cos(alpha)
+    return math.degrees(math.atan2(v_ost, v_nord)) % 360.0
+
+
 def estimate_inclination_deg(site_lat: float, azimuth_deg: float) -> float:
     """
-    Genaeherte orbitale Inklination aus Startplatz-Breite phi und Azimut alpha:
+    Orbitale Inklination aus Startplatz-Breite phi und Startazimut alpha.
 
-        cos(i) = cos(phi) * sin(alpha)
+        cos(i) = cos(phi) * sin(Bahnazimut)
 
-    Mathematische Artefakte (|cos i| > 1 durch Rundung) werden abgefangen.
-    Hinweis: Die Naeherung vernachlaessigt den Geschwindigkeitsbeitrag der
-    Erdrotation und liefert daher eine Abschaetzung, keinen exakten Wert.
+    Die Erdrotation ist eingerechnet (siehe orbital_azimuth_deg). Ohne sie
+    ueberschaetzt die Rechnung rueckwaerts gerichtete Starts systematisch: Ein
+    chinesischer Seestart vom 11./12.02.2026 ergab unkorrigiert 99,7 und 100,5
+    Grad - zwei Klassen fuer denselben Start, einmal sonnensynchron, einmal
+    retrograd. Mit Rotation sind es 96,7 und 97,6 Grad, also beide Male
+    sonnensynchron, und das ist das Band, in dem solche Bahnen liegen.
+
+    Es bleibt eine Abschaetzung: Sie unterstellt eine niedrige Erdumlaufbahn
+    und einen Aufstieg ohne Bahnaenderung nach dem Start.
     """
-    cos_i = math.cos(math.radians(site_lat)) * math.sin(math.radians(azimuth_deg))
+    cos_i = math.cos(math.radians(site_lat)) * math.sin(
+        math.radians(orbital_azimuth_deg(site_lat, azimuth_deg))
+    )
     cos_i = max(-1.0, min(1.0, cos_i))
     return math.degrees(math.acos(cos_i))
 
@@ -251,19 +319,25 @@ def classify_orbit(inclination_deg: Optional[float]) -> str:
     if inclination_deg is None or (
         isinstance(inclination_deg, float) and math.isnan(inclination_deg)
     ):
-        return "Unbestimmt"
+        return ORBIT_UNKNOWN
     i = float(inclination_deg)
-    if i > 100.0:
-        return "Retrograder Orbit"
-    if 96.0 <= i <= 100.0:
-        return "Sonnensynchron (SSO / Polar)"
-    if 66.0 <= i < 96.0:
-        return "Hohe Inklination / polnah"
+    # Die Grenzen sind bewusst weit: Die Inklination ist eine Abschaetzung aus
+    # Startplatzbreite und einem Azimut, der selbst aus der Richtung zu einer
+    # Dropzone stammt. Gemessen an bekannten SSO-Starts - Taiyuan, Jiuquan und
+    # zwei chinesischen Seestarts - streut sie um rund drei Grad. Ein vier Grad
+    # breites Band darum herum haette denselben Start je nach Tag einmal als
+    # sonnensynchron und einmal als retrograd gefuehrt.
+    if i > 103.0:
+        return ORBIT_RETROGRADE
+    if 93.0 <= i <= 103.0:
+        return ORBIT_SSO
+    if 66.0 <= i < 93.0:
+        return ORBIT_HIGH_INC
     if 31.0 <= i <= 65.0:
-        return "Standard LEO / MEO (ISS-/Station-Korridor)"
+        return ORBIT_LEO_MEO
     if 0.0 <= i <= 30.0:
-        return "Aequatorial / Low Inclination (GTO-Transit)"
-    return "Unbestimmt"
+        return ORBIT_GTO
+    return ORBIT_UNKNOWN
 
 
 def destination_point(
@@ -581,7 +655,16 @@ def extract_coordinates(text: str) -> List[Tuple[float, float]]:
 #: unmittelbar vor der naechsten Koordinate.
 RE_AREA_SPLIT = re.compile(
     r"(?:"
-    r"(?:(?<=[.:)])|^|\n)\s*(?:\d{1,2}\s*[.)]\s|AREA\s+\d\b|SIMILAR ACTIVITIES\b)"
+    # AREA\s*\d statt AREA\s+\d: japanische Meldungen schreiben "AREA1:" ohne
+    # Leerzeichen. Das \b dahinter schuetzt weiterhin davor, dass
+    # "DANGER AREA 1936N11057E" mitten in der Koordinate getrennt wird - dort
+    # folgt auf die Ziffer eine weitere Ziffer, also keine Wortgrenze.
+    r"(?:(?<=[.:)])|^|\n)\s*(?:\d{1,2}\s*[.)]\s|SIMILAR ACTIVITIES\b)"
+    # AREA1/AREA2 steht oft mitten im Satz: extract_items faltet die
+    # Zeilenumbrueche, aus "...0321\nAREA1:" wird "...0321 AREA1:". Deshalb
+    # genuegt hier ein Leerzeichen davor. Geschuetzt bleibt es durch das \b:
+    # in "DANGER AREA 1936N11057E" folgt auf die Ziffer eine weitere Ziffer.
+    r"|(?:(?<=[\s.:)])|^)AREA\s*\d\b"
     r"|\s+AND\s+(?=\d{6}\s*[NS])"
     r")",
     re.IGNORECASE,
@@ -668,8 +751,38 @@ MANUAL_MARK = "\u2b22"  # schwarzes Hexagon
 #: Streamlits Markdown-Violett (``:violet[...]``) je Theme - hell nutzt purple70,
 #: dunkel das hellere purple50. Tabelle, Kopfzeile und HTML-Markierung greifen auf
 #: denselben Wert zu, damit die Markierung ueberall gleich aussieht.
-MANUAL_COLOR = "#B27EFF"
-MANUAL_COLOR_LIGHT = "#803DF5"
+MANUAL_COLOR = "#B7A8FF"
+MANUAL_COLOR_LIGHT = "#6D4AE0"
+
+#: Geometrisches Symbolvokabular nach der Referenzoberflaeche: Kreis, Dreieck,
+#: Raute, Hexagon - gefuellt oder offen, die Bedeutung traegt die Form plus die
+#: Farbe. Bewusst keine Piktogramme: sie tragen hier keine Information und
+#: lassen ein Fachwerkzeug wie ein Spielzeug aussehen.
+GLYPH_OK = "\u25CF"        # gefuellter Kreis - Referenz geladen
+GLYPH_MISSING = "\u25C6"   # Raute - Referenz fehlt oder ist fehlerhaft
+GLYPH_EMPTY = "\u25CB"     # offener Kreis - vorhanden, aber ohne Inhalt
+GLYPH_REVIEW = "\u25B2"    # Dreieck - braucht eine Entscheidung
+GLYPH_HIDDEN = "\u25A0"    # Quadrat - bewusst aus der Auswertung genommen
+GLYPH_LAUNCH = "\u25B8"    # Pfeilspitze - ein Start
+
+#: Farben zu den Symbolen; die Farbtoene stammen aus der Referenzoberflaeche
+#: und stehen ebenso in .streamlit/config.toml.
+COLOR_OK = "#2ECC89"
+COLOR_ALERT = "#F2952B"
+COLOR_ERROR = "#E5484F"
+COLOR_MUTED = "#838C97"
+
+
+def glyph(zeichen: str, farbe: str, deckkraft: float = 1.0) -> str:
+    """
+    Faerbt ein Symbol fuer die Anzeige in Markdown.
+
+    Die Deckkraft bildet die Abstufung der Referenz nach: was gilt, steht voll
+    da, was nur Zustand meldet, tritt zurueck.
+    """
+    return '<span style="color:{};opacity:{:.2f}">{}</span>'.format(
+        farbe, deckkraft, zeichen
+    )
 
 
 def manual_color() -> str:
@@ -729,7 +842,7 @@ def mark_id_html(notam_id: str, manual: bool) -> str:
 #: Spalte, die importierte von manuell eingefuegten NOTAMs unterscheidet.
 SOURCE_COLUMN = "__quelle__"
 SOURCE_IMPORT = "Import"
-SOURCE_MANUAL = "Manuell"
+SOURCE_MANUAL = "Pasted"
 
 #: Zeichen, die in kopierten NOTAMs statt der ASCII-Varianten auftauchen.
 _UNICODE_FIXES = {
@@ -991,7 +1104,7 @@ NATION_HINTS: Dict[str, Tuple[str, ...]] = {
         "SOYUZ", "ANGARA", "PROTON-M", "ROSCOSMOS", "GLONASS",
     ),
     "Indien": (
-        "ISRO", "SRIHARIKOTA", "SDSC", "SHAR", "PSLV", "GSLV", "SSLV", "THUMBA",
+        "ISRO", "SRIHARIKOTA", "SDSC", "PSLV", "GSLV", "SSLV", "THUMBA",
         "KULASEKARAPATTINAM", "INDIAN SPACE", "INDIA ",
     ),
     "Iran": (
@@ -1004,7 +1117,7 @@ NATION_HINTS: Dict[str, Tuple[str, ...]] = {
     ),
     "USA": (
         "SPACE X", "SPACEX", "STARSHIP", "STARBASE", "BOCA CHICA", "STARLINK",
-        "FALCON 9", "FALCON HEAVY", "DRAGON", "CREW DRAGON",
+        "FALCON 9", "FALCON HEAVY", "CREW DRAGON", "CARGO DRAGON",
         "BLUE ORIGIN", "NEW SHEPARD", "NEW GLENN", "CORN RANCH",
         "UNITED LAUNCH ALLIANCE", "ATLAS V", "VULCAN", "DELTA IV",
         "ANTARES", "MINOTAUR", "CYGNUS", "PEGASUS XL",
@@ -1107,8 +1220,11 @@ LAUNCH_TERMS: Tuple[str, ...] = (
     "LAUNCH AREA", "WILL BE LAUNCHED", "LIFT-OFF", "LIFTOFF",
 )
 
-KIND_LAUNCH = "Start"
-KIND_REENTRY = "Wiedereintritt"
+KIND_LAUNCH = "Launch"
+KIND_REENTRY = "Re-entry"
+#: Eine Meldung, die den Luftraum eines Starts schon Tage vorher reserviert.
+#: Sie wird nicht erkannt, sondern zugewiesen - siehe pair_advance_announcements.
+KIND_ADVANCE = "Advance notice"
 
 
 def classify_event_kind(text: str) -> str:
@@ -1128,6 +1244,32 @@ def classify_event_kind(text: str) -> str:
         # Beides genannt: das Wiedereintrittsgebiet ist die konkrete Sperrzone.
         return KIND_REENTRY
     return KIND_LAUNCH
+
+
+@lru_cache(maxsize=512)
+def _hint_pattern(term: str) -> "re.Pattern":
+    """
+    Suchmuster fuer einen Stichwortbegriff - mit Wortgrenzen.
+
+    Ohne sie trifft ein blosses ``t in text`` mitten in fremde Woerter hinein:
+    SHAR in SHARJAH, CASC in CASCADE, NASA in NASAL, VEGA in LAS VEGAS. Jeder
+    dieser Treffer setzt eine Startnation und sticht anschliessend die
+    Drittstaaten-Regel - also genau den Schutz, der eine falsche Zuordnung
+    verhindern soll.
+
+    Die Grenze hinten entfaellt, wenn der Begriff selbst nicht auf einem
+    Wortzeichen endet: "CZ-" soll weiterhin CZ-2D treffen, "INDIA " weiterhin
+    "INDIA " und nicht INDIAN OCEAN.
+    """
+    begriff = term.strip()
+    hinten = r"(?![A-Z0-9])" if begriff[-1:].isalnum() else ""
+    return re.compile(r"(?<![A-Z0-9])" + re.escape(begriff) + hinten)
+
+
+def hint_hits(text: str, terms: Sequence[str]) -> List[str]:
+    """Stichwoerter, die im Text als eigenes Wort vorkommen."""
+    upper = re.sub(r"\s+", " ", (text or "").upper())
+    return [t.strip() for t in terms if _hint_pattern(t).search(upper)]
 
 
 def detect_spaceport_hint(text: str) -> Tuple[List[str], List[str]]:
@@ -1166,7 +1308,7 @@ def detect_nation_hint(text: str) -> Tuple[Optional[str], List[str]]:
         upper = upper.replace(noise, " ")
     hits: Dict[str, List[str]] = {}
     for nation, terms in NATION_HINTS.items():
-        found = [t.strip() for t in terms if t in upper]
+        found = [t.strip() for t in terms if _hint_pattern(t).search(upper)]
         if found:
             hits[nation] = found
     if len(hits) == 1:
@@ -1183,8 +1325,7 @@ def detect_nation_hint(text: str) -> Tuple[Optional[str], List[str]]:
 
 def detect_foreign_operator(text: str) -> List[str]:
     """Findet Betreiber/Programme, die keiner Zielnation zuzuordnen sind."""
-    upper = re.sub(r"\s+", " ", (text or "").upper())
-    return [op for op in FOREIGN_OPERATORS if op in upper]
+    return hint_hits(text, FOREIGN_OPERATORS)
 
 
 #: Q-Code aus der Q-Line, z.B. QRDCA in "ZLHW/QRDCA/IV/BO/W/000/999/...".
@@ -1192,6 +1333,18 @@ RE_QCODE = re.compile(r"\bQ([A-Z]{4})\b")
 
 #: Maximale Dauer, die noch als Startfenster gilt.
 LAUNCH_WINDOW_MAX_HOURS = 24.0
+
+#: Ab dieser Gesamtlaufzeit ohne taegliches Aktivierungsfenster ist eine Meldung
+#: keine Startankuendigung mehr, sondern eine Daueranordnung.
+#:
+#: Die Grenze ist an Messwerten gewaehlt, nicht geraten. Laengste belegte
+#: Startmeldung ohne Tagesfenster: eine NAVAREA-Warnung zu einem russischen
+#: Start mit 216 h. Laengste Startmeldung ueberhaupt: 403 h, aber mit
+#: Tagesfenster. Gegenbeispiel: eine japanische Anordnung zur Raketenabwehr
+#: ueber Okinawa mit 2192 h - sie nennt ROCKET und erreichte damit HIGH,
+#: obwohl sie keinen Start ankuendigt, sondern die Abwehr eines fremden.
+#: 720 h lassen ueber dem laengsten belegten Echtfall Faktor drei Luft.
+STANDING_ORDER_HOURS = 720.0
 
 
 def extract_qcode(items: Dict[str, str], text: str = "") -> str:
@@ -1204,8 +1357,37 @@ def extract_qcode(items: Dict[str, str], text: str = "") -> str:
     return "Q" + match.group(1)
 
 
-#: Taegliche Zeitfenster im D-Item, z.B. "DAILY 0900-2100" oder "24-28 1100-2100".
-RE_DAILY_WINDOW = re.compile(r"\b(\d{4})\s*-\s*(\d{4})\b")
+#: Taegliche Zeitfenster im D-Item, z.B. "DAILY 0900-2100", "24-28 1100-2100"
+#: oder "DLY BTN 1700/0400".
+#:
+#: Beide Trennzeichen kommen vor. Gemessen an der Echtdatei vom 18.09.2026:
+#: von 100 D-Items mit Tagesfenster nutzen 8 den Schraegstrich. Nur den
+#: Bindestrich zu lesen hiess, bei diesen acht kein Fenster zu finden - und
+#: ohne Fenster greift der Daueranordnungs-Deckel und stuft auf LOW zurueck.
+RE_DAILY_WINDOW = re.compile(r"\b(\d{4})\s*[-/]\s*(\d{4})\b")
+
+
+def daily_windows(d_item: Optional[str]) -> List[Tuple[int, int]]:
+    """
+    Alle taeglichen Aktivierungsfenster des D-Items als Minuten nach Mitternacht.
+
+    Ein Fenster ueber Mitternacht behaelt seine Endzeit kleiner als die
+    Startzeit ("1700/0400"); das muss die auswertende Stelle beruecksichtigen.
+    Ohne lesbares Fenster ist die Liste leer.
+    """
+    if not d_item:
+        return []
+    fenster: List[Tuple[int, int]] = []
+    for match in RE_DAILY_WINDOW.finditer(d_item.upper()):
+        try:
+            start_h, start_m = int(match.group(1)[:2]), int(match.group(1)[2:])
+            end_h, end_m = int(match.group(2)[:2]), int(match.group(2)[2:])
+        except ValueError:
+            continue
+        if start_h > 24 or end_h > 24 or start_m >= 60 or end_m >= 60:
+            continue
+        fenster.append((start_h * 60 + start_m, end_h * 60 + end_m))
+    return fenster
 
 
 def daily_window_hours(d_item: Optional[str]) -> Optional[float]:
@@ -1216,18 +1398,9 @@ def daily_window_hours(d_item: Optional[str]) -> Optional[float]:
     Stunden aktiv - fuer die Startsignatur zaehlt das tatsaechliche Fenster,
     nicht die Gesamtlaufzeit. Ohne D-Item ist das Ergebnis None.
     """
-    if not d_item:
-        return None
     longest: Optional[float] = None
-    for match in RE_DAILY_WINDOW.finditer(d_item.upper()):
-        try:
-            start_h, start_m = int(match.group(1)[:2]), int(match.group(1)[2:])
-            end_h, end_m = int(match.group(2)[:2]), int(match.group(2)[2:])
-        except ValueError:
-            continue
-        if start_h > 24 or end_h > 24 or start_m >= 60 or end_m >= 60:
-            continue
-        minutes = (end_h * 60 + end_m) - (start_h * 60 + start_m)
+    for start, end in daily_windows(d_item):
+        minutes = end - start
         if minutes <= 0:
             minutes += 24 * 60
         hours = minutes / 60.0
@@ -1292,7 +1465,41 @@ def has_launch_signature(
     return True, "Startsignatur: {} + SFC-UNL + Fenster {}".format(qcode, duration)
 
 
-CONFIDENCE_LEVELS = ("HOCH", "MITTEL", "NIEDRIG")
+CONFIDENCE_LEVELS = ("HIGH", "MEDIUM", "LOW")
+
+
+def exclusion_hits(text: str) -> List[str]:
+    """
+    Ausschlussbegriffe im Text - als Liste, nicht als fertiger Satz.
+
+    Der Aufrufer entscheidet, was er damit tut: das Scoring baut daraus eine
+    Begruendung, die Ausblende-Regel prueft nur, ob ueberhaupt einer da ist.
+    Beides auf denselben Satz zu stuetzen waere eine Verzweigung auf Prosa.
+    """
+    upper = re.sub(r"\s+", " ", (text or "").upper())
+    return [k.strip() for k in EXCLUSION_KEYWORDS if k in upper]
+
+
+def auto_hide_reason(level: str, text: str) -> str:
+    """
+    Begruendung, wenn ein NOTAM ohne Nachfrage ausgeblendet wird - sonst "".
+
+    Die Regel greift nur bei niedriger Konfidenz UND mindestens einem
+    Ausschlussbegriff. Die Konfidenzstufe ist dabei die Bremse: ein echtes
+    Start-NOTAM, in dem zufaellig BALLOON oder ALT RESERVATION auftaucht,
+    erreicht ueber Q-Code, SFC-UNL und kurzes Aktivierungsfenster trotzdem
+    MEDIUM oder HIGH und bleibt unangetastet. Der Ausschlussbegriff allein
+    haette diese Bremse nicht.
+
+    Ohne diese Regel landen an einem realen Tag 275 von 332 NOTAMs im Review;
+    rund 50 davon sind ADS-B-Dienste, Wetterballons und Amateurraketen.
+    """
+    if level != "LOW":
+        return ""
+    treffer = exclusion_hits(text)
+    if not treffer:
+        return ""
+    return "Low confidence with exclusion term(s): {}.".format(", ".join(treffer[:4]))
 
 
 def score_confidence(
@@ -1340,17 +1547,32 @@ def score_confidence(
         score += 3
         notes.append(signature_note)
 
-    blockers = [k for k in EXCLUSION_KEYWORDS if k in upper]
+    blockers = exclusion_hits(text)
     if blockers:
         score -= 4 * min(len(blockers), 2)
-        notes.append("Ausschlussbegriffe: {}".format(", ".join(b.strip() for b in blockers[:4])))
+        notes.append("Ausschlussbegriffe: {}".format(", ".join(blockers[:4])))
 
     if score >= 5:
-        level = "HOCH"
+        level = "HIGH"
     elif score >= 3:
-        level = "MITTEL"
+        level = "MEDIUM"
     else:
-        level = "NIEDRIG"
+        level = "LOW"
+
+    # Eine Meldung, die wochenlang durchgehend gilt, kuendigt keinen Start an.
+    # Das Scoring allein faengt das nicht: ein einziges starkes Stichwort wie
+    # ROCKET genuegt fuer HIGH, auch wenn die Meldung 91 Tage laeuft. Der
+    # Deckel greift nur ohne taegliches Fenster - mehrtaegige Startwarnungen
+    # (NAVAREA, australische und neuseelaendische Meldungen) bleiben unberuehrt.
+    if valid_from and valid_to:
+        dauer = (valid_to - valid_from).total_seconds() / 3600.0
+        taeglich = daily_window_hours((items or {}).get("D"))
+        if dauer > STANDING_ORDER_HOURS and not taeglich:
+            level = "LOW"
+            notes.append(
+                "Daueranordnung: {:.0f} Tage durchgehend gueltig, kein "
+                "taegliches Fenster".format(dauer / 24.0)
+            )
     return score, level, notes
 
 
@@ -1399,7 +1621,7 @@ def _read_csv_any(source: Any) -> pd.DataFrame:
             )
         except Exception as exc:  # pragma: no cover - Formatvielfalt
             last_error = exc
-    raise ValueError("CSV konnte nicht gelesen werden: {}".format(last_error))
+    raise ValueError("Could not read CSV: {}".format(last_error))
 
 
 def _looks_like_header(row: pd.Series) -> bool:
@@ -1447,7 +1669,7 @@ def read_notam_table(source: Any, filename: str = "") -> pd.DataFrame:
             raw = pd.read_excel(io.BytesIO(raw_bytes), dtype=str, header=None, engine=engine)
         except ImportError as exc:
             raise ValueError(
-                "Fuer {}-Dateien wird das Paket '{}' benoetigt: pip install {}".format(
+                "{} files need the '{}' package: pip install {}".format(
                     name.rsplit(".", 1)[-1], engine, engine
                 )
             ) from exc
@@ -1509,6 +1731,146 @@ def load_vehicles(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+#: Kein Traegersystem zugewiesen.
+VEHICLE_NONE = ""
+#: Trennzeile im Dropdown - waehlbar, aber ohne Wirkung (siehe _on_vehicle_change).
+VEHICLE_SEPARATOR = "__andere_nationen__"
+#: Zwei NOTAMs desselben Starts tragen verschiedene Angaben.
+MIXED_VALUE = "mixed"
+#: Beschriftung des leeren Eintrags.
+VEHICLE_NONE_LABEL = "none"
+
+
+def vehicle_label(
+    code: str, vehicles: Optional[pd.DataFrame] = None, with_nation: bool = False
+) -> str:
+    """
+    Beschriftung eines Traegersystems fuer Dropdown und Tabelle.
+
+    Ohne Referenztabelle bleibt der gespeicherte Kuerzel-Code stehen. Steht ein
+    zugewiesener Code nicht mehr in der Referenz - weil er im Optionsmenue
+    entfernt wurde -, wird das ausgewiesen statt die Zuweisung stillschweigend
+    fallen zu lassen.
+    """
+    if code == VEHICLE_SEPARATOR:
+        return "\u2500" * 8 + " other nations " + "\u2500" * 8
+    if not code:
+        return VEHICLE_NONE_LABEL
+    if code == MIXED_VALUE:
+        return MIXED_VALUE
+    if vehicles is None or vehicles.empty:
+        return code
+    treffer = vehicles[vehicles["Abk\u00fcrzung"].astype(str) == str(code)]
+    if treffer.empty:
+        return "{} (no longer in the reference)".format(code)
+    zeile = treffer.iloc[0]
+    text = "{} ({})".format(zeile["Name"], code)
+    if with_nation:
+        text = "{} \u00b7 {}".format(text, zeile["Land"])
+    return text
+
+
+def vehicle_nation(event: "LaunchEvent") -> Optional[str]:
+    """
+    Nation, nach der das Dropdown gestaffelt wird.
+
+    Die festgestellte Startnation zuerst. Steht sie nicht fest - im Review der
+    Regelfall, weil ohne Koordinaten keine Zuordnung moeglich ist -, dienen
+    Textbeleg und FIR als Behelf, aber nur wenn sie auf eine Zielnation zeigen.
+    Das ist allein eine Sortierhilfe und praejudiziert die Zuordnung nicht.
+    """
+    for kandidat in (event.nation, event.nation_hint, event.fir_country):
+        if kandidat and kandidat in TARGET_NATIONS:
+            return kandidat
+    return None
+
+
+def vehicle_options(vehicles: pd.DataFrame, nation: Optional[str]) -> List[str]:
+    """
+    Auswahlliste fuer das Dropdown: erst die Traeger der erkannten Nation,
+    darunter durch eine Trennzeile abgesetzt alle uebrigen.
+
+    Eine harte Filterung nach Nation waere falsch: im Review korrigiert man
+    gerade eine moeglicherweise falsche Zuordnung und braucht dort die volle
+    Liste.
+    """
+    if vehicles is None or vehicles.empty:
+        return [VEHICLE_NONE]
+    codes = [str(c) for c in vehicles["Abk\u00fcrzung"]]
+    laender = [str(l) for l in vehicles["Land"]]
+    eigene = [c for c, land in zip(codes, laender) if nation and land == nation]
+    andere = [c for c, land in zip(codes, laender) if not (nation and land == nation)]
+    optionen = [VEHICLE_NONE] + eigene
+    if eigene and andere:
+        optionen.append(VEHICLE_SEPARATOR)
+    return optionen + andere
+
+
+def apply_manual_attribute(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    assignments: Dict[str, str],
+    attribut: str,
+) -> None:
+    """
+    Traegt eine von Hand gesetzte Angabe in Events und Starts ein.
+
+    Gespeichert wird je NOTAM, weil dessen Schluessel ueber Sitzungen hinweg
+    stabil ist - die Start-Kennung (START-01) ist es nicht. Gehoeren mehrere
+    NOTAMs zu einem erkannten Start, gilt die Angabe fuer den ganzen Start und
+    wird auf die uebrigen Sperrzonen uebertragen. Widersprechen sich zwei
+    gespeicherte Angaben - moeglich, wenn eine spaetere Gruppierung zwei zuvor
+    getrennte Starts zusammenfasst -, behaelt jedes NOTAM seine eigene und der
+    Start wird als uneinheitlich ausgewiesen.
+
+    Traegersystem und Nutzlast verhalten sich hier gleich; sie unterscheiden
+    sich nur in der Eingabe (Auswahlliste gegen Freitext).
+    """
+    for event in events:
+        setattr(event, attribut, str(assignments.get(event.key, "") or ""))
+    per_row = {e.row_index: e for e in events}
+    for group in groups:
+        # Vorankuendigungen gehoeren zum Start, auch wenn sie nicht als Zone
+        # zaehlen: wer das Traegersystem auf deren Zeile waehlt, meint denselben
+        # Start, und umgekehrt muss die Angabe sie erreichen.
+        mitglieder = [
+            per_row[r]
+            for r in list(group.row_indices) + list(group.advance_row_indices)
+            if r in per_row
+        ]
+        gesetzt: List[str] = []
+        for m in mitglieder:
+            wert = getattr(m, attribut)
+            if wert and wert not in gesetzt:
+                gesetzt.append(wert)
+        if not gesetzt:
+            setattr(group, attribut, "")
+        elif len(gesetzt) == 1:
+            setattr(group, attribut, gesetzt[0])
+            for m in mitglieder:
+                setattr(m, attribut, gesetzt[0])
+        else:
+            setattr(group, attribut, MIXED_VALUE)
+
+
+def apply_vehicle_assignments(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    assignments: Dict[str, str],
+) -> None:
+    """Manuell gewaehlte Traegersysteme uebernehmen."""
+    apply_manual_attribute(events, groups, assignments, "vehicle")
+
+
+def apply_payload_assignments(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    assignments: Dict[str, str],
+) -> None:
+    """Manuell eingetragene Nutzlasten uebernehmen."""
+    apply_manual_attribute(events, groups, assignments, "payload")
+
+
 @st.cache_data(show_spinner=False)
 def load_spaceports(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
     # mtime gehoert zum Cache-Schluessel: wird die Referenzdatei gepflegt,
@@ -1535,6 +1897,12 @@ def load_firs(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
 
 #: Arbeitsstand der Sitzung: manuelle NOTAMs, Bestaetigungen, Ausblendungen.
 WORKSPACE_FILE = APP_DIR / "notam_workspace.json"
+#: Archiv der erkannten Starts - anders als die drei Referenzen oben wird diese
+#: Datei nicht eingelesen, sondern von der Anwendung selbst fortgeschrieben.
+ARCHIVE_CSV = APP_DIR / "startarchiv_updated.csv"
+#: Protokoll der Starts von beweglichen Seeplattformen. Wie das Archiv von der
+#: Anwendung geschrieben, nicht eingelesen.
+SEA_LAUNCH_CSV = APP_DIR / "seestarts_updated.csv"
 
 #: Wie viele Schritte im Optionsmenue rueckgaengig gemacht werden koennen.
 UNDO_LIMIT = 20
@@ -1567,6 +1935,11 @@ def save_workspace(
     confirmed: Sequence[str],
     hidden: Sequence[str],
     rejected: Sequence[str] = (),
+    vehicle_assignments: Optional[Dict[str, str]] = None,
+    payload_assignments: Optional[Dict[str, str]] = None,
+    archiv_removed: Sequence[str] = (),
+    restored: Sequence[str] = (),
+    seestarts_removed: Sequence[str] = (),
 ) -> None:
     """Schreibt den Arbeitsstand in die Projektdatei."""
     try:
@@ -1578,6 +1951,19 @@ def save_workspace(
                     "confirmed_launches": sorted(confirmed),
                     "hidden_events": sorted(hidden),
                     "rejected_launches": sorted(rejected),
+                    "vehicle_assignments": {
+                        k: v
+                        for k, v in sorted((vehicle_assignments or {}).items())
+                        if v
+                    },
+                    "payload_assignments": {
+                        k: v
+                        for k, v in sorted((payload_assignments or {}).items())
+                        if v
+                    },
+                    "archiv_removed": sorted(archiv_removed),
+                    "restored_events": sorted(restored),
+                    "seestarts_removed": sorted(seestarts_removed),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -1742,10 +2128,10 @@ class LaunchEvent:
     distance_km: Optional[float] = None
     azimuth_deg: Optional[float] = None
     inclination_deg: Optional[float] = None
-    orbit_type: str = "Unbestimmt"
+    orbit_type: str = ORBIT_UNKNOWN
     altitude_profile: str = "-"
     confidence_score: int = 0
-    confidence_level: str = "NIEDRIG"
+    confidence_level: str = "LOW"
     confidence_notes: List[str] = field(default_factory=list)
     assignment_note: str = ""
     candidate_nations: List[str] = field(default_factory=list)
@@ -1764,6 +2150,9 @@ class LaunchEvent:
     valid_to: Optional[datetime] = None
     status: str = "OK"
     review_reason: str = ""
+    auto_hidden_reason: str = ""
+    vehicle: str = ""
+    payload: str = ""
 
     @property
     def launch_window(self) -> str:
@@ -1778,6 +2167,62 @@ class LaunchEvent:
 
 
 MAX_FIR_FALLBACK_KM = 1500.0
+
+#: Bis zu dieser Entfernung gilt eine geratene FIR als Beleg dafuer, dass die
+#: Zone im Luftraum dieser Nation liegt.
+#:
+#: Die Referenz kennt keine FIR-Grenzen, nur den Sitz der Bezirkszentrale.
+#: Naehe ist damit ein Behelf - aber ein brauchbarer, solange er eng bleibt.
+#: Gemessen: eine Zone im Suedchinesischen Meer liegt 213 km von Sanya, die
+#: US-Inlandsfaelle der Echtdatei 477-541 km von ihrer Zentrale. Eine Zone
+#: ueber Nicaragua liegt 1460 km von Miami und wurde bisher als US-Luftraum
+#: gewertet - daraus wurde ein Start von Cape Canaveral. 800 km liegen
+#: oberhalb aller belegten Echtfaelle und deutlich unter dem Fehlfall.
+#:
+#: Darueber hinaus wird die FIR weiterhin gefunden und angezeigt, sie belegt
+#: dann aber keine Staatszugehoerigkeit mehr.
+FIR_OWN_AIRSPACE_KM = 800.0
+
+#: Wie eine FIR zugeordnet wurde. Feste Marken, keine Prosa: der weitere Ablauf
+#: verzweigt danach, und ein uebersetzter Satz haette diese Verzweigung still
+#: ausgehebelt. Der Anzeigetext steht getrennt in FIR_METHOD_LABELS.
+FIR_BY_ICAO = "icao"
+FIR_BY_TEXT = "text"
+FIR_BY_GEOMETRY = "geo"
+FIR_OUTSIDE = "outside"
+FIR_TOO_FAR = "too_far"
+FIR_NONE = "-"
+
+FIR_METHOD_LABELS = {
+    FIR_BY_ICAO: "ICAO code",
+    FIR_BY_TEXT: "named in the text",
+    FIR_BY_GEOMETRY: "nearest FIR",
+    FIR_NONE: "-",
+}
+
+
+def fir_method_label(method: str, detail: str = "") -> str:
+    """Anzeigetext zu einer Zuordnungsmarke."""
+    if method == FIR_OUTSIDE:
+        return "outside the target nations ({})".format(detail) if detail else "outside"
+    if method == FIR_TOO_FAR:
+        return "too far from any target FIR ({})".format(detail) if detail else "too far"
+    return FIR_METHOD_LABELS.get(method, method)
+
+
+#: US-Bezirkszentralen tragen dreibuchstabige Kennungen (ZLA, ZOA, ZAB ...),
+#: keine vierbuchstabigen ICAO-Codes. RE_ICAO verlangt genau vier Buchstaben -
+#: damit waren 21 Zeilen der FIR-Referenz ueber den expliziten Weg nie
+#: erreichbar, und jedes US-Inlands-NOTAM fiel still auf die Geometrie zurueck.
+#: Das Muster bleibt eng: nur Z plus zwei Buchstaben, damit nicht jedes
+#: dreibuchstabige Wort im Freitext (ACT, SFC, UNL, GND) als Luftraum gilt.
+RE_ARTCC = re.compile(r"\bZ[A-Z]{2}\b")
+
+
+def _luftraum_kennungen(text: str) -> List[str]:
+    """Explizit genannte Luftraum-Kennungen: vierstellige ICAO plus US-ARTCC."""
+    upper = (text or "").upper()
+    return RE_ICAO.findall(upper) + RE_ARTCC.findall(upper)
 
 
 def _find_fir(
@@ -1797,22 +2242,22 @@ def _find_fir(
 
     explicit: List[str] = []
     if fir_hint is not None and pd.notna(fir_hint):
-        explicit += RE_ICAO.findall(str(fir_hint).upper())
+        explicit += _luftraum_kennungen(str(fir_hint))
     if items.get("A"):
-        explicit += RE_ICAO.findall(items["A"].upper())
+        explicit += _luftraum_kennungen(items["A"])
     q_line = items.get("Q", "")
     if q_line:
-        explicit += RE_ICAO.findall(q_line.upper().split("/")[0])
+        explicit += _luftraum_kennungen(q_line.split("/")[0])
 
     for code in explicit:
         if code in known:
-            return firs.loc[known[code]], "ICAO-Code"
+            return firs.loc[known[code]], FIR_BY_ICAO
     if explicit:
-        return None, "Ausserhalb: {}".format(explicit[0])
+        return None, "{}:{}".format(FIR_OUTSIDE, explicit[0])
 
-    for code in RE_ICAO.findall((text or "").upper()):
+    for code in _luftraum_kennungen(text or ""):
         if code in known:
-            return firs.loc[known[code]], "Text"
+            return firs.loc[known[code]], FIR_BY_TEXT
 
     if centroid is not None and len(firs):
         distances = firs.apply(
@@ -1820,8 +2265,8 @@ def _find_fir(
             axis=1,
         )
         if distances.min() <= MAX_FIR_FALLBACK_KM:
-            return firs.loc[distances.idxmin()], "Geographisch (naechste FIR)"
-        return None, "Zu weit von jeder Ziel-FIR ({:.0f} km)".format(distances.min())
+            return firs.loc[distances.idxmin()], FIR_BY_GEOMETRY
+        return None, "{}:{:.0f} km".format(FIR_TOO_FAR, distances.min())
 
     return None, "-"
 
@@ -1903,8 +2348,8 @@ def _find_spaceport(
         if nearest[2] != best[2]:
             skipped = candidates.loc[nearest[2]]
             note = (
-                "{} liegt naeher ({:.0f} km), ergaebe aber Azimut {:.0f}° "
-                "(Start nach Westen) - verworfen.".format(
+                "{} is closer ({:.0f} km) but would imply azimuth {:.0f}° "
+                "(westward launch) - rejected.".format(
                     skipped["Kurzel"], nearest[0], nearest[1]
                 )
             )
@@ -1940,12 +2385,12 @@ def zone_reliability(
     if distance_km is None:
         return "-"
     if kind == KIND_REENTRY or spread_deg > MEANINGLESS_SPREAD_DEG:
-        return "gering"
+        return RELIABILITY_LOW
     if distance_km <= NEAR_ZONE_KM:
-        return "hoch"
+        return RELIABILITY_HIGH
     if distance_km <= FAR_ZONE_KM:
-        return "mittel"
-    return "gering"
+        return RELIABILITY_MEDIUM
+    return RELIABILITY_LOW
 
 #: Zwei NOTAMs gehoeren zum selben Start, wenn ihre Aktivierungszeiten hoechstens
 #: so weit auseinanderliegen. Reale Dropzone-NOTAMs eines Starts werden im Abstand
@@ -2067,18 +2512,39 @@ class LaunchGroup:
     azimuth_deg: Optional[float] = None
     azimuth_spread_deg: float = 0.0
     inclination_deg: Optional[float] = None
-    orbit_type: str = "Unbestimmt"
+    orbit_type: str = ORBIT_UNKNOWN
     max_range_km: Optional[float] = None
     window_from: Optional[datetime] = None
     window_to: Optional[datetime] = None
-    confidence_level: str = "NIEDRIG"
+    confidence_level: str = "LOW"
     reliability: str = "-"
     kind: str = KIND_LAUNCH
     manual_override: bool = False
+    vehicle: str = ""
+    payload: str = ""
+    #: Startpunkt aus der Geometrie abgeleitet statt aus der Referenz genommen.
+    site_from_geometry: bool = False
+    #: Meldungen, die denselben Luftraum vor dem Starttag reserviert haben.
+    #: Sie zaehlen nicht als Sperrzonen: es ist dieselbe Flaeche, nicht eine
+    #: weitere. Bahn, Streuung und Startplatz bleiben davon unberuehrt.
+    advance_notam_ids: List[str] = field(default_factory=list)
+    #: Deren Tabellenzeilen. Getrennt von row_indices, weil zone_count daraus
+    #: zaehlt - in die Zonenzahl gehoeren sie nicht, in die startweite
+    #: Zuweisung von Traegersystem und Nutzlast aber doch.
+    advance_row_indices: List[int] = field(default_factory=list)
+    #: Frueheste Gueltigkeit dieser Meldungen.
+    advance_from: Optional[datetime] = None
 
     @property
     def zone_count(self) -> int:
         return len(self.row_indices)
+
+    @property
+    def advance_notice_hours(self) -> Optional[float]:
+        """Vorlauf zwischen der Ankuendigung und dem Startfenster, in Stunden."""
+        if self.advance_from is None or self.window_from is None:
+            return None
+        return (self.window_from - self.advance_from).total_seconds() / 3600.0
 
     @property
     def launch_window(self) -> str:
@@ -2220,6 +2686,16 @@ def _split_cluster(
     if selection is not None and selection[1] <= LAUNCH_GROUP_MAX_SPREAD_DEG:
         return [events]
 
+    # Seestart: ergibt der Cluster von einem abgeleiteten Startpunkt aus eine
+    # schluessige Bahn, darf er nicht zerlegt werden. Sonst entfernt der
+    # Splitter genau das NOTAM, das den Startpunkt beschreibt - gemessen am
+    # chinesischen Fall vom 22.07.2026: von der Plattform aus 3,5 Grad
+    # Streuung, vom naechsten verzeichneten Platz aus 19 Grad. Der Splitter
+    # sah nur die 19 und warf die Plattform hinaus.
+    abgeleitet = derive_launch_point(events, spaceports)
+    if abgeleitet is not None and abgeleitet[3] <= SEA_LAUNCH_MAX_SPREAD_DEG:
+        return [events]
+
     best_index: Optional[int] = None
     best_spread = float("inf")
     for i in range(len(events)):
@@ -2282,13 +2758,400 @@ def group_launches(
                 event.launch_group = group.group_id
                 if len(subcluster) > 1:
                     event.assignment_note = (
-                        "Gemeinsame Bahn mit {} weiteren NOTAM(s) desselben Starts "
-                        "({}, Azimut-Streuung {:.1f}°).".format(
+                        "Shared track with {} further NOTAM(s) of the same launch "
+                        "({}, azimuth spread {:.1f}°).".format(
                             len(subcluster) - 1, group.group_id, group.azimuth_spread_deg
                         )
                     )
             groups.append(group)
     return groups
+
+
+# --- Vorankuendigungen ------------------------------------------------------
+#
+# Vor einem Start wird derselbe Luftraum oft Tage vorher reserviert: eine
+# mehrtaegige Meldung mit taeglichem Fenster, dann am Starttag eine kurze
+# Meldung fuer dieselbe Flaeche. Beide beschreiben eine Aktivitaet, nicht zwei.
+#
+# Gepaart wird nicht ueber den Text, sondern ueber Geometrie und Zeit. Der Text
+# hilft hier nicht: die Vorankuendigungen des chinesischen Seestarts vom
+# 22.07.2026 sind in taiwanesischem und japanischem Luftraum veroeffentlicht,
+# nennen weder China noch einen Startplatz, und landeten deshalb zu Recht im
+# Review - die Drittstaaten-Regel laesst keine geratene Nation zu.
+#
+# Gemessen an genau diesem Fall:
+#   Vorankuendigung Taiwan <-> Starttag Taiwan     0,91 km   Zonen 44 / 45 km
+#   Vorankuendigung Japan  <-> Starttag Japan      1,20 km   Zonen 52 / 52 km
+#   naechster Nicht-Treffer                      328,44 km
+# Die Mittelpunkte liegen auf zwei Prozent des Zonenradius zusammen. Das ist
+# kein Zufall, sondern dieselbe im Text ausbuchstabierte Flaeche.
+
+#: Zulaessiger Versatz der Zonenmittelpunkte, als Anteil der kleineren Zone.
+#: Relativ, nicht absolut: eine 500-km-Dropzone vertraegt mehr Versatz als ein
+#: 20-km-Kreis. Ein fester Kilometerwert waere dem einen zu eng, dem anderen
+#: zu weit. 0,25 laesst dem Messfall (0,02) Faktor zwoelf Luft.
+ADVANCE_ZONE_OFFSET_SHARE = 0.25
+
+#: So aehnlich gross muessen die Zonen sein. Haelt die kleinere nicht mindestens
+#: diesen Anteil der groesseren, beschreiben sie nicht dieselbe Flaeche - ein
+#: 20-km-Startkreis mitten in einer 500-km-Dropzone ist keine Paarung.
+ADVANCE_ZONE_SIZE_SHARE = 0.6
+
+#: So viel laenger muss die Ankuendigung laufen als das Fenster, das sie
+#: ankuendigt. Ohne diesen Abstand wuerde eine zweite kurze Meldung desselben
+#: Starts als dessen eigene Vorankuendigung gelten. Im Messfall: Faktor 240.
+ADVANCE_MIN_DURATION_FACTOR = 4.0
+
+#: Und mindestens so lange. Was nur Stunden vorher kommt, kuendigt nichts an,
+#: sondern gehoert zum Starttag - und wird schon von der Zeitgruppierung erfasst.
+ADVANCE_MIN_DURATION_HOURS = 24.0
+
+
+def event_zone_shapes(
+    event: "LaunchEvent",
+) -> List[Tuple[float, float, float]]:
+    """
+    Mittelpunkt und Ausdehnung jeder Zone eines NOTAMs, in Kilometern.
+
+    Die Ausdehnung ist der weiteste Eckpunkt vom Mittelpunkt. Ein Kreis-NOTAM
+    hat nur einen Punkt und damit die Ausdehnung null - dort steht der Radius
+    im Text und wird eingesetzt.
+    """
+    formen: List[Tuple[float, float, float]] = []
+    for zone in event.zones:
+        if not zone:
+            continue
+        lat, lon = polygon_centroid(zone)
+        weite = max(
+            (surface_distance_km(lat, lon, p[0], p[1]) for p in zone), default=0.0
+        )
+        if weite < 1e-6 and event.radius_km:
+            weite = float(event.radius_km)
+        formen.append((lat, lon, weite))
+    return formen
+
+
+def zones_congruent(
+    a: Tuple[float, float, float], b: Tuple[float, float, float]
+) -> bool:
+    """Beschreiben zwei Zonen dieselbe Flaeche?"""
+    klein, gross = sorted((a[2], b[2]))
+    if gross <= 0.0 or klein < gross * ADVANCE_ZONE_SIZE_SHARE:
+        return False
+    return surface_distance_km(a[0], a[1], b[0], b[1]) <= klein * ADVANCE_ZONE_OFFSET_SHARE
+
+
+def window_within_daily(
+    von: Optional[datetime], bis: Optional[datetime], d_item: Optional[str]
+) -> bool:
+    """
+    Liegt ein Startfenster innerhalb eines taeglichen Fensters des D-Items?
+
+    Nennt das D-Item kein lesbares Fenster, schraenkt es nichts ein und die
+    Antwort ist True - die Pruefung faellt dann auf die uebrigen Bedingungen
+    zurueck. Fenster ueber Mitternacht werden auf einer Zweitageslinie
+    verglichen, damit "DLY BTN 1700/0400" ein Fenster um 02:45 einschliesst.
+    """
+    fenster = daily_windows(d_item)
+    if not fenster:
+        return True
+    if von is None or bis is None:
+        return False
+    tag = 24 * 60
+    start = von.hour * 60 + von.minute
+    ende = bis.hour * 60 + bis.minute
+    if ende < start:
+        ende += tag
+    for f_start, f_ende in fenster:
+        if f_ende <= f_start:
+            f_ende += tag
+        for versatz in (0, tag):
+            if f_start <= start + versatz and ende + versatz <= f_ende:
+                return True
+    return False
+
+
+def is_advance_announcement(
+    event: "LaunchEvent",
+    group: "LaunchGroup",
+    group_shapes: Sequence[Tuple[float, float, float]],
+) -> bool:
+    """
+    Kuendigt dieses NOTAM den Start dieser Gruppe voraus an?
+
+    Sechs Bedingungen, alle sprachfrei, alle muessen zutreffen:
+
+    1. Die Nation des Starts muss unter den Kandidaten der Meldung sein. Die
+       Paarung darf die Drittstaaten-Regel nicht aushebeln, sondern nur das
+       tun, was Gruppierung auch sonst tut: eine zulaessige Kandidatin belegen.
+    2. Die Meldung laeuft mindestens einen Tag.
+    3. ... und ein Mehrfaches des Startfensters, das sie ankuendigt.
+    4. Das Startfenster liegt vollstaendig in ihrer Laufzeit.
+    5. Nennt sie ein taegliches Fenster, liegt das Startfenster darin.
+    6. Mindestens eine ihrer Zonen ist deckungsgleich mit einer Zone des Starts.
+    """
+    if group.window_from is None or event.valid_from is None or event.valid_to is None:
+        return False
+    if group.nation and group.nation not in event.candidate_nations:
+        return False
+
+    dauer = _duration_hours(event)
+    if dauer < ADVANCE_MIN_DURATION_HOURS:
+        return False
+    bis = group.window_to or group.window_from
+    fenster_h = (bis - group.window_from).total_seconds() / 3600.0
+    if dauer < max(fenster_h, 0.0) * ADVANCE_MIN_DURATION_FACTOR:
+        return False
+
+    if not (event.valid_from <= group.window_from and bis <= event.valid_to):
+        return False
+    if not window_within_daily(
+        group.window_from, bis, extract_items(event.raw_text).get("D")
+    ):
+        return False
+
+    return any(
+        zones_congruent(eigen, fremd)
+        for eigen in event_zone_shapes(event)
+        for fremd in group_shapes
+    )
+
+
+def pair_advance_announcements(
+    events: Sequence["LaunchEvent"], groups: Sequence["LaunchGroup"]
+) -> List["LaunchEvent"]:
+    """
+    Haengt Vorankuendigungen an den Start, den sie ankuendigen.
+
+    Laeuft nach der Gruppierung und aendert an ihr nichts: die angekuendigte
+    Flaeche ist dieselbe wie die Sperrzone am Starttag, also waere sie als
+    zusaetzliche Zone eine Doppelzaehlung. Startplatz, Azimut, Streuung und
+    Zonenzahl des Starts bleiben unberuehrt; die Meldung erhaelt die Nation und
+    den Startplatz der Gruppe und verlaesst damit das Review.
+
+    Eindeutigkeit ist Bedingung: passt eine Meldung auf zwei Starts, bleibt sie
+    liegen. Eine falsche Zuordnung waegt in diesem Programm schwerer als ein
+    Fall mehr zur Durchsicht.
+
+    Automatisch ausgeblendete Meldungen bleiben ausgeblendet - diese Liste ist
+    die Kuration des Benutzers, nicht ein Zwischenergebnis.
+    """
+    starts = [g for g in groups if g.spaceport_code and g.window_from is not None]
+    if not starts:
+        return []
+
+    formen: Dict[str, List[Tuple[float, float, float]]] = {g.group_id: [] for g in starts}
+    for event in events:
+        if event.launch_group in formen:
+            formen[event.launch_group].extend(event_zone_shapes(event))
+
+    gepaart: List["LaunchEvent"] = []
+    for event in events:
+        if event.launch_group or event.status != "REVIEW":
+            continue
+        if event.auto_hidden_reason or not event.zones:
+            continue
+        treffer = [
+            g for g in starts if is_advance_announcement(event, g, formen[g.group_id])
+        ]
+        if len(treffer) != 1:
+            continue
+
+        group = treffer[0]
+        event.launch_group = group.group_id
+        event.status = "OK"
+        event.kind = KIND_ADVANCE
+        event.nation = event.nation or group.nation
+        event.spaceport_code = group.spaceport_code
+        event.spaceport_name = group.spaceport_name
+        event.spaceport_lat = group.spaceport_lat
+        event.spaceport_lon = group.spaceport_lon
+        event.review_reason = ""
+        event.requires_group = False
+        vorlauf = (group.window_from - event.valid_from).total_seconds() / 3600.0
+        event.assignment_note = (
+            "Advance notice for {}: the same airspace was already reserved "
+            "{:.0f} h before the launch window ({}).".format(
+                group.group_id, vorlauf, event.launch_window
+            )
+        )
+        group.advance_notam_ids.append(event.notam_id)
+        group.advance_row_indices.append(event.row_index)
+        if group.advance_from is None or event.valid_from < group.advance_from:
+            group.advance_from = event.valid_from
+        gepaart.append(event)
+    return gepaart
+
+
+#: Ein Startpunkt-Kreis ist klein: die Sperrzone um eine Startplattform misst
+#: wenige Dutzend Kilometer. Eine Dropzone ist deutlich groesser.
+SEA_LAUNCH_MAX_RADIUS_KM = 60.0
+
+#: So eng muessen die uebrigen Zonen von diesem Punkt aus beieinanderliegen,
+#: damit sie eine gemeinsame Bahn beschreiben.
+SEA_LAUNCH_MAX_SPREAD_DEG = 15.0
+
+#: Erst ab diesem Abstand zum naechsten bekannten Startplatz wird ueberhaupt
+#: abgeleitet. Darunter erklaert die Referenz den Start besser als eine
+#: Schaetzung aus drei Zonen.
+SEA_LAUNCH_MIN_SITE_DISTANCE_KM = 150.0
+
+#: Zonen naeher als das gelten als Teil des Startgebiets, nicht als Ziel einer
+#: Bahn - ihr Azimut waere Rauschen.
+SEA_LAUNCH_MIN_ZONE_DISTANCE_KM = 50.0
+
+#: Um so viel besser muss die abgeleitete Bahn sein, damit sie die Referenz
+#: schlaegt. Ohne diesen Abstand wuerde schon Messrauschen den Startplatz
+#: austauschen.
+SEA_LAUNCH_SPREAD_MARGIN_DEG = 5.0
+
+
+def sea_launch_code(lat: float, lon: float) -> str:
+    """
+    Kennung eines abgeleiteten Startpunkts, z.B. SEA-31N124E.
+
+    Die Position steckt in der Kennung, damit kein Verzeichnis gepflegt werden
+    muss und zwei Starts von derselben Stelle dieselbe Kennung bekommen.
+    """
+    return "SEA-{:.0f}{}{:.0f}{}".format(
+        abs(lat), "N" if lat >= 0 else "S", abs(lon), "E" if lon >= 0 else "W"
+    )
+
+
+def cluster_zone_points(
+    cluster: Sequence["LaunchEvent"],
+) -> List[Tuple[float, float, "LaunchEvent"]]:
+    """
+    Alle Zonenmittelpunkte eines Clusters - nicht einer je NOTAM.
+
+    Ein NOTAM kann mehrere getrennte Gebiete beschreiben; sein Gesamtzentroid
+    liegt dann zwischen ihnen und beschreibt keinen Ort. Fuer die Geometrie
+    zaehlt jede Zone fuer sich.
+    """
+    punkte: List[Tuple[float, float, "LaunchEvent"]] = []
+    for event in cluster:
+        if event.zones:
+            for zone in event.zones:
+                lat, lon = polygon_centroid(zone)
+                punkte.append((lat, lon, event))
+        elif event.centroid_lat is not None and event.centroid_lon is not None:
+            punkte.append((event.centroid_lat, event.centroid_lon, event))
+    return punkte
+
+
+def derive_launch_point(
+    cluster: Sequence["LaunchEvent"], spaceports: pd.DataFrame
+) -> Optional[Tuple[float, float, float, float, "LaunchEvent"]]:
+    """
+    Leitet den Startpunkt aus der Geometrie des NOTAM-Satzes ab.
+
+    Fuer Starts von beweglichen Seeplattformen versagt die Referenz
+    grundsaetzlich: Die Plattform steht nicht, wo die Tabelle sie vermutet.
+    Beobachtet wurde ein chinesischer Start, dessen Sperrzonen vom tatsaechlichen
+    Startpunkt aus eine Streuung von 3,3 Grad ergaben - vom naechsten
+    verzeichneten Platz aus, 473 km entfernt, dagegen 19 Grad.
+
+    Die Ableitung nutzt genau diesen Unterschied: Eine der Zonen ist der
+    Startpunkt, und von ihr aus reihen sich die uebrigen auf einer Bahn.
+    Zuerst werden kreisfoermige Zonen geprueft - eine Plattformsperrung ist ein
+    kleiner Kreis -, danach als Auffangnetz jede Zone des Clusters.
+
+    Rueckgabe: (Breite, Laenge, mittlerer Azimut, Streuung, Ursprungs-NOTAM)
+    oder None.
+    """
+    punkte = cluster_zone_points(cluster)
+    if len(punkte) < 3:
+        return None
+
+    kreise = [
+        p for p in punkte
+        if p[2].radius_km is not None and p[2].radius_km <= SEA_LAUNCH_MAX_RADIUS_KM
+    ]
+    bester: Optional[Tuple[float, float, float, float, "LaunchEvent"]] = None
+    for kandidaten in (kreise, punkte):
+        for lat, lon, ursprung in kandidaten:
+            ziele = [
+                (zl, zo) for zl, zo, _ in punkte
+                if surface_distance_km(lat, lon, zl, zo) >= SEA_LAUNCH_MIN_ZONE_DISTANCE_KM
+            ]
+            if len(ziele) < 2:
+                continue
+            azimute = [initial_bearing_deg(lat, lon, zl, zo) for zl, zo in ziele]
+            streuung = _angular_spread(azimute)
+            mittel = _circular_mean(azimute)
+            low, high = IMPLAUSIBLE_AZIMUTH_SECTOR
+            if low <= mittel <= high:
+                continue
+            if bester is None or streuung < bester[3]:
+                bester = (lat, lon, mittel, streuung, ursprung)
+        if bester is not None:
+            break
+
+    if bester is None or bester[3] > SEA_LAUNCH_MAX_SPREAD_DEG:
+        return None
+
+    # Nur dort ableiten, wo die Referenz ohnehin nichts Besseres weiss.
+    if len(spaceports):
+        abstand = spaceports.apply(
+            lambda r: haversine_km(bester[0], bester[1], r["Latitude"], r["Longitude"]),
+            axis=1,
+        ).min()
+        if abstand < SEA_LAUNCH_MIN_SITE_DISTANCE_KM:
+            return None
+    return bester
+
+
+def _derived_port(
+    abgeleitet: Tuple[float, float, float, float, "LaunchEvent"],
+    cluster: Sequence["LaunchEvent"],
+    nations: Sequence[str],
+) -> Optional[Tuple[pd.Series, float, List[float], List[float]]]:
+    """
+    Baut aus einem abgeleiteten Startpunkt einen Startplatz-Datensatz.
+
+    Die Nation kommt aus dem Luftraum des Ursprungs-NOTAMs, nicht aus der
+    Geometrie: Beim beobachteten Fall liegt der Startpunkt in chinesischer FIR,
+    waehrend die Dropzones taiwanesischen und japanischen Luftraum beruehren.
+    Genau dafuer gibt es die Anker-Regel - der Ursprung traegt die Nation, die
+    uebrigen Zonen erben sie.
+    """
+    lat, lon, mittel, streuung, ursprung = abgeleitet
+    nation = next(
+        (
+            n for n in (ursprung.fir_country, ursprung.nation,
+                        nations[0] if len(nations) == 1 else None)
+            if n in TARGET_NATIONS
+        ),
+        None,
+    )
+    if nation is None:
+        return None
+
+    port = pd.Series(
+        {
+            "Kurzel": sea_launch_code(lat, lon),
+            "Name": "Sea launch position {:.2f}{} {:.2f}{}".format(
+                abs(lat), "N" if lat >= 0 else "S",
+                abs(lon), "E" if lon >= 0 else "W",
+            ),
+            "Latitude": lat,
+            "Longitude": lon,
+            "Land": nation,
+        }
+    )
+    azimute: List[float] = []
+    abstaende: List[float] = []
+    for event in cluster:
+        abstand = surface_distance_km(lat, lon, event.centroid_lat, event.centroid_lon)
+        # Das NOTAM, das den Startpunkt beschreibt, hat keinen eigenen Azimut -
+        # es bekommt den der Gruppe, damit Bahnneigung und Orbit stimmen.
+        azimute.append(
+            mittel
+            if abstand < SEA_LAUNCH_MIN_ZONE_DISTANCE_KM
+            else initial_bearing_deg(lat, lon, event.centroid_lat, event.centroid_lon)
+        )
+        abstaende.append(abstand)
+    return port, streuung, azimute, abstaende
 
 
 def _build_group(
@@ -2357,9 +3220,24 @@ def _build_group(
     selection = _select_spaceport_for_zones(
         zones, spaceports, nations, _group_hint(cluster)
     )
-    if selection is None:
-        return None
-    port, spread, azimuths, distances = selection
+
+    # Seestart: der Startpunkt steht im NOTAM-Satz selbst, nicht in der
+    # Referenz. Uebernommen wird er nur, wenn seine Bahn die der Referenz
+    # deutlich schlaegt - sonst entscheidet weiterhin die gepflegte Tabelle.
+    abgeleitet = derive_launch_point(cluster, spaceports)
+    aus_geometrie = False
+    if abgeleitet is not None and (
+        selection is None
+        or abgeleitet[3] + SEA_LAUNCH_SPREAD_MARGIN_DEG < selection[1]
+    ):
+        ersatz = _derived_port(abgeleitet, cluster, nations)
+        if ersatz is not None:
+            port, spread, azimuths, distances = ersatz
+            aus_geometrie = True
+    if not aus_geometrie:
+        if selection is None:
+            return None
+        port, spread, azimuths, distances = selection
 
     if not any(e.passes_confidence or e.manual_override for e in cluster):
         return None
@@ -2389,13 +3267,19 @@ def _build_group(
         event.review_reason = ""
         event.requires_group = False
 
+    group.site_from_geometry = aus_geometrie
     group.nation = str(port["Land"])
     group.spaceport_code = str(port["Kurzel"])
     group.spaceport_name = str(port["Name"])
     group.spaceport_lat = float(port["Latitude"])
     group.spaceport_lon = float(port["Longitude"])
     group.azimuth_deg = _circular_mean(azimuths)
-    group.azimuth_spread_deg = spread
+    # Ausgewiesen wird die Streuung ueber ALLE Zonen, nicht die ueber die nahen.
+    # Die Nahzonen-Streuung taugt zur Auswahl des Startplatzes - fuer die
+    # Anzeige und das Archiv ist sie irrefuehrend: liegt hoechstens eine Zone
+    # innerhalb der Fernzonen-Grenze, ist sie definitionsgemaess 0.0, und ein
+    # Start mit Azimuten von 87°, 331° und 180° meldete "Streuung 0.0°".
+    group.azimuth_spread_deg = _angular_spread(azimuths)
     group.inclination_deg = estimate_inclination_deg(group.spaceport_lat, group.azimuth_deg)
     group.orbit_type = classify_orbit(group.inclination_deg)
     group.max_range_km = max(distances)
@@ -2441,7 +3325,7 @@ def analyze_notams(
     notams: pd.DataFrame,
     spaceports: pd.DataFrame,
     firs: pd.DataFrame,
-    min_confidence: str = "MITTEL",
+    min_confidence: str = "MEDIUM",
     confirmed_keys: Optional[Set[str]] = None,
     rejected_keys: Optional[Set[str]] = None,
 ) -> Tuple[List[LaunchEvent], Dict[str, Any]]:
@@ -2524,6 +3408,10 @@ def analyze_notams(
             event.confidence_level,
             event.confidence_notes,
         ) = score_confidence(text, triggers, items, event.valid_from, event.valid_to)
+        # Wird gesetzt, aber nicht hier ausgewertet: ob das NOTAM tatsaechlich
+        # ausgeblendet wird, entscheidet die Oberflaeche - dort liegt auch die
+        # Liste der von Hand zurueckgeholten Faelle.
+        event.auto_hidden_reason = auto_hide_reason(event.confidence_level, text)
         allowed = (
             CONFIDENCE_LEVELS.index(min_confidence)
             if min_confidence in CONFIDENCE_LEVELS
@@ -2548,8 +3436,8 @@ def analyze_notams(
                 event.zones = [[(fallback[0], fallback[1])]]
                 event.radius_km = event.radius_km or fallback[2]
                 event.assignment_note = (
-                    "Zone aus dem Bezugspunkt der Q-Line abgeleitet - das NOTAM "
-                    "nennt keine Gebietsgrenzen."
+                    "Zone derived from the Q-line reference point - the NOTAM "
+                    "states no area boundaries."
                 )
         event.coordinates = [c for zone in event.zones for c in zone]
         event.radius_km = (
@@ -2577,7 +3465,7 @@ def analyze_notams(
         # --- Plausibilitaet / Review --------------------------------------- #
         if foreign and not event.nation_hint and not is_confirmed:
             event.status = "REVIEW"
-            event.review_reason = "Betreiber ausserhalb der Zielnationen: {}".format(
+            event.review_reason = "Operator outside the target nations: {}".format(
                 ", ".join(foreign[:3])
             )
             events.append(event)
@@ -2590,24 +3478,35 @@ def analyze_notams(
                 event.status = "OK"
                 event.review_reason = ""
                 event.assignment_note = (
-                    "Manuell als Start bestaetigt. Ohne Koordinaten im Text ist "
-                    "keine Bahnabschaetzung moeglich."
+                    "Confirmed as a launch by hand. Without coordinates in the "
+                    "text no track can be estimated."
                 )
                 events.append(event)
                 continue
             event.status = "REVIEW"
-            event.review_reason = "Keine verwertbaren Koordinaten im NOTAM-Text gefunden."
+            event.review_reason = "No usable coordinates found in the NOTAM text."
             events.append(event)
             continue
-        if fir_row is None and is_confirmed:
-            # Bestaetigt, aber ohne FIR: die Nation ergibt sich aus der Geometrie.
-            nations = list(TARGET_NATIONS)
+        if fir_row is None and (
+            is_confirmed or event.nation_hint in TARGET_NATIONS
+        ):
+            # Zwei Faelle ohne FIR-Treffer, die trotzdem weiterlaufen duerfen:
+            # ein von Hand bestaetigtes NOTAM - dort waehlt die Geometrie - und
+            # eines, dessen Text die Nation nennt. Letzteres ist genau der
+            # Beleg, den die Drittstaaten-Regel verlangt; dass die genannte
+            # Kennung nicht in der FIR-Referenz steht (fremde FIR oder
+            # Flugplatzkennung wie KVBG), entwertet ihn nicht.
+            nations = (
+                [event.nation_hint]
+                if event.nation_hint in TARGET_NATIONS
+                else list(TARGET_NATIONS)
+            )
             event.candidate_nations = list(nations)
         elif fir_row is None:
             event.status = "REVIEW"
             if (
-                method == "-" or method.startswith("Zu weit")
-            ) and event.confidence_level in ("HOCH", "MITTEL"):
+                method == FIR_NONE or method.startswith(FIR_TOO_FAR)
+            ) and event.confidence_level in ("HIGH", "MEDIUM"):
                 # Maritime Warnungen und Meldungen ausserhalb jeder erfassten FIR
                 # tragen die Nation nicht in der Kennung. Sie werden nicht
                 # verworfen, sondern koennen ueber die Start-Gruppierung einem
@@ -2617,21 +3516,23 @@ def analyze_notams(
                 if event.nation_hint in TARGET_NATIONS:
                     event.candidate_nations = [event.nation_hint]
                 event.review_reason = (
-                    "Keine FIR-Zuordnung - nur ueber die Zuordnung zu einem Start "
-                    "mit weiteren NOTAMs aufloesbar."
+                    "No FIR match - resolvable only by grouping with further NOTAMs "
+                    "of the same launch."
                 )
                 events.append(event)
                 continue
-            if method.startswith("Ausserhalb"):
+            if method.startswith(FIR_OUTSIDE):
                 event.review_reason = (
-                    "NOTAM gehoert zu FIR {} - keine FIR der Zielnationen.".format(
-                        method.split(": ", 1)[-1]
+                    "NOTAM belongs to FIR {} - not a FIR of the target nations.".format(
+                        method.split(":", 1)[-1]
                     )
                 )
-            elif method.startswith("Zu weit"):
-                event.review_reason = "Sperrzone liegt {}.".format(method.lower())
+            elif method.startswith(FIR_TOO_FAR):
+                event.review_reason = "Zone lies {}.".format(
+                    fir_method_label(FIR_TOO_FAR, method.split(":", 1)[-1])
+                )
             else:
-                event.review_reason = "Keine FIR-Zuordnung moeglich (Referenzdaten pruefen)."
+                event.review_reason = "No FIR match possible (check the reference data)."
             events.append(event)
             continue
         if not any(n in TARGET_NATIONS for n in nations) and not is_confirmed:
@@ -2648,6 +3549,38 @@ def analyze_notams(
             # allen Kandidaten der FIR.
             nations = [n for n in nations if n in TARGET_NATIONS] or list(TARGET_NATIONS)
             event.candidate_nations = list(nations)
+        elif method == FIR_BY_GEOMETRY and haversine_km(
+            event.centroid_lat, event.centroid_lon,
+            float(fir_row["Latitude"]), float(fir_row["Longitude"]),
+        ) > FIR_OWN_AIRSPACE_KM:
+            # Die FIR wurde nicht genannt, sondern ueber den naechstgelegenen
+            # Referenzpunkt geraten - und dieser Punkt ist in der Referenz der
+            # Sitz der Bezirkszentrale, nicht die FIR-Grenze. Bis zu 1500 km
+            # von einer Stadt entfernt zu liegen heisst nicht, im Luftraum
+            # dieser Nation zu sein: eine Sperrzone ueber Nicaragua landete so
+            # bei Miami und wurde ein Start von Cape Canaveral.
+            #
+            # Der Massstab verlangt, dass der Luftraum der Nation *selbst*
+            # gehoert. Ein Nachbarschaftsschaetzer belegt das nicht, also gilt
+            # hier dieselbe Zurueckhaltung wie bei einer Drittstaaten-FIR:
+            # ohne Nennung im Text oder Aufloesung ueber die Gruppe bleibt das
+            # NOTAM im Review.
+            event.status = "REVIEW"
+            event.requires_group = True
+            event.review_reason = (
+                "No FIR named in the NOTAM - {} is only the nearest reference "
+                "point ({:.0f} km). That does not establish whose airspace this "
+                "is. Resolvable by a mention in the text or by grouping with "
+                "further NOTAMs of the same launch.".format(
+                    event.fir_code,
+                    haversine_km(
+                        event.centroid_lat, event.centroid_lon,
+                        float(fir_row["Latitude"]), float(fir_row["Longitude"]),
+                    ),
+                )
+            )
+            events.append(event)
+            continue
         elif event.fir_country not in TARGET_NATIONS:
             # Die FIR liegt im Gebiet eines Drittstaats. Dort steht in der
             # Referenz nur, welche Startnation dieses Gebiet ueblicherweise
@@ -2658,10 +3591,10 @@ def analyze_notams(
             event.status = "REVIEW"
             event.requires_group = True
             event.review_reason = (
-                "FIR {} liegt in {} - die Startnation ({}) ist dort nur unterstellt "
-                "und wird im Text nicht genannt. Nur ueber die Zuordnung zu einem "
-                "Start mit weiteren NOTAMs aufloesbar.".format(
-                    event.fir_code, event.fir_country or "einem Drittstaat",
+                "FIR {} lies in {} - the launch nation ({}) would only be assumed "
+                "there and is not named in the text. Resolvable only by grouping "
+                "with further NOTAMs of the same launch.".format(
+                    event.fir_code, event.fir_country or "a third country",
                     ", ".join(nations),
                 )
             )
@@ -2673,8 +3606,8 @@ def analyze_notams(
             event.status = "REVIEW"
             event.requires_group = True
             event.review_reason = (
-                "FIR {} deckt mehrere Startnationen ab ({}) und der Text nennt keine - "
-                "nur ueber die Zuordnung zu einem Start aufloesbar.".format(
+                "FIR {} covers several launch nations ({}) and the text names none - "
+                "resolvable only by grouping with a launch.".format(
                     event.fir_code, ", ".join(nations)
                 )
             )
@@ -2683,7 +3616,7 @@ def analyze_notams(
 
         if not event.passes_confidence and not is_confirmed:
             event.status = "REVIEW"
-            event.review_reason = "Weltraum-Konfidenz {} (Score {}){}".format(
+            event.review_reason = "Launch confidence {} (score {}){}".format(
                 event.confidence_level,
                 event.confidence_score,
                 " - " + "; ".join(event.confidence_notes) if event.confidence_notes else "",
@@ -2697,7 +3630,7 @@ def analyze_notams(
         )
         if event.spaceport_evidence:
             assignment_note = (
-                "Startplatz aus dem Text abgeleitet ({}). ".format(
+                "Launch site derived from the text ({}). ".format(
                     ", ".join(event.spaceport_evidence[:3])
                 )
                 + assignment_note
@@ -2710,7 +3643,7 @@ def analyze_notams(
             )
         if port is None:
             event.status = "REVIEW"
-            event.review_reason = "Kein Weltraumbahnhof fuer {} in der Referenz.".format(
+            event.review_reason = "No launch site for {} in the reference.".format(
                 ", ".join(nations)
             )
             events.append(event)
@@ -2728,7 +3661,7 @@ def analyze_notams(
         if event.distance_km < 1.0:
             event.status = "REVIEW"
             event.review_reason = (
-                "Sperrzone liegt auf dem Startplatz - kein belastbarer Azimut."
+                "Zone sits on the launch site - no reliable azimuth."
             )
             events.append(event)
             continue
@@ -2745,14 +3678,14 @@ def analyze_notams(
         if not azimuth_plausible and is_confirmed:
             event.assignment_note = (
                 (event.assignment_note + " ").lstrip()
-                + "Achtung: Azimut {:.0f}° weist nach Westen - die Zuordnung des "
-                "Startplatzes ist unsicher.".format(event.azimuth_deg)
+                + "Caution: azimuth {:.0f}° points west - the launch site "
+                "assignment is uncertain.".format(event.azimuth_deg)
             )
         elif not azimuth_plausible:
             event.status = "REVIEW"
             event.review_reason = (
-                "Kein Startplatz mit moeglicher Startrichtung: Azimut {:.0f}° "
-                "weist nach Westen, gegen die Erdrotation.".format(event.azimuth_deg)
+                "No launch site with a plausible direction: azimuth {:.0f}° "
+                "points west, against the Earth's rotation.".format(event.azimuth_deg)
             )
             events.append(event)
             continue
@@ -2760,7 +3693,7 @@ def analyze_notams(
         if event.distance_km > MAX_PLAUSIBLE_RANGE_KM:
             event.status = "REVIEW"
             event.review_reason = (
-                "Distanz Startplatz-Sperrzone betraegt {:.0f} km - Zuordnung pruefen.".format(
+                "Distance from launch site to zone is {:.0f} km - check the assignment.".format(
                     event.distance_km
                 )
             )
@@ -2773,7 +3706,7 @@ def analyze_notams(
         if event.key in rejected and event.status == "OK":
             event.status = "REVIEW"
             event.review_reason = (
-                "Manuell aus der Launch-Tabelle in den Review zurückgestellt."
+                "Moved from the launch table back to review by hand."
             )
             event.manual_override = False
             event.launch_group = ""
@@ -2781,6 +3714,10 @@ def analyze_notams(
     # Mehrfach gelistete NOTAMs entfernen, dann zu Starts zusammenfassen.
     events, stats["duplicates"] = _drop_duplicate_events(events)
     groups = group_launches(events, spaceports)
+    # Erst jetzt, mit fertigen Gruppen: Meldungen, die denselben Luftraum schon
+    # Tage vorher reserviert haben, an ihren Start haengen. Die Gruppen selbst
+    # bleiben unveraendert - es ist dieselbe Flaeche, nicht eine weitere Zone.
+    stats["advance"] = len(pair_advance_announcements(events, groups))
     stats["groups"] = groups
     stats["launches"] = sum(1 for g in groups if g.spaceport_code)
     stats["grouped"] = sum(1 for g in groups if g.zone_count > 1)
@@ -2789,24 +3726,31 @@ def analyze_notams(
     stats["manual"] = sum(1 for e in events if e.source == SOURCE_MANUAL)
     stats["confirmed"] = sum(1 for e in events if e.manual_override)
     stats["rejected"] = sum(1 for e in events if e.key in rejected)
-    stats["high_confidence"] = sum(1 for e in events if e.confidence_level == "HOCH")
+    stats["high_confidence"] = sum(1 for e in events if e.confidence_level == "HIGH")
     stats["ok"] = sum(1 for e in events if e.status == "OK")
     stats["review"] = sum(1 for e in events if e.status == "REVIEW")
     return events, stats
 
 
-def events_to_dataframe(events: Sequence[LaunchEvent]) -> pd.DataFrame:
-    """Baut die Ergebnistabelle mit den fachlich geforderten Spalten."""
+def events_to_dataframe(
+    events: Sequence[LaunchEvent], vehicles: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
+    """
+    Baut die Ergebnistabelle mit den fachlich geforderten Spalten.
+
+    `vehicles` dient allein der Beschriftung der Spalte "Traegersystem"; ohne
+    Referenztabelle steht dort der gespeicherte Kuerzel-Code.
+    """
     records: List[Dict[str, Any]] = []
     for e in events:
         records.append(
             {
                 "NOTAM ID": mark_id(e.notam_id, e.manual_override),
-                "Geprüft": "manuell bestätigt" if e.manual_override else "-",
+                "Geprüft": "by hand" if e.manual_override else "-",
                 "Art": e.kind,
                 "Start": e.launch_group or "-",
                 "Quelle": e.source,
-                "Startnation": e.nation or "-",
+                "Startnation": nation_label(e.nation) or "-",
                 "Weltraumbahnhof": (
                     "{} ({})".format(e.spaceport_name, e.spaceport_code)
                     if e.spaceport_code
@@ -2823,6 +3767,10 @@ def events_to_dataframe(events: Sequence[LaunchEvent]) -> pd.DataFrame:
                     round(e.inclination_deg, 1) if e.inclination_deg is not None else np.nan
                 ),
                 "Orbit-Typ": e.orbit_type,
+                "Trägersystem": (
+                    vehicle_label(e.vehicle, vehicles) if e.vehicle else "-"
+                ),
+                "Payload": e.payload or "-",
                 "Konfidenz": e.confidence_level,
                 "Zuverlässigkeit": e.reliability,
                 "Nationsbeleg": ", ".join(e.nation_evidence) if e.nation_evidence else "FIR",
@@ -2853,6 +3801,8 @@ def events_to_dataframe(events: Sequence[LaunchEvent]) -> pd.DataFrame:
         "Launch Azimut (°)",
         "Est. Inklination (°)",
         "Orbit-Typ",
+        "Trägersystem",
+        "Payload",
         "Konfidenz",
         "Zuverlässigkeit",
         "Nationsbeleg",
@@ -2870,52 +3820,152 @@ def events_to_dataframe(events: Sequence[LaunchEvent]) -> pd.DataFrame:
 
 #: Was der Orbit-Typ praktisch bedeutet - fuer Leser ohne Raumfahrt-Hintergrund.
 ORBIT_EXPLANATIONS = {
-    "Sonnensynchron (SSO / Polar)": (
-        "eine nahezu polare Bahn, die jeden Ort immer zur gleichen Ortszeit "
-        "ueberfliegt - typisch fuer Erdbeobachtungs- und Aufklaerungssatelliten"
+    ORBIT_SSO: (
+        "a near-polar track that passes every point at the same local time - "
+        "typical of earth observation and reconnaissance satellites"
     ),
-    "Hohe Inklination / polnah": (
-        "eine stark geneigte Bahn nahe den Polen - typisch fuer Erdbeobachtung "
-        "und militaerische Aufklaerung"
+    ORBIT_HIGH_INC: (
+        "a steeply inclined track close to the poles - typical of earth "
+        "observation and military reconnaissance"
     ),
-    "Standard LEO / MEO (ISS-/Station-Korridor)": (
-        "eine mittlere Bahnneigung, wie sie Raumstationen, bemannte Fluege sowie "
-        "Navigations- und Kommunikationssatelliten nutzen"
+    ORBIT_LEO_MEO: (
+        "a medium inclination, as used by space stations, crewed flights and "
+        "navigation or communication satellites"
     ),
-    "Aequatorial / Low Inclination (GTO-Transit)": (
-        "eine flache, aequatornahe Bahn - meist der Transfer in Richtung "
-        "geostationaere Bahn, also Kommunikations- oder Wettersatelliten"
+    ORBIT_GTO: (
+        "a shallow, near-equatorial track - usually the transfer towards "
+        "geostationary orbit, so communication or weather satellites"
     ),
-    "Retrograder Orbit": (
-        "eine gegenlaeufige Bahn entgegen der Erddrehung - sehr selten, "
-        "die Zuordnung sollte geprueft werden"
+    ORBIT_RETROGRADE: (
+        "a track running against the Earth's rotation - very rare, the "
+        "assignment should be checked"
     ),
 }
 
 #: 16-teilige Kompassrose fuer die Startrichtung in Worten.
 _COMPASS = (
-    "Norden", "Nordnordost", "Nordost", "Ostnordost",
-    "Osten", "Ostsuedost", "Suedost", "Suedsuedost",
-    "Sueden", "Suedsuedwest", "Suedwest", "Westsuedwest",
-    "Westen", "Westnordwest", "Nordwest", "Nordnordwest",
+    "north", "north-northeast", "northeast", "east-northeast",
+    "east", "east-southeast", "southeast", "south-southeast",
+    "south", "south-southwest", "southwest", "west-southwest",
+    "west", "west-northwest", "northwest", "north-northwest",
 )
+
+
+#: Englische Anzeigenamen der Ergebnistabellen.
+#:
+#: Die Schluessel der Dataframes bleiben bewusst deutsch: sie sind ueber die
+#: ganze Anwendung verdrahtet - Filter, Export, Review, Ausgeblendet greifen
+#: darauf zu. Uebersetzt wird nur, was der Leser sieht. Die Begriffe sind die
+#: der Luft- und Raumfahrt, nicht woertliche Uebersetzungen; die NOTAM-Texte
+#: selbst sind englisch.
+COLUMN_LABELS = {
+    "NOTAM ID": "NOTAM",
+    "NOTAMs": "NOTAMs",
+    "Gepr\u00fcft": "Verified",
+    "Art": "Type",
+    "Start": "Launch",
+    "Quelle": "Source",
+    "Startnation": "Nation",
+    "Weltraumbahnhof": "Launch Site",
+    "Startfenster (UTC)": "Launch Window (UTC)",
+    "FIR Code": "FIR",
+    "FIR": "FIR",
+    "FIR liegt in": "FIR Country",
+    "H\u00f6henprofil": "Altitude",
+    "Launch Azimut (\u00b0)": "Azimuth",
+    "Est. Inklination (\u00b0)": "Inclination",
+    "Orbit-Typ": "Orbit",
+    "Tr\u00e4gersystem": "Vehicle",
+    "Payload": "Payload",
+    "Konfidenz": "Confidence",
+    "Zuverl\u00e4ssigkeit": "Reliability",
+    "Nationsbeleg": "Nation Evidence",
+    "Distanz (km)": "Distance",
+    "Punkte": "Points",
+    "Status": "Status",
+    "Trigger": "Triggers",
+    "Hinweis": "Note",
+    "Sperrzonen": "Zones",
+    "Vorank\u00fcndigung": "Advance Notice",
+    "Reichweite (km)": "Range",
+    "Azimut-Streuung (\u00b0)": "Spread",
+}
+
+#: Zahlenspalten mit ihrem Anzeigeformat. Ohne das zeigt Streamlit float64 mit
+#: sechs Nachkommastellen - aus 112.1 wird 112.100000.
+COLUMN_FORMATS = {
+    "Launch Azimut (\u00b0)": "%.1f\u00b0",
+    "Est. Inklination (\u00b0)": "%.1f\u00b0",
+    "Azimut-Streuung (\u00b0)": "%.1f\u00b0",
+    "Distanz (km)": "%.0f km",
+    "Reichweite (km)": "%.0f km",
+}
+
+#: Spaltenreihenfolge der Start-Tabelle: erst wer und was, dann die Bahn,
+#: zuletzt die Belege. Traegersystem und Payload stehen vorn, weil man sie
+#: taeglich liest - vorher lagen sie hinter dem Azimut.
+GROUP_COLUMN_ORDER = (
+    "Start", "Startnation", "Weltraumbahnhof", "Tr\u00e4gersystem", "Payload",
+    "Startfenster (UTC)", "Orbit-Typ", "Est. Inklination (\u00b0)",
+    "Launch Azimut (\u00b0)", "Sperrzonen", "Reichweite (km)",
+    "Azimut-Streuung (\u00b0)", "Konfidenz", "Zuverl\u00e4ssigkeit", "Art",
+    "Gepr\u00fcft", "FIR", "NOTAMs", "Vorank\u00fcndigung", "Quelle",
+)
+
+#: Dasselbe auf NOTAM-Ebene.
+EVENT_COLUMN_ORDER = (
+    "NOTAM ID", "Startnation", "Weltraumbahnhof", "Tr\u00e4gersystem", "Payload",
+    "Startfenster (UTC)", "Orbit-Typ", "Est. Inklination (\u00b0)",
+    "Launch Azimut (\u00b0)", "H\u00f6henprofil", "Distanz (km)", "Konfidenz",
+    "Zuverl\u00e4ssigkeit", "Start", "Art", "Gepr\u00fcft", "FIR Code",
+    "FIR liegt in", "Nationsbeleg", "Punkte", "Status", "Quelle", "Trigger",
+    "Hinweis",
+)
+
+
+def table_config(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Baut die Anzeigekonfiguration einer Ergebnistabelle.
+
+    Uebersetzt die Spaltenkoepfe und gibt Zahlen ein Format. Spalten, die nicht
+    in der Tabelle stehen, werden uebergangen - dieselbe Funktion bedient die
+    Start- und die NOTAM-Ansicht.
+    """
+    config: Dict[str, Any] = {}
+    for spalte in df.columns:
+        if spalte.startswith("_"):
+            continue
+        label = COLUMN_LABELS.get(spalte, spalte)
+        format_ = COLUMN_FORMATS.get(spalte)
+        if format_:
+            config[spalte] = st.column_config.NumberColumn(label, format=format_)
+        else:
+            config[spalte] = st.column_config.Column(label)
+    return config
+
+
+def visible_order(df: pd.DataFrame, order: Sequence[str]) -> List[str]:
+    """Spaltenreihenfolge fuer die Anzeige, beschraenkt auf vorhandene Spalten."""
+    bekannt = [s for s in order if s in df.columns]
+    rest = [s for s in df.columns if s not in bekannt and not s.startswith("_")]
+    return bekannt + rest
 
 
 def compass_name(azimuth_deg: Optional[float]) -> str:
     """Wandelt einen Azimut in eine Himmelsrichtung in Worten."""
     if azimuth_deg is None:
-        return "unbestimmt"
+        return "undetermined"
     return _COMPASS[int((azimuth_deg % 360.0) / 22.5 + 0.5) % 16]
 
 
 def _format_window_hours(hours: Optional[float]) -> str:
     if hours is None:
-        return "unbekannt"
+        return "unknown"
     if hours < 2:
-        return "{:.0f} Minuten".format(hours * 60)
+        return "{:.0f} minutes".format(hours * 60)
     if hours < 48:
-        return "{:.1f} Stunden".format(hours)
-    return "{:.0f} Tage".format(hours / 24.0)
+        return "{:.1f} hours".format(hours)
+    return "{:.0f} days".format(hours / 24.0)
 
 
 def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
@@ -2933,20 +3983,20 @@ def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
     lines: List[str] = []
     if group.kind == KIND_REENTRY:
         lines.append(
-            "**Was:** Ein Wiedereintritt bzw. eine Splashdown-Zone{}. Zugeordneter "
-            "Startplatz: {}.".format(
-                " der {}".format(group.nation) if group.nation else "",
-                group.spaceport_name or "unbekannt",
+            "**What:** A re-entry or splashdown zone{}. Assigned launch site: "
+            "{}.".format(
+                " for {}".format(nation_label(group.nation)) if group.nation else "",
+                group.spaceport_name or "unknown",
             )
         )
     else:
         lines.append(
-            "**Was:** Ein Raumfahrtstart{} vom Weltraumbahnhof {}.".format(
-                " {}s".format(group.nation) if group.nation else "",
-                group.spaceport_name or "unbekannt",
+            "**What:** A space launch{} from {}.".format(
+                " by {}".format(nation_label(group.nation)) if group.nation else "",
+                group.spaceport_name or "an unknown site",
             )
         )
-    lines.append("**Wann (UTC):** {}".format(group.launch_window))
+    lines.append("**When (UTC):** {}".format(group.launch_window))
 
     # Woran erkannt
     dauern = [
@@ -2956,64 +4006,104 @@ def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
     ]
     taeglich = [daily_window_hours(extract_items(e.raw_text).get("D")) for e in members]
     taeglich = [t for t in taeglich if t]
+    # Das taegliche Fenster ist das Argument; die Gesamtlaufzeit ist es nicht.
+    # Beides zu vermengen erzeugte Saetze wie "each active for only about 91
+    # days" - eine Begruendung, die sich selbst widerspricht.
     aktiv = min(taeglich) if taeglich else (min(dauern) if dauern else None)
-    if aktiv is not None:
+    kurz = aktiv is not None and aktiv <= LAUNCH_WINDOW_MAX_HOURS
+    if kurz:
         lines.append(
-            "**Woran erkannt:** {} Luftraumsperrung(en) von der Erdoberflaeche bis "
-            "unbegrenzt nach oben, jeweils nur rund {} aktiv. Eine so hohe Sperrung "
-            "fuer so kurze Zeit entsteht praktisch nur bei einem Raketenstart.".format(
+            "**How it was recognised:** {} airspace closure(s) from the surface to "
+            "unlimited altitude, each active for only about {}. A closure that high "
+            "for that short a time practically only occurs for a rocket launch.".format(
                 group.zone_count, _format_window_hours(aktiv)
             )
         )
+    elif aktiv is not None:
+        lines.append(
+            "**How it was recognised:** {} airspace closure(s) from the surface to "
+            "unlimited altitude, running for {}. That is long for a launch window - "
+            "the closure height and the wording carry the recognition here, not the "
+            "duration.".format(group.zone_count, _format_window_hours(aktiv))
+        )
     else:
         lines.append(
-            "**Woran erkannt:** {} Luftraumsperrung(en) von der Erdoberflaeche bis "
-            "unbegrenzt nach oben. Die Sperrhoehe und der Wortlaut der Meldungen "
-            "weisen auf einen Raketenstart hin.".format(group.zone_count)
+            "**How it was recognised:** {} airspace closure(s) from the surface to "
+            "unlimited altitude. The closure height and the wording of the messages "
+            "point to a rocket launch.".format(group.zone_count)
         )
-    lines.append("**Zugrunde liegende Meldungen:** {}".format(", ".join(group.notam_ids)))
+    lines.append("**Underlying messages:** {}".format(", ".join(group.notam_ids)))
+
+    # Vorankuendigung. Steht bewusst direkt hinter den Meldungen des Starttags:
+    # es ist derselbe Luftraum, nur frueher gemeldet - keine weitere Sperrzone.
+    if group.advance_notam_ids:
+        vorlauf = group.advance_notice_hours
+        lines.append(
+            "**Announced in advance:** {} reserved the same airspace {} before the "
+            "launch window. The area matches, the daily activation window contains "
+            "the launch window, and the validity covers the launch day - which is "
+            "why these messages are assigned to this launch and not counted as "
+            "further closure zones.".format(
+                ", ".join(group.advance_notam_ids),
+                _format_window_hours(vorlauf) if vorlauf else "some time",
+            )
+        )
 
     # Nation
     belege = sorted({b for e in members for b in e.nation_evidence})
     if belege:
         lines.append(
-            "**Woher die Nation:** Im Meldungstext genannt ({}).".format(", ".join(belege[:4]))
+            "**Where the nation comes from:** Named in the message text ({}).".format(
+                ", ".join(belege[:4])
+            )
         )
     else:
         lines.append(
-            "**Woher die Nation:** Aus der betroffenen Luftraumregion abgeleitet, "
-            "nicht im Text genannt - im Zweifel am Originaltext pruefen."
+            "**Where the nation comes from:** Derived from the affected airspace "
+            "region, not named in the text - check the original text if in doubt."
         )
 
     # Startplatz
     if group.zone_count > 1:
         lines.append(
-            "**Warum dieser Startplatz:** Von {} aus liegen alle {} Sperrzonen in "
-            "derselben Richtung (Abweichung {:.1f}°). Kein anderer Startplatz "
-            "erklaert alle Zonen gemeinsam.".format(
+            "**Why this launch site:** Seen from {}, all {} closure zones lie in "
+            "the same direction (spread {:.1f}°). No other launch site explains all "
+            "zones together.".format(
                 group.spaceport_code, group.zone_count, group.azimuth_spread_deg
+            )
+            if group.azimuth_spread_deg <= LAUNCH_GROUP_MAX_SPREAD_DEG
+            # Bei weit auseinanderliegenden Zonen - typisch fuer mehrere
+            # Wiedereintrittsgebiete eines Fluges - waere "dieselbe Richtung"
+            # schlicht falsch. Dann traegt die Zeitgleichheit die Gruppe, nicht
+            # die Geometrie, und das muss dastehen.
+            else "**Why this launch site:** The {} closure zones lie in clearly "
+            "different directions seen from {} (spread {:.1f}°). They are grouped "
+            "because they are announced for the same window, not because of their "
+            "geometry - azimuth and inclination below are therefore averages "
+            "without much meaning.".format(
+                group.zone_count, group.spaceport_code, group.azimuth_spread_deg
             )
         )
     else:
         hinweis = next((e.assignment_note for e in members if e.assignment_note), "")
         lines.append(
-            "**Warum dieser Startplatz:** Naechstgelegener Startplatz der Nation mit "
-            "moeglicher Startrichtung.{}".format(" " + hinweis if hinweis else "")
+            "**Why this launch site:** Nearest launch site of that nation with a "
+            "plausible launch direction.{}".format(" " + hinweis if hinweis else "")
         )
 
     # Folgerung
     if group.kind == KIND_REENTRY:
         lines.append(
-            "**Was daraus folgt:** Bei einem Wiedereintritt kommt das Objekt aus der "
-            "Umlaufbahn zurueck. Die Richtung vom Startplatz zur Sperrzone sagt deshalb "
-            "nichts ueber die Bahnlage aus - die angegebenen Werte fuer Azimut und "
-            "Bahnneigung sind hier nicht aussagekraeftig."
+            "**What follows from it:** In a re-entry the object comes back from "
+            "orbit. The direction from the launch site to the zone therefore says "
+            "nothing about the orbital plane - the azimuth and inclination given "
+            "here carry no meaning."
         )
     elif group.azimuth_deg is not None and group.inclination_deg is not None:
         erklaerung = ORBIT_EXPLANATIONS.get(group.orbit_type, "")
         lines.append(
-            "**Was daraus folgt:** Die Rakete fliegt Richtung {} ({:.0f}°). Daraus "
-            "ergibt sich eine Bahnneigung von rund {:.0f}° - {}{}.".format(
+            "**What follows from it:** The rocket flies {} ({:.0f}°). That implies "
+            "an inclination of roughly {:.0f}° - {}{}.".format(
                 compass_name(group.azimuth_deg),
                 group.azimuth_deg,
                 group.inclination_deg,
@@ -3024,33 +4114,44 @@ def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
 
     # Sicherheit
     sicher = {
-        "hoch": "Die naechste Sperrzone liegt nah am Startplatz, die Richtung ist gut bestimmt.",
-        "mittel": "Die Sperrzonen liegen weiter entfernt; die Bahnneigung ist eine Naeherung.",
-        "gering": (
-            "Die Sperrzonen liegen sehr weit entfernt (Wiedereintritts- oder "
-            "Deorbit-Gebiete). Startplatz und Bahnneigung sind dort nur grob bestimmbar."
+        RELIABILITY_HIGH: (
+            "The nearest closure zone lies close to the launch site, so the "
+            "direction is well determined."
+        ),
+        RELIABILITY_MEDIUM: (
+            "The closure zones lie further away; the inclination is an approximation."
+        ),
+        RELIABILITY_LOW: (
+            "The closure zones lie very far away (re-entry or deorbit areas). Launch "
+            "site and inclination can only be determined roughly there."
         ),
     }.get(group.reliability, "")
     lines.append(
-        "**Wie belastbar:** {} - {} {}".format(
+        "**How reliable:** {} - {} {}".format(
             group.reliability,
             sicher,
-            "Die Bahnneigung ist eine Naeherung: der Beitrag der Erddrehung ist "
-            "nicht eingerechnet.",
+            "The inclination is an approximation: the contribution of the Earth's "
+            "rotation is not accounted for.",
         )
     )
     return "\n\n".join(lines)
 
 
-def groups_to_dataframe(groups: Sequence[LaunchGroup]) -> pd.DataFrame:
-    """Ergebnistabelle auf Start-Ebene: eine Zeile je Start statt je NOTAM."""
+def groups_to_dataframe(
+    groups: Sequence[LaunchGroup], vehicles: Optional[pd.DataFrame] = None
+) -> pd.DataFrame:
+    """
+    Ergebnistabelle auf Start-Ebene: eine Zeile je Start statt je NOTAM.
+
+    `vehicles` dient allein der Beschriftung der Spalte "Traegersystem".
+    """
     records: List[Dict[str, Any]] = []
     for g in groups:
         records.append(
             {
                 "Start": g.group_id,
                 "Art": g.kind,
-                "Startnation": g.nation or "-",
+                "Startnation": nation_label(g.nation) or "-",
                 "Weltraumbahnhof": (
                     "{} ({})".format(g.spaceport_name, g.spaceport_code)
                     if g.spaceport_code
@@ -3059,7 +4160,14 @@ def groups_to_dataframe(groups: Sequence[LaunchGroup]) -> pd.DataFrame:
                 "Startfenster (UTC)": g.launch_window,
                 "Sperrzonen": g.zone_count,
                 "NOTAMs": ", ".join(g.notam_ids),
-                "Geprüft": "manuell bestätigt" if g.manual_override else "-",
+                "Vorankündigung": (
+                    "{} ({:.0f} h)".format(
+                        ", ".join(g.advance_notam_ids), g.advance_notice_hours or 0.0
+                    )
+                    if g.advance_notam_ids
+                    else "-"
+                ),
+                "Geprüft": "by hand" if g.manual_override else "-",
                 "FIR": ", ".join(g.fir_codes) if g.fir_codes else "-",
                 "Launch Azimut (°)": (
                     round(g.azimuth_deg, 1) if g.azimuth_deg is not None else np.nan
@@ -3068,6 +4176,10 @@ def groups_to_dataframe(groups: Sequence[LaunchGroup]) -> pd.DataFrame:
                     round(g.inclination_deg, 1) if g.inclination_deg is not None else np.nan
                 ),
                 "Orbit-Typ": g.orbit_type,
+                "Trägersystem": (
+                    vehicle_label(g.vehicle, vehicles) if g.vehicle else "-"
+                ),
+                "Payload": g.payload or "-",
                 "Reichweite (km)": (
                     round(g.max_range_km, 1) if g.max_range_km is not None else np.nan
                 ),
@@ -3085,11 +4197,14 @@ def groups_to_dataframe(groups: Sequence[LaunchGroup]) -> pd.DataFrame:
         "Startfenster (UTC)",
         "Sperrzonen",
         "NOTAMs",
+        "Vorankündigung",
         "Geprüft",
         "FIR",
         "Launch Azimut (°)",
         "Est. Inklination (°)",
         "Orbit-Typ",
+        "Trägersystem",
+        "Payload",
         "Reichweite (km)",
         "Azimut-Streuung (°)",
         "Konfidenz",
@@ -3099,6 +4214,318 @@ def groups_to_dataframe(groups: Sequence[LaunchGroup]) -> pd.DataFrame:
     return pd.DataFrame(records, columns=columns)
 
 
+#: Spalten des Startarchivs, in genau dieser Reihenfolge.
+ARCHIVE_COLUMNS = (
+    "NOTAM",
+    "Startdatum",
+    "Startzeit",
+    "Nation",
+    "Weltraumbahnhof",
+    "Tr\u00e4gersystem",
+    "Payload",
+    "Orbit",
+    "Inklination",
+    "Azimuth",
+    "Dropzones",
+)
+
+#: Kurzformen der Orbit-Typen fuer das Archiv - die langen Klartext-Labels
+#: waeren in einer Tabellenspalte unleserlich.
+ORBIT_SHORT = {
+    ORBIT_SSO: "SSO",
+    ORBIT_HIGH_INC: "HIGH-INC",
+    ORBIT_LEO_MEO: "LEO/MEO",
+    ORBIT_GTO: "GTO",
+    ORBIT_RETROGRADE: "RETRO",
+}
+
+
+def orbit_short(orbit_type: str) -> str:
+    """Kurzform eines Orbit-Typs; unbekannte Werte bleiben, wie sie sind."""
+    if not orbit_type or orbit_type == ORBIT_UNKNOWN:
+        return "-"
+    return ORBIT_SHORT.get(orbit_type, orbit_type)
+
+
+def archive_row(group: LaunchGroup, events: Sequence[LaunchEvent]) -> Dict[str, Any]:
+    """
+    Baut die Archivzeile eines Starts.
+
+    Eine Zeile je Start, nicht je NOTAM: Startplatz, Traegersystem und Bahn
+    gehoeren zum Vorgang, nicht zur einzelnen Sperrzone. Die Kennungen aller
+    Zonen stehen zusammen in der Spalte NOTAM, ihre Mittelpunkte in Dropzones.
+    """
+    per_row = {e.row_index: e for e in events}
+    mitglieder = [per_row[r] for r in group.row_indices if r in per_row]
+    kennungen = [m.notam_id for m in mitglieder] or [
+        kid.replace(MANUAL_MARK, "").strip() for kid in group.notam_ids
+    ]
+    # Jede Sperrzone einzeln, nicht ein Mittelpunkt je NOTAM: ein NOTAM kann
+    # zwei Gebiete 740 km auseinander beschreiben, deren Mittelwert nirgends
+    # liegt. Der abgeleitete Startpunkt gehoert nicht dazu - er ist der
+    # Ursprung der Bahn, keine Dropzone.
+    zonen: List[str] = []
+    for lat, lon, _ in cluster_zone_points(mitglieder):
+        if group.site_from_geometry and group.spaceport_lat is not None and (
+            surface_distance_km(lat, lon, group.spaceport_lat, group.spaceport_lon)
+            < SEA_LAUNCH_MIN_ZONE_DISTANCE_KM
+        ):
+            continue
+        eintrag = "{:.4f} {:.4f}".format(lat, lon)
+        if eintrag not in zonen:
+            zonen.append(eintrag)
+    return {
+        "NOTAM": ", ".join(kennungen),
+        "Startdatum": group.window_from.strftime("%d.%m.%Y") if group.window_from else "",
+        "Startzeit": group.window_from.strftime("%H:%M") if group.window_from else "",
+        "Nation": nation_label(group.nation),
+        "Weltraumbahnhof": group.spaceport_code or "",
+        "Tr\u00e4gersystem": group.vehicle or "",
+        "Payload": group.payload or "",
+        "Orbit": orbit_short(group.orbit_type),
+        "Inklination": (
+            "{:.1f}".format(group.inclination_deg)
+            if group.inclination_deg is not None
+            else ""
+        ),
+        "Azimuth": (
+            "{:.1f}".format(group.azimuth_deg) if group.azimuth_deg is not None else ""
+        ),
+        "Dropzones": "; ".join(zonen),
+    }
+
+
+def archive_key(row: Dict[str, Any]) -> str:
+    """
+    Erkennungsmerkmal einer Archivzeile: Startdatum, Startplatz und Kennungen.
+
+    Damit findet ein spaeterer Import denselben Start wieder und aktualisiert
+    ihn, statt ihn ein zweites Mal anzulegen.
+    """
+    kennungen = sorted(
+        teil.strip().upper()
+        for teil in str(row.get("NOTAM", "")).split(",")
+        if teil.strip()
+    )
+    return "|".join(
+        [
+            str(row.get("Startdatum", "")).strip(),
+            str(row.get("Weltraumbahnhof", "")).strip().upper(),
+            ",".join(kennungen),
+        ]
+    )
+
+
+def merge_archive(
+    bestand: pd.DataFrame,
+    neue: Sequence[Dict[str, Any]],
+    entfernt: Optional[Set[str]] = None,
+) -> pd.DataFrame:
+    """
+    Fuehrt neu erkannte Starts mit dem vorhandenen Archiv zusammen.
+
+    Bekannte Starts werden aktualisiert statt verdoppelt. Die Nutzlast bildet
+    die Ausnahme: sie ist das Einzige, was kein Automat kennt, also bleibt ein
+    vorhandener Eintrag stehen, wenn der neue Durchlauf nichts dazu weiss.
+    Von Hand geloeschte Zeilen kommen nicht zurueck, solange ihr Schluessel in
+    `entfernt` steht.
+    """
+    entfernt = entfernt or set()
+    zeilen: List[Dict[str, Any]] = []
+    index: Dict[str, int] = {}
+    if bestand is not None and not bestand.empty:
+        for _, r in bestand.iterrows():
+            row = {spalte: str(r.get(spalte, "") or "") for spalte in ARCHIVE_COLUMNS}
+            schluessel = archive_key(row)
+            if schluessel in index:  # Dublette aus einer aelteren Fassung
+                continue
+            index[schluessel] = len(zeilen)
+            zeilen.append(row)
+    for roh in neue:
+        row = {spalte: str(roh.get(spalte, "") or "") for spalte in ARCHIVE_COLUMNS}
+        schluessel = archive_key(row)
+        if schluessel in entfernt:
+            continue
+        if schluessel in index:
+            alt = zeilen[index[schluessel]]
+            if not row["Payload"]:
+                row["Payload"] = alt["Payload"]
+            zeilen[index[schluessel]] = row
+        else:
+            index[schluessel] = len(zeilen)
+            zeilen.append(row)
+    return pd.DataFrame(zeilen, columns=list(ARCHIVE_COLUMNS))
+
+
+#: Spalten des Seestart-Protokolls.
+SEA_LAUNCH_COLUMNS = (
+    "Datum",
+    "Zeit",
+    "Nation",
+    "Breite",
+    "L\u00e4nge",
+    "Radius (km)",
+    "Azimut",
+    "Inklination",
+    "Orbit",
+    "Dropzones",
+    "NOTAM",
+    "N\u00e4chster bekannter Platz",
+)
+
+
+def sea_launch_row(
+    group: LaunchGroup, events: Sequence[LaunchEvent], spaceports: pd.DataFrame
+) -> Dict[str, Any]:
+    """
+    Protokollzeile eines Starts von einer beweglichen Plattform.
+
+    Die letzte Spalte ist die aufschlussreichste: Sie zeigt ueber die Zeit, ob
+    sich ein neues Startgebiet herausbildet oder ob eine vorhandene Referenz
+    nur ungenau liegt. Beim ersten belegten Fall - China, 22.07.2026 - lag der
+    naechste verzeichnete Platz 473 km entfernt.
+    """
+    archiv = archive_row(group, events)
+    mitglieder = [e for e in events if e.row_index in group.row_indices]
+    radius = next(
+        (
+            e.radius_km for e in mitglieder
+            if e.radius_km is not None
+            and group.spaceport_lat is not None
+            and surface_distance_km(
+                e.centroid_lat, e.centroid_lon,
+                group.spaceport_lat, group.spaceport_lon,
+            ) < SEA_LAUNCH_MIN_ZONE_DISTANCE_KM
+        ),
+        None,
+    )
+    naechster = ""
+    if len(spaceports) and group.spaceport_lat is not None:
+        abstand = spaceports.apply(
+            lambda r: haversine_km(
+                group.spaceport_lat, group.spaceport_lon, r["Latitude"], r["Longitude"]
+            ),
+            axis=1,
+        )
+        i = abstand.idxmin()
+        naechster = "{}, {:.0f} km".format(spaceports.loc[i, "Kurzel"], abstand[i])
+    return {
+        "Datum": archiv["Startdatum"],
+        "Zeit": archiv["Startzeit"],
+        "Nation": archiv["Nation"],
+        "Breite": "{:.4f}".format(group.spaceport_lat) if group.spaceport_lat is not None else "",
+        "L\u00e4nge": "{:.4f}".format(group.spaceport_lon) if group.spaceport_lon is not None else "",
+        "Radius (km)": "{:.0f}".format(radius) if radius else "",
+        "Azimut": archiv["Azimuth"],
+        "Inklination": archiv["Inklination"],
+        "Orbit": archiv["Orbit"],
+        "Dropzones": archiv["Dropzones"],
+        "NOTAM": archiv["NOTAM"],
+        "N\u00e4chster bekannter Platz": naechster,
+    }
+
+
+def sea_launch_key(row: Dict[str, Any]) -> str:
+    """Erkennungsmerkmal: Datum, Position auf ein Zehntelgrad und Kennungen."""
+    kennungen = sorted(
+        t.strip().upper() for t in str(row.get("NOTAM", "")).split(",") if t.strip()
+    )
+    def grob(wert: Any) -> str:
+        try:
+            return "{:.1f}".format(float(wert))
+        except (TypeError, ValueError):
+            return ""
+    return "|".join(
+        [str(row.get("Datum", "")).strip(), grob(row.get("Breite")),
+         grob(row.get("L\u00e4nge")), ",".join(kennungen)]
+    )
+
+
+def load_sea_launches(path: Path) -> pd.DataFrame:
+    """Liest das Seestart-Protokoll; fehlt es, beginnt es leer."""
+    leer = pd.DataFrame(columns=list(SEA_LAUNCH_COLUMNS))
+    if not path.exists():
+        return leer
+    try:
+        df = _read_csv_any(str(path))
+    except Exception:
+        return leer
+    for spalte in SEA_LAUNCH_COLUMNS:
+        if spalte not in df.columns:
+            df[spalte] = ""
+    return df[list(SEA_LAUNCH_COLUMNS)].fillna("").astype(str)
+
+
+def merge_sea_launches(
+    bestand: pd.DataFrame,
+    neue: Sequence[Dict[str, Any]],
+    entfernt: Optional[Set[str]] = None,
+) -> pd.DataFrame:
+    """Fuehrt neue Beobachtungen mit dem Protokoll zusammen, ohne zu verdoppeln."""
+    entfernt = entfernt or set()
+    zeilen: List[Dict[str, Any]] = []
+    index: Dict[str, int] = {}
+    if bestand is not None and not bestand.empty:
+        for _, r in bestand.iterrows():
+            row = {sp: str(r.get(sp, "") or "") for sp in SEA_LAUNCH_COLUMNS}
+            k = sea_launch_key(row)
+            if k in index:
+                continue
+            index[k] = len(zeilen)
+            zeilen.append(row)
+    for roh in neue:
+        row = {sp: str(roh.get(sp, "") or "") for sp in SEA_LAUNCH_COLUMNS}
+        k = sea_launch_key(row)
+        if k in entfernt:
+            continue
+        if k in index:
+            zeilen[index[k]] = row
+        else:
+            index[k] = len(zeilen)
+            zeilen.append(row)
+    return pd.DataFrame(zeilen, columns=list(SEA_LAUNCH_COLUMNS))
+
+
+def persist_sea_launches(path: Path, df: pd.DataFrame) -> None:
+    """Schreibt das Seestart-Protokoll in die Projektdatei."""
+    try:
+        path.write_text(
+            df[list(SEA_LAUNCH_COLUMNS)].to_csv(index=False), encoding="utf-8-sig"
+        )
+    except OSError:  # pragma: no cover - Schreibfehler duerfen die App nicht stoppen
+        pass
+
+
+def load_archive(path: Path) -> pd.DataFrame:
+    """
+    Liest das Startarchiv; fehlt oder bricht die Datei, beginnt es leer.
+
+    Bewusst ohne Cache: die Anwendung schreibt diese Datei selbst, ein
+    veralteter Zwischenstand waere hier gefaehrlicher als der Lesevorgang teuer.
+    """
+    leer = pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
+    if not path.exists():
+        return leer
+    try:
+        df = _read_csv_any(str(path))
+    except Exception:
+        return leer
+    for spalte in ARCHIVE_COLUMNS:
+        if spalte not in df.columns:
+            df[spalte] = ""
+    return df[list(ARCHIVE_COLUMNS)].fillna("").astype(str)
+
+
+def persist_archive(path: Path, df: pd.DataFrame) -> None:
+    """Schreibt das Archiv in die Projektdatei."""
+    try:
+        path.write_text(
+            df[list(ARCHIVE_COLUMNS)].to_csv(index=False), encoding="utf-8-sig"
+        )
+    except OSError:  # pragma: no cover - Schreibfehler duerfen die App nicht stoppen
+        pass
+
+
 def group_to_export_dict(g: LaunchGroup) -> Dict[str, Any]:
     """JSON-taugliche Darstellung eines Starts."""
     data = asdict(g)
@@ -3106,6 +4533,11 @@ def group_to_export_dict(g: LaunchGroup) -> Dict[str, Any]:
     data["window_to"] = g.window_to.isoformat() if g.window_to else None
     data["launch_window"] = g.launch_window
     data["zone_count"] = g.zone_count
+    # asdict() reicht datetime unverandert durch - json.dumps kann das nicht.
+    data["advance_from"] = g.advance_from.isoformat() if g.advance_from else None
+    data["advance_notice_hours"] = (
+        round(g.advance_notice_hours, 1) if g.advance_notice_hours is not None else None
+    )
     for key in ("azimuth_deg", "inclination_deg", "max_range_km", "azimuth_spread_deg"):
         if data.get(key) is not None:
             data[key] = round(float(data[key]), 3)
@@ -3308,7 +4740,9 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
         color = NATION_COLORS.get(event.nation or "", "#444444")
         is_manual = event.source == SOURCE_MANUAL
         label = "{}{} - {}".format(
-            event.notam_id, " (manuell)" if is_manual else "", event.nation or "unbestimmt"
+            event.notam_id,
+            " (pasted)" if is_manual else "",
+            nation_label(event.nation) or "undetermined",
         )
 
         # Ein NOTAM kann mehrere getrennte Gebiete beschreiben - jedes bekommt
@@ -3332,7 +4766,7 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
                 fill_opacity=0.25,
                 tooltip=label_area,
                 popup=folium.Popup(
-                    "<b>{}</b><br>Sperrzone ({} Punkte)<br>{}".format(
+                    "<b>{}</b><br>Closure zone ({} points)<br>{}".format(
                         label_area, len(poly), event.altitude_profile
                     ),
                     max_width=320,
@@ -3348,7 +4782,7 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
                 weight=2,
                 fill=True,
                 fill_opacity=0.15,
-                popup="{}: Radius {:.1f} km".format(event.notam_id, event.radius_km),
+                popup="{}: radius {:.1f} km".format(event.notam_id, event.radius_km),
             ).add_to(fmap)
 
         folium.CircleMarker(
@@ -3358,7 +4792,7 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
             fill=True,
             fill_opacity=0.9,
             popup=folium.Popup(
-                "<b>{}</b><br>Start: {}<br>Quelle: {}<br>Centroid Sperrzone<br>{:.4f}, {:.4f}<br>{}".format(
+                "<b>{}</b><br>Launch: {}<br>Source: {}<br>Zone centroid<br>{:.4f}, {:.4f}<br>{}".format(
                     event.notam_id,
                     event.launch_group or "-",
                     event.source,
@@ -3368,8 +4802,8 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
                 ),
                 max_width=320,
             ),
-            tooltip="Sperrzone {}{}".format(
-                label, " " + MANUAL_MARK + " manuell bestaetigt" if event.manual_override else ""
+            tooltip="Closure zone {}{}".format(
+                label, " " + MANUAL_MARK + " verified by hand" if event.manual_override else ""
             ),
         ).add_to(fmap)
         bounds.append([event.centroid_lat, event.centroid_lon])
@@ -3380,7 +4814,7 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
             folium.Marker(
                 location=[event.centroid_lat, event.centroid_lon],
                 icon=folium.Icon(color="purple", icon="edit", prefix="fa"),
-                tooltip="{} - manuell hinzugefuegt".format(event.notam_id),
+                tooltip="{} - pasted by hand".format(event.notam_id),
             ).add_to(fmap)
 
     # Startplatz und Flugbahn werden je Start gezeichnet, nicht je NOTAM:
@@ -3451,6 +4885,11 @@ def _persist_workspace() -> None:
         st.session_state.get("confirmed_launches", set()),
         st.session_state.get("hidden_events", set()),
         st.session_state.get("rejected_launches", set()),
+        st.session_state.get("vehicle_assignments", {}),
+        st.session_state.get("payload_assignments", {}),
+        st.session_state.get("archiv_removed", set()),
+        st.session_state.get("restored_events", set()),
+        st.session_state.get("seestarts_removed", set()),
     )
 
 
@@ -3530,7 +4969,7 @@ def _remove_reference_row(
     rest = df[df[key_column].astype(str) != key]
     _write_reference(
         path, rest, columns,
-        "{} entfernt - dauerhaft aus {} gestrichen.".format(key, path.name),
+        "{} removed - permanently deleted from {}.".format(key, path.name),
     )
 
 
@@ -3562,7 +5001,7 @@ def _reference_row(werte: Sequence[str], breiten: Sequence[float], header: bool 
 def _spaceport_editor(spaceports: pd.DataFrame) -> None:
     """Tabelle der Weltraumbahnhoefe mit Entfernen- und Hinzufuegen-Funktion."""
     suche = st.text_input(
-        "Suchen", key="sp_search", placeholder="Kürzel, Name oder Land …"
+        "Search", key="sp_search", placeholder="Code, name or country \u2026"
     ).strip().upper()
     zeilen = spaceports
     if suche:
@@ -3575,9 +5014,9 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
 
     breiten = (1.1, 3.4, 1.1, 1.1, 1.4, 1.3)
     _reference_row(
-        ("Kürzel", "Name", "Breite", "Länge", "Land", ""), breiten, header=True
+        ("Code", "Name", "Lat", "Lon", "Country", ""), breiten, header=True
     )
-    st.caption("{} von {} Einträgen".format(len(zeilen), len(spaceports)))
+    st.caption("{} of {} entries".format(len(zeilen), len(spaceports)))
     for _, r in zeilen.head(60).iterrows():
         code = str(r["Kurzel"])
         knopf = _reference_row(
@@ -3592,7 +5031,7 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
             breiten,
         )
         if knopf.button(
-            "Entfernen", key="rm_sp_{}".format(code), use_container_width=True
+            "Remove", key="rm_sp_{}".format(code), use_container_width=True
         ):
             _remove_reference_row(
                 SPACEPORT_CSV, spaceports, SPACEPORT_EXPORT_COLUMNS, "Kurzel", code
@@ -3601,24 +5040,24 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
             # neu laufen und die Auswertung mit den alten Daten weiterrechnen.
             st.rerun(scope="app")
     if len(zeilen) > 60:
-        st.info("Nur die ersten 60 Treffer werden gezeigt - Suche eingrenzen.")
+        st.info("Only the first 60 matches are shown - narrow the search.")
 
     st.divider()
     with st.form("add_spaceport", clear_on_submit=True):
-        st.markdown("**➕ Weltraumbahnhof hinzufügen**")
+        st.markdown("**Add launch site**")
         a, b = st.columns(2)
-        kurzel = a.text_input("Kürzel", max_chars=12, placeholder="z.B. WSLC")
-        land = b.selectbox("Land", TARGET_NATIONS)
-        name = st.text_input("Name", placeholder="z.B. Wenchang Space Launch Site")
+        kurzel = a.text_input("Code", max_chars=12, placeholder="e.g. WSLC")
+        land = b.selectbox("Country", TARGET_NATIONS, format_func=nation_label)
+        name = st.text_input("Name", placeholder="e.g. Wenchang Space Launch Site")
         c, d = st.columns(2)
-        lat = c.number_input("Breite (°N)", -90.0, 90.0, 0.0, format="%.4f")
-        lon = d.number_input("Länge (°E)", -180.0, 180.0, 0.0, format="%.4f")
-        if st.form_submit_button("Hinzufügen", type="primary", use_container_width=True):
+        lat = c.number_input("Latitude (°N)", -90.0, 90.0, 0.0, format="%.4f")
+        lon = d.number_input("Longitude (°E)", -180.0, 180.0, 0.0, format="%.4f")
+        if st.form_submit_button("Add", type="primary", use_container_width=True):
             code = kurzel.strip().upper()
             if not code:
-                st.error("Kürzel fehlt.")
+                st.error("Code missing.")
             elif code in set(spaceports["Kurzel"].astype(str)):
-                st.error("Kürzel {} ist bereits vergeben.".format(code))
+                st.error("Code {} is already taken.".format(code))
             else:
                 _add_reference_row(
                     SPACEPORT_CSV, spaceports, SPACEPORT_EXPORT_COLUMNS, "Kurzel",
@@ -3633,7 +5072,7 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
 def _fir_editor(firs: pd.DataFrame) -> None:
     """Tabelle der FIRs/ACCs mit Entfernen- und Hinzufuegen-Funktion."""
     suche = st.text_input(
-        "Suchen", key="fir_search", placeholder="ICAO-Code, Region, Land oder Startnation …"
+        "Search", key="fir_search", placeholder="ICAO code, region, country or launch nation \u2026"
     ).strip().upper()
     zeilen = firs
     if suche:
@@ -3647,10 +5086,10 @@ def _fir_editor(firs: pd.DataFrame) -> None:
 
     breiten = (1.0, 2.9, 1.0, 1.0, 1.7, 2.0, 1.3)
     _reference_row(
-        ("ICAO", "Region / FIR", "Breite", "Länge", "FIR liegt in", "Startnation", ""),
+        ("ICAO", "Region / FIR", "Lat", "Lon", "FIR country", "Launch nation", ""),
         breiten, header=True,
     )
-    st.caption("{} von {} Einträgen".format(len(zeilen), len(firs)))
+    st.caption("{} of {} entries".format(len(zeilen), len(firs)))
     for _, r in zeilen.head(60).iterrows():
         code = str(r["ICAO Code"])
         knopf = _reference_row(
@@ -3666,37 +5105,37 @@ def _fir_editor(firs: pd.DataFrame) -> None:
             breiten,
         )
         if knopf.button(
-            "Entfernen", key="rm_fir_{}".format(code), use_container_width=True
+            "Remove", key="rm_fir_{}".format(code), use_container_width=True
         ):
             _remove_reference_row(
                 FIR_CSV, firs, FIR_EXPORT_COLUMNS, "ICAO Code", code
             )
             st.rerun(scope="app")
     if len(zeilen) > 60:
-        st.info("Nur die ersten 60 Treffer werden gezeigt - Suche eingrenzen.")
+        st.info("Only the first 60 matches are shown - narrow the search.")
 
     st.divider()
     with st.form("add_fir", clear_on_submit=True):
-        st.markdown("**➕ FIR / ACC hinzufügen**")
+        st.markdown("**Add FIR / ACC**")
         a, b = st.columns(2)
-        icao = a.text_input("ICAO-Code", max_chars=6, placeholder="z.B. ZLHW")
-        land = b.text_input("FIR liegt in", placeholder="z.B. China")
-        name = st.text_input("Region / FIR-Name", placeholder="z.B. Lanzhou FIR")
+        icao = a.text_input("ICAO code", max_chars=6, placeholder="e.g. ZLHW")
+        land = b.text_input("FIR country", placeholder="e.g. China")
+        name = st.text_input("Region / FIR name", placeholder="e.g. Lanzhou FIR")
         c, d = st.columns(2)
-        lat = c.number_input("Breite (°N)", -90.0, 90.0, 0.0, format="%.4f", key="fir_lat")
-        lon = d.number_input("Länge (°E)", -180.0, 180.0, 0.0, format="%.4f", key="fir_lon")
+        lat = c.number_input("Latitude (°N)", -90.0, 90.0, 0.0, format="%.4f", key="fir_lat")
+        lon = d.number_input("Longitude (°E)", -180.0, 180.0, 0.0, format="%.4f", key="fir_lon")
         nationen = st.multiselect(
-            "Zugehörige Startnation(en)", TARGET_NATIONS,
-            help="Mehrere Nationen bedeuten: die Zuordnung braucht eine Nennung im NOTAM-Text.",
+            "Associated launch nation(s)", TARGET_NATIONS,
+            help="Several nations mean the assignment needs the nation named in the NOTAM text.",
         )
-        if st.form_submit_button("Hinzufügen", type="primary", use_container_width=True):
+        if st.form_submit_button("Add", type="primary", use_container_width=True):
             code = icao.strip().upper()
             if not code:
-                st.error("ICAO-Code fehlt.")
+                st.error("ICAO code missing.")
             elif code in set(firs["ICAO Code"].astype(str)):
-                st.error("ICAO-Code {} ist bereits vergeben.".format(code))
+                st.error("ICAO code {} is already taken.".format(code))
             elif not nationen:
-                st.error("Mindestens eine Startnation auswählen.")
+                st.error("Select at least one launch nation.")
             else:
                 _add_reference_row(
                     FIR_CSV, firs, FIR_EXPORT_COLUMNS, "ICAO Code",
@@ -3713,7 +5152,7 @@ def _fir_editor(firs: pd.DataFrame) -> None:
 def _vehicle_editor(vehicles: pd.DataFrame) -> None:
     """Tabelle der Traegersysteme mit Entfernen- und Hinzufuegen-Funktion."""
     suche = st.text_input(
-        "Suchen", key="veh_search", placeholder="Abkürzung, Name oder Land …"
+        "Search", key="veh_search", placeholder="Abbreviation, name or country \u2026"
     ).strip().upper()
     zeilen = vehicles
     if suche:
@@ -3727,9 +5166,9 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
 
     breiten = (1.3, 2.4, 2.6, 1.4, 1.3)
     _reference_row(
-        ("Abkürzung", "Name", "Englisch", "Land", ""), breiten, header=True
+        ("Abbrev.", "Name", "English", "Country", ""), breiten, header=True
     )
-    st.caption("{} von {} Einträgen".format(len(zeilen), len(vehicles)))
+    st.caption("{} of {} entries".format(len(zeilen), len(vehicles)))
     for _, r in zeilen.head(60).iterrows():
         code = str(r["Abkürzung"])
         knopf = _reference_row(
@@ -3743,31 +5182,31 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
             breiten,
         )
         if knopf.button(
-            "Entfernen", key="rm_veh_{}".format(code), use_container_width=True
+            "Remove", key="rm_veh_{}".format(code), use_container_width=True
         ):
             _remove_reference_row(
                 VEHICLE_CSV, vehicles, VEHICLE_EXPORT_COLUMNS, "Abkürzung", code
             )
             st.rerun(scope="app")
     if len(zeilen) > 60:
-        st.info("Nur die ersten 60 Treffer werden gezeigt - Suche eingrenzen.")
+        st.info("Only the first 60 matches are shown - narrow the search.")
 
     st.divider()
     with st.form("add_vehicle", clear_on_submit=True):
-        st.markdown("**➕ Trägersystem hinzufügen**")
+        st.markdown("**Add launch vehicle**")
         a, b = st.columns(2)
-        kuerzel = a.text_input("Abkürzung", max_chars=20, placeholder="z.B. CZ-5B")
-        land = b.selectbox("Land", TARGET_NATIONS, key="veh_land")
-        name = st.text_input("Name", placeholder="z.B. Chang Zheng 5B")
+        kuerzel = a.text_input("Abbreviation", max_chars=20, placeholder="e.g. CZ-5B")
+        land = b.selectbox("Country", TARGET_NATIONS, key="veh_land", format_func=nation_label)
+        name = st.text_input("Name", placeholder="e.g. Chang Zheng 5B")
         englisch = st.text_input(
-            "Alternativname englisch", placeholder="z.B. Long March 5B"
+            "Alternative English name", placeholder="e.g. Long March 5B"
         )
-        if st.form_submit_button("Hinzufügen", type="primary", use_container_width=True):
+        if st.form_submit_button("Add", type="primary", use_container_width=True):
             code = kuerzel.strip()
             if not code:
-                st.error("Abkürzung fehlt.")
+                st.error("Abbreviation missing.")
             elif code.upper() in {c.upper() for c in vehicles["Abkürzung"].astype(str)}:
-                st.error("Abkürzung {} ist bereits vergeben.".format(code))
+                st.error("Abbreviation {} is already taken.".format(code))
             elif not name.strip():
                 st.error("Name fehlt.")
             else:
@@ -3783,24 +5222,26 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
                 st.rerun(scope="app")
 
 
-@st.dialog("⚙️ Referenzdaten verwalten", width="large")
+@st.dialog("Reference Data", width="large")
 def _reference_dialog(
     spaceports: pd.DataFrame, firs: pd.DataFrame, vehicles: pd.DataFrame
 ) -> None:
     """Optionsmenue zur Pflege der Startplatz- und FIR-Referenz."""
     st.caption(
-        "Entfernte Einträge werden nicht mehr zur Berechnung herangezogen, "
-        "hinzugefügte fließen sofort ein. Die Dateien auf der Platte bleiben "
-        "unverändert, bis du sie unten ausdrücklich speicherst."
+        "Removed entries drop out of every calculation, added ones take effect "
+        "immediately. Every change is written straight to the file on disk - "
+        "use Undo below to take one back."
     )
     flash = st.session_state.pop("ref_flash", None)
     if flash:
         st.success(flash)
-    tab_sp, tab_fir, tab_veh = st.tabs(
+    tab_sp, tab_fir, tab_veh, tab_arc, tab_sea = st.tabs(
         [
-            "🚀 Weltraumbahnhöfe ({})".format(len(spaceports)),
-            "🗺️ ICAO FIR/ACC ({})".format(len(firs)),
-            "🛰️ Trägersysteme ({})".format(len(vehicles)),
+            "Launch Sites ({})".format(len(spaceports)),
+            "ICAO FIR / ACC ({})".format(len(firs)),
+            "Launch Vehicles ({})".format(len(vehicles)),
+            "Launch Archive ({})".format(len(load_archive(ARCHIVE_CSV))),
+            "Sea Launches ({})".format(len(load_sea_launches(SEA_LAUNCH_CSV))),
         ]
     )
     with tab_sp:
@@ -3809,28 +5250,32 @@ def _reference_dialog(
         _fir_editor(firs)
     with tab_veh:
         _vehicle_editor(vehicles)
+    with tab_arc:
+        _archive_editor()
+    with tab_sea:
+        _sea_launch_editor()
 
     st.divider()
     stapel = st.session_state.get("ref_undo", [])
     st.caption(
-        "Änderungen werden sofort in `{}`, `{}` bzw. `{}` geschrieben und "
-        "überleben einen Neustart.".format(
-            SPACEPORT_CSV.name, FIR_CSV.name, VEHICLE_CSV.name
+        "Changes are written to `{}`, `{}`, `{}` and `{}` right away and "
+        "survive a restart.".format(
+            SPACEPORT_CSV.name, FIR_CSV.name, VEHICLE_CSV.name, ARCHIVE_CSV.name
         )
     )
     a, b, c, d = st.columns(4)
     if a.button(
-        "↩️ Letzte Änderung rückgängig ({})".format(len(stapel)),
+        "Undo last change ({})".format(len(stapel)),
         disabled=not stapel,
         use_container_width=True,
     ):
         zurueck = _undo_reference()
         st.session_state["ref_flash"] = (
-            "Rückgängig gemacht: {}".format(zurueck) if zurueck else "Nichts rückgängig zu machen."
+            "Undone: {}".format(zurueck) if zurueck else "Nothing to undo."
         )
         st.rerun(scope="app")
     b.download_button(
-        "💾 Startplätze sichern",
+        "Download launch sites",
         data=reference_to_csv(spaceports, SPACEPORT_EXPORT_COLUMNS),
         file_name="weltraumbahnhoefe_koordinaten_updated.csv",
         mime="text/csv",
@@ -3838,20 +5283,20 @@ def _reference_dialog(
         help="Kopie des aktuellen Stands herunterladen.",
     )
     c.download_button(
-        "💾 FIRs sichern",
+        "Download FIRs",
         data=reference_to_csv(firs, FIR_EXPORT_COLUMNS),
         file_name="icao_fir_acc_coordinates_updated.csv",
         mime="text/csv",
         use_container_width=True,
     )
     d.download_button(
-        "💾 Trägersysteme sichern",
+        "Download launch vehicles",
         data=reference_to_csv(vehicles, VEHICLE_EXPORT_COLUMNS),
         file_name="traegersysteme_updated.csv",
         mime="text/csv",
         use_container_width=True,
     )
-    if st.button("Schließen", use_container_width=True, type="primary"):
+    if st.button("Close", use_container_width=True, type="primary"):
         st.session_state["ref_dialog_open"] = False
         st.rerun(scope="app")
 
@@ -3934,15 +5379,490 @@ def _hide_event(key: str) -> None:
 
 
 def _unhide_event(key: str) -> None:
-    """Holt ein ausgeblendetes NOTAM zurueck in den Review."""
+    """
+    Holt ein ausgeblendetes NOTAM zurueck - und zwar dauerhaft.
+
+    Der Schluessel wandert zusaetzlich in `restored_events`. Ohne das waere der
+    Knopf bei automatisch ausgeblendeten NOTAMs wirkungslos: solange die Meldung
+    in der Tagesdatei steht, fiele sie beim naechsten Durchlauf sofort wieder
+    heraus - ohne Hinweis, warum.
+    """
     st.session_state["hidden_events"].discard(key)
+    st.session_state.setdefault("restored_events", set()).add(key)
     _persist_workspace()
+
+
+def _unhide_all() -> None:
+    """Holt alle ausgeblendeten NOTAMs zurueck, auch die automatisch entfernten."""
+    for schluessel in list(st.session_state.get("auto_hidden_keys", set())):
+        st.session_state.setdefault("restored_events", set()).add(schluessel)
+    st.session_state["hidden_events"].clear()
+    _persist_workspace()
+
+
+def _set_vehicle(widget_key: str, event_keys: Sequence[str]) -> None:
+    """
+    Uebernimmt die Auswahl aus dem Dropdown - fuer alle NOTAMs eines Starts.
+
+    Die Trennzeile ist technisch waehlbar, weil Streamlit keine inaktiven
+    Eintraege kennt. Wird sie gewaehlt, bleibt die bisherige Zuweisung stehen
+    und das Dropdown springt zurueck.
+    """
+    gewaehlt = str(st.session_state.get(widget_key, VEHICLE_NONE) or "")
+    zuweisungen = st.session_state.setdefault("vehicle_assignments", {})
+    if gewaehlt == VEHICLE_SEPARATOR:
+        bisher = next((zuweisungen[k] for k in event_keys if zuweisungen.get(k)), "")
+        st.session_state[widget_key] = bisher
+        return
+    for schluessel in event_keys:
+        if gewaehlt:
+            zuweisungen[schluessel] = gewaehlt
+        else:
+            zuweisungen.pop(schluessel, None)
+    _persist_workspace()
+
+
+def _set_payload(widget_key: str, event_keys: Sequence[str]) -> None:
+    """Uebernimmt den Freitext aus dem Payload-Feld - fuer alle Zonen eines Starts."""
+    text = str(st.session_state.get(widget_key, "") or "").strip()
+    zuweisungen = st.session_state.setdefault("payload_assignments", {})
+    for schluessel in event_keys:
+        if text:
+            zuweisungen[schluessel] = text
+        else:
+            zuweisungen.pop(schluessel, None)
+    _persist_workspace()
+
+
+def _payload_field(
+    event: "LaunchEvent", group_keys: Dict[str, List[str]], prefix: str
+) -> None:
+    """
+    Freitextfeld fuer die Nutzlast.
+
+    Bewusst kein Auswahlfeld: welche Nutzlast an Bord war, steht in keiner
+    Referenz und wird oft erst Tage nach dem Start bekannt. Wie beim
+    Traegersystem gilt der Eintrag fuer alle Sperrzonen desselben Starts.
+    """
+    schluessel = group_keys.get(event.key) or [event.key]
+    widget_key = "{}_payload_{}".format(prefix, event.key)
+    st.session_state[widget_key] = event.payload
+    st.text_input(
+        "Payload",
+        key=widget_key,
+        placeholder="e.g. Yaogan-XX · leave empty while unknown",
+        on_change=_set_payload,
+        args=(widget_key, schluessel),
+        help="Manual entry. It changes nothing about the detection and can be "
+        "added later at any time.",
+    )
+
+
+def _vehicle_picker(
+    event: "LaunchEvent",
+    vehicles: pd.DataFrame,
+    group_keys: Dict[str, List[str]],
+    prefix: str,
+) -> None:
+    """
+    Dropdown zur manuellen Wahl des Traegersystems.
+
+    Die Wahl gilt fuer alle Sperrzonen desselben erkannten Starts - dieselbe
+    Rakete kann nicht in einer Zone eine andere sein als in der naechsten.
+    """
+    schluessel = group_keys.get(event.key) or [event.key]
+    optionen = vehicle_options(vehicles, vehicle_nation(event))
+    trenner = optionen.index(VEHICLE_SEPARATOR) if VEHICLE_SEPARATOR in optionen else None
+    andere = set(optionen[trenner + 1:]) if trenner is not None else set()
+    if event.vehicle and event.vehicle not in optionen:
+        # Aus der Referenz entfernt: der Eintrag bleibt waehlbar, damit die
+        # Zuweisung nicht unbemerkt auf "ohne" zurueckfaellt.
+        optionen.append(event.vehicle)
+    widget_key = "{}_vehicle_{}".format(prefix, event.key)
+    st.session_state[widget_key] = event.vehicle if event.vehicle in optionen else VEHICLE_NONE
+    st.selectbox(
+        "Trägersystem",
+        optionen,
+        key=widget_key,
+        format_func=lambda code: vehicle_label(code, vehicles, with_nation=code in andere),
+        on_change=_set_vehicle,
+        args=(widget_key, schluessel),
+        help="Manual assignment. It changes nothing about the detection - "
+        "neither nation nor launch site nor orbit.",
+    )
+    if len(schluessel) > 1:
+        st.caption(
+            "Applies to all {} closure zones of this launch.".format(len(schluessel))
+        )
+
+
+def _show_archive_status(platzhalter: Any) -> None:
+    """Schreibt den Archivstand in die Seitenleiste."""
+    anzahl = len(load_archive(ARCHIVE_CSV))
+    platzhalter.markdown(
+        "{} Launch archive: {} launch(es)".format(
+            glyph(GLYPH_OK, COLOR_OK, 0.85), anzahl
+        )
+        if anzahl
+        else "{} Launch archive: empty".format(glyph(GLYPH_EMPTY, COLOR_MUTED)),
+        unsafe_allow_html=True,
+    )
+
+
+def _update_archive(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    table: pd.DataFrame,
+) -> None:
+    """
+    Schreibt das Startarchiv fort.
+
+    Beruecksichtigt werden alle Starts, die die Anwendung als solche fuehrt -
+    bewusst ohne die Filter der Seitenleiste, damit eine Ansichtseinstellung
+    nicht darueber entscheidet, was ins Archiv gelangt. Geschrieben wird nur,
+    wenn sich tatsaechlich etwas geaendert hat.
+    """
+    ok_zeilen = (
+        set(int(r) for r in table[table["Status"] == "OK"]["_row"])
+        if len(table)
+        else set()
+    )
+    kandidaten = [
+        g for g in groups if g.spaceport_code and ok_zeilen & set(g.row_indices)
+    ]
+    if not kandidaten:
+        return
+    bestand = load_archive(ARCHIVE_CSV)
+    neu = merge_archive(
+        bestand,
+        [archive_row(g, events) for g in kandidaten],
+        set(st.session_state.get("archiv_removed", set())),
+    )
+    if neu.to_csv(index=False) != bestand.to_csv(index=False):
+        persist_archive(ARCHIVE_CSV, neu)
+
+
+def _update_sea_launches(
+    events: Sequence["LaunchEvent"],
+    groups: Sequence["LaunchGroup"],
+    table: pd.DataFrame,
+    spaceports: pd.DataFrame,
+) -> None:
+    """
+    Schreibt das Seestart-Protokoll fort.
+
+    Aufgenommen wird nur, was aus der Geometrie abgeleitet wurde - ein Start
+    von einem verzeichneten Platz gehoert nicht hierher.
+
+    Wichtig: Dieses Protokoll fliesst NICHT in die Startplatz-Suche zurueck.
+    Eine Plattform steht beim naechsten Mal woanders; alte Positionen als
+    Kandidaten zu fuehren hiesse, genau den Fehler nachzubauen, den die
+    Ableitung behebt. Die Liste dient dem Vergleich und der Geschichte.
+    """
+    ok_zeilen = (
+        set(int(r) for r in table[table["Status"] == "OK"]["_row"])
+        if len(table)
+        else set()
+    )
+    kandidaten = [
+        g for g in groups if g.site_from_geometry and ok_zeilen & set(g.row_indices)
+    ]
+    if not kandidaten:
+        return
+    bestand = load_sea_launches(SEA_LAUNCH_CSV)
+    neu = merge_sea_launches(
+        bestand,
+        [sea_launch_row(g, events, spaceports) for g in kandidaten],
+        set(st.session_state.get("seestarts_removed", set())),
+    )
+    if neu.to_csv(index=False) != bestand.to_csv(index=False):
+        persist_sea_launches(SEA_LAUNCH_CSV, neu)
+
+
+def _remove_sea_launch_row(schluessel: str) -> None:
+    """Loescht eine Protokollzeile dauerhaft."""
+    _push_undo(SEA_LAUNCH_CSV, "Sea launch row removed")
+    st.session_state.setdefault("seestarts_removed", set()).add(schluessel)
+    bestand = load_sea_launches(SEA_LAUNCH_CSV)
+    behalten = [
+        r for _, r in bestand.iterrows() if sea_launch_key(dict(r)) != schluessel
+    ]
+    persist_sea_launches(
+        SEA_LAUNCH_CSV, pd.DataFrame(behalten, columns=list(SEA_LAUNCH_COLUMNS))
+    )
+    _persist_workspace()
+    st.session_state["ref_flash"] = "Sea launch row removed"
+
+
+def _sea_launch_editor() -> None:
+    """Tabelle des Seestart-Protokolls mit Entfernen-Funktion."""
+    liste = load_sea_launches(SEA_LAUNCH_CSV)
+    st.caption(
+        "Launches from mobile platforms. The launch point here does not come "
+        "from the launch-site reference but from the geometry of the messages: "
+        "a small circular zone with the remaining closure areas lined up along "
+        "one track from it. **This log does not feed back into the launch-site "
+        "search**: a platform sits somewhere else next time."
+    )
+    if liste.empty:
+        st.info(
+            "No sea launch recorded yet. As soon as an analysis derives a launch "
+            "point from the geometry, `{}` fills itself.".format(SEA_LAUNCH_CSV.name)
+        )
+        return
+    breiten = (1.1, 0.8, 1.0, 1.0, 1.0, 0.9, 0.9, 1.7, 1.3)
+    _reference_row(
+        ("Date", "Time", "Nation", "Lat", "Lon", "Azimuth", "Incl.",
+         "Nearest known site", ""),
+        breiten,
+        header=True,
+    )
+    st.caption("{} sea launch(es)".format(len(liste)))
+    for _, r in liste.head(60).iterrows():
+        schluessel = sea_launch_key(dict(r))
+        knopf = _reference_row(
+            (
+                str(r["Datum"]), str(r["Zeit"]), str(r["Nation"])[:12],
+                str(r["Breite"]), str(r["Länge"]), str(r["Azimut"]),
+                str(r["Inklination"]), str(r["Nächster bekannter Platz"])[:24], "",
+            ),
+            breiten,
+        )
+        if knopf.button(
+            "Remove",
+            key="rm_sea_{}".format(hashlib.sha1(schluessel.encode()).hexdigest()[:10]),
+            use_container_width=True,
+        ):
+            _remove_sea_launch_row(schluessel)
+            st.rerun(scope="app")
+
+
+def _remove_archive_row(schluessel: str) -> None:
+    """
+    Loescht eine Archivzeile - dauerhaft.
+
+    Der Schluessel wandert in den Arbeitsstand, sonst legte der naechste Import
+    denselben Start sofort wieder an, solange sein NOTAM in der Tagesdatei steht.
+    """
+    _push_undo(ARCHIVE_CSV, "Archivzeile entfernt")
+    st.session_state.setdefault("archiv_removed", set()).add(schluessel)
+    bestand = load_archive(ARCHIVE_CSV)
+    behalten = [
+        r for _, r in bestand.iterrows() if archive_key(dict(r)) != schluessel
+    ]
+    persist_archive(
+        ARCHIVE_CSV, pd.DataFrame(behalten, columns=list(ARCHIVE_COLUMNS))
+    )
+    _persist_workspace()
+    st.session_state["ref_flash"] = "Archivzeile entfernt"
+
+
+def _archive_editor() -> None:
+    """Tabelle des Startarchivs mit Entfernen-Funktion."""
+    archiv = load_archive(ARCHIVE_CSV)
+    st.caption(
+        "This file is written by the application itself: every recognised launch "
+        "gets a row, payload or not. You add the payload under *NOTAM Data* - it is "
+        "never overwritten by a later run. That is why there is no form to add a "
+        "row here, only to remove one."
+    )
+    if archiv.empty:
+        st.info(
+            "No launches archived yet. As soon as a NOTAM file has been "
+            "analysed, `{}` fills itself.".format(ARCHIVE_CSV.name)
+        )
+        return
+    suche = st.text_input(
+        "Search", key="archiv_suche", placeholder="NOTAM, nation, launch site, payload …"
+    ).strip().lower()
+    zeilen = archiv
+    if suche:
+        maske = archiv.apply(
+            lambda r: suche in " ".join(str(v).lower() for v in r), axis=1
+        )
+        zeilen = archiv[maske]
+    breiten = (1.5, 1.0, 1.1, 0.9, 1.0, 1.2, 0.8, 0.9, 1.0)
+    _reference_row(
+        ("NOTAM", "Datum", "Zeit", "Nation", "Platz", "Vehicle", "Payload", "Orbit", ""),
+        breiten,
+        header=True,
+    )
+    st.caption("{} of {} launches".format(len(zeilen), len(archiv)))
+    for _, r in zeilen.head(60).iterrows():
+        schluessel = archive_key(dict(r))
+        knopf = _reference_row(
+            (
+                "`{}`".format(str(r["NOTAM"])[:24]),
+                str(r["Startdatum"]),
+                str(r["Startzeit"]),
+                str(r["Nation"])[:12],
+                str(r["Weltraumbahnhof"]),
+                str(r["Trägersystem"])[:14] or "-",
+                str(r["Payload"])[:16] or "-",
+                str(r["Orbit"]),
+                "",
+            ),
+            breiten,
+        )
+        if knopf.button(
+            "Remove",
+            key="rm_arc_{}".format(hashlib.sha1(schluessel.encode()).hexdigest()[:10]),
+            use_container_width=True,
+        ):
+            _remove_archive_row(schluessel)
+            st.rerun(scope="app")
+    if len(zeilen) > 60:
+        st.info("Only the first 60 matches are shown - narrow the search.")
+
+
+#: Schriftstapel. Die Grotesk tritt nur in der Wortmarke und in Ueberschriften
+#: auf - gross, selbstbewusst und mit viel ruhiger Flaeche um sie herum, nie im
+#: Mengensatz. Den Fliesstext traegt eine humanistische Grotesk, die waermer und
+#: nahbarer wirkt. Beide Stapel enden bei Arial: sie liegt auf jedem Rechner und
+#: ist die vorgesehene Ersatzschrift, wenn die Hausschrift fehlt. Keine
+#: Webschrift wird geladen - das spart eine Lizenz und einen Netzzugriff.
+FONT_GROTESK = '"Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif'
+FONT_HUMANIST = '"Myriad Pro", Myriad, "Segoe UI", Arial, "Liberation Sans", sans-serif'
+
+#: Durchschuss zwischen Wortmarke, Unterzeile und Beschreibung. Derselbe Wert
+#: wiederholt sich - diese Selbstaehnlichkeit haelt die Kopfzeile zusammen.
+LEADING_REM = 0.55
+
+#: Unbunte Skala. Farbe traegt in dieser Oberflaeche ausschliesslich
+#: Information; die Wortmarke und alle Flaechen bleiben neutral.
+INK_WHITE = "#FFFFFF"
+INK_COOLGRAY = "#ADAFAF"
+INK_SILVER = "#9A9B9C"
+INK_ANTHRACITE = "#757575"
+
+STYLE_HTML = """
+<style>
+:root {{
+  --nola-grotesk: {grotesk};
+  --nola-humanist: {humanist};
+  --nola-durchschuss: {leading}rem;
+}}
+
+/* Mengensatz in der humanistischen Grotesk, Ueberschriften in der Grotesk. */
+html, body, [class*="st-"], .stMarkdown, .stDataFrame {{
+  font-family: var(--nola-humanist);
+}}
+/* Ausnahme: Icons sind Ligaturen. Im DOM steht ihr Name als Text
+   ("keyboard_arrow_down"), erst die Icon-Schrift macht daraus ein Zeichen.
+   Wird sie mit ueberschrieben, erscheint der Rohtext im Aufklapper. */
+[data-testid="stIconMaterial"],
+span[translate="no"],
+.material-symbols-rounded {{
+  font-family: "Material Symbols Rounded" !important;
+}}
+h1, h2, h3, h4, h5, h6 {{
+  font-family: var(--nola-grotesk);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}}
+
+/* --- Wortmarke ---------------------------------------------------------
+   Zweizeilig, ohne Wortzwischenraeume, Versalbuchstaben trennen die Woerter,
+   Schlusspunkt auf der zweiten Zeile. Die Farbdifferenzierung der Wortteile
+   dient der Lesbarkeit, nicht der Dekoration - sie bleibt unbunt. */
+.nola-kopf {{ margin: 0.5rem 0 2.2rem 0; }}
+.nola-marke {{
+  display: flex;
+  align-items: flex-end;
+  gap: 1.25rem;
+}}
+.nola-maskottchen {{
+  height: clamp(5.2rem, 12vw, 7.4rem);
+  width: auto;
+  flex: none;
+}}
+.nola-wort {{
+  font-family: var(--nola-grotesk);
+  font-weight: 700;
+  font-size: clamp(2.6rem, 7vw, 4.2rem);
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: {weiss};
+}}
+.nola-lang {{
+  margin-top: var(--nola-durchschuss);
+  font-family: var(--nola-grotesk);
+  font-weight: 700;
+  font-size: clamp(0.95rem, 2vw, 1.25rem);
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: {silber};
+}}
+.nola-lang .hell {{ color: {coolgray}; }}
+.nola-zeile {{
+  margin-top: var(--nola-durchschuss);
+  font-size: 0.80rem;
+  line-height: 1.4;
+  color: {anthrazit};
+}}
+
+</style>
+"""
+
+HEADER_HTML = """
+<div class="nola-kopf">
+  <div class="nola-marke">
+    <div class="nola-text">
+      <div class="nola-wort">NOLA</div>
+      <div class="nola-lang">Notam<span class="hell">Launch</span>Analyzer.</div>
+    </div>
+    __MASKOTTCHEN__
+  </div>
+  <div class="nola-zeile">
+    Daily screening of NOTAM files for space launches &middot; China &middot;
+    Russia &middot; India &middot; Iran &middot; North Korea &middot; USA
+  </div>
+</div>
+"""
+
+
+MASCOT_SVG = APP_DIR / "assets" / "notam-mascot-transparent.svg"
+
+
+def _mascot_img() -> str:
+    """Maskottchen als eingebettetes Bild; fehlt die Datei, bleibt die Wortmarke allein."""
+    try:
+        daten = base64.b64encode(MASCOT_SVG.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    return (
+        '<img class="nola-maskottchen" alt="" '
+        'src="data:image/svg+xml;base64,{}">'.format(daten)
+    )
+
+
+def _render_header() -> None:
+    """Zeichnet Gestaltungsregeln und Kopfzeile."""
+    st.markdown(
+        STYLE_HTML.format(
+            grotesk=FONT_GROTESK,
+            humanist=FONT_HUMANIST,
+            leading=LEADING_REM,
+            weiss=INK_WHITE,
+            silber=INK_SILVER,
+            coolgray=INK_COOLGRAY,
+            anthrazit=INK_ANTHRACITE,
+        ),
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        HEADER_HTML.replace("__MASKOTTCHEN__", _mascot_img()),
+        unsafe_allow_html=True,
+    )
+
 
 
 def _reference_status(label: str, path: Path) -> Tuple[Optional[pd.DataFrame], str]:
     """Laedt eine Referenz-CSV und liefert Dataframe plus Statusmeldung."""
     if not path.exists():
-        return None, "❌ {}: Datei nicht gefunden ({})".format(label, path.name)
+        return None, "{} {}: file not found ({})".format(
+            glyph(GLYPH_MISSING, COLOR_ERROR), label, path.name
+        )
     try:
         stamp = path.stat().st_mtime
         if "weltraum" in path.name:
@@ -3952,16 +5872,19 @@ def _reference_status(label: str, path: Path) -> Tuple[Optional[pd.DataFrame], s
         else:
             df = load_firs(str(path), stamp)
     except Exception as exc:
-        return None, "❌ {}: {}".format(label, exc)
-    return df, "✅ {}: {} Eintraege ({})".format(
-        label, len(df), datetime.fromtimestamp(stamp).strftime("%d.%m.%Y %H:%M")
+        return None, "{} {}: {}".format(glyph(GLYPH_MISSING, COLOR_ERROR), label, exc)
+    return df, "{} {}: {} entries ({})".format(
+        glyph(GLYPH_OK, COLOR_OK, 0.85),
+        label,
+        len(df),
+        datetime.fromtimestamp(stamp).strftime("%d.%m.%Y %H:%M"),
     )
 
 
 def main() -> None:
     st.set_page_config(
-        page_title="NOTAM Space-Launch Analyzer",
-        page_icon="🚀",
+        page_title="NOLA",
+        page_icon="\u25B8",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -3972,42 +5895,69 @@ def main() -> None:
         st.session_state["confirmed_launches"] = set(gespeichert.get("confirmed_launches", []))
         st.session_state["hidden_events"] = set(gespeichert.get("hidden_events", []))
         st.session_state["rejected_launches"] = set(gespeichert.get("rejected_launches", []))
+        for feld in ("vehicle_assignments", "payload_assignments"):
+            roh = gespeichert.get(feld, {})
+            st.session_state[feld] = (
+                {str(k): str(v) for k, v in roh.items() if v}
+                if isinstance(roh, dict)
+                else {}
+            )
+        st.session_state["archiv_removed"] = set(gespeichert.get("archiv_removed", []))
+        st.session_state["restored_events"] = set(gespeichert.get("restored_events", []))
+        st.session_state["seestarts_removed"] = set(
+            gespeichert.get("seestarts_removed", [])
+        )
         st.session_state["workspace_loaded"] = True
     st.session_state.setdefault("manual_notams", [])
     st.session_state.setdefault("manual_feedback", None)
     st.session_state.setdefault("confirmed_launches", set())
     st.session_state.setdefault("hidden_events", set())
     st.session_state.setdefault("rejected_launches", set())
+    st.session_state.setdefault("vehicle_assignments", {})
+    st.session_state.setdefault("payload_assignments", {})
+    st.session_state.setdefault("archiv_removed", set())
+    st.session_state.setdefault("restored_events", set())
+    st.session_state.setdefault("seestarts_removed", set())
     st.session_state.setdefault("focus_rows", [])
     st.session_state.setdefault("goto_notam_data", False)
     st.session_state.setdefault("ref_undo", [])
     st.session_state.setdefault("ref_dialog_open", False)
     st.session_state.setdefault("ref_flash", None)
 
-    st.title("🚀 NOTAM Space-Launch Analyzer")
-    st.caption(
-        "Taegliche Auswertung von NOTAM-Dateien auf Raumfahrtstarts "
-        "(China · Russland · Indien · Iran · Nordkorea · USA)"
-    )
+    _render_header()
 
     # ----------------------------- Sidebar ------------------------------- #
     with st.sidebar:
-        kopf, zahnrad = st.columns([5, 1], vertical_alignment="bottom")
-        kopf.header("📚 Referenzdaten")
-        if zahnrad.button("⚙️", help="Referenzdaten verwalten", use_container_width=True):
+        kopf, zahnrad = st.columns([6, 1], vertical_alignment="bottom")
+        kopf.header("Reference Data")
+        # Stift als Strichsymbol aus der Material-Bibliothek statt eines
+        # beschrifteten Knopfes - dieselbe Sprache wie die Referenzoberflaeche,
+        # die ihre Bearbeiten-Funktion ebenso als Stift fuehrt. "tertiary"
+        # nimmt dem Knopf Rahmen und Flaeche, es bleibt das Symbol.
+        if zahnrad.button(
+            "",
+            icon=":material/edit:",
+            help="Manage reference data",
+            type="tertiary",
+            key="ref_edit",
+        ):
             st.session_state["ref_dialog_open"] = True
 
         spaceports, sp_msg = _reference_status("Weltraumbahnhoefe", SPACEPORT_CSV)
         firs, fir_msg = _reference_status("ICAO FIR/ACC", FIR_CSV)
         vehicles, veh_msg = _reference_status("Traegersysteme", VEHICLE_CSV)
 
-        st.markdown(sp_msg)
-        st.markdown(fir_msg)
-        st.markdown(veh_msg)
+        st.markdown(sp_msg, unsafe_allow_html=True)
+        st.markdown(fir_msg, unsafe_allow_html=True)
+        st.markdown(veh_msg, unsafe_allow_html=True)
+        # Platzhalter: das Archiv waechst erst weiter unten, waehrend der
+        # Auswertung. Ohne ihn zeigte die Seitenleiste den Stand von vorhin.
+        archiv_status = st.empty()
+        _show_archive_status(archiv_status)
 
         if spaceports is None or firs is None or vehicles is None:
             st.error(
-                "Alle drei Referenz-CSVs muessen im Ordner von app.py liegen:\n\n"
+                "All three reference CSVs must sit in the folder of app.py:\n\n"
                 "- `weltraumbahnhoefe_koordinaten_updated.csv`\n"
                 "- `icao_fir_acc_coordinates_updated.csv`\n"
                 "- `traegersysteme_updated.csv`"
@@ -4015,20 +5965,20 @@ def main() -> None:
             st.stop()
 
         st.divider()
-        st.header("📤 NOTAM-Import")
+        st.header("Import")
         uploaded = st.file_uploader(
-            "Taegliche NOTAM-Datei hochladen",
+            "Upload the daily NOTAM file",
             type=["csv", "txt", "xls", "xlsx"],
             accept_multiple_files=False,
-            help="CSV oder Excel-Export (z.B. FAA FNS). Vorspannzeilen werden erkannt.",
+            help="CSV or Excel export (e.g. FAA FNS). Leading title rows are detected.",
         )
         use_demo = st.toggle(
-            "Demo-Datensatz verwenden",
+            "Use demo data set",
             value=False,
-            help="Beispiel-NOTAMs zum Testen der Pipeline ohne eigenen Upload.",
+            help="Sample NOTAMs to exercise the pipeline without your own file.",
         )
         st.divider()
-        st.header("✍️ NOTAM manuell einfügen")
+        st.header("Paste NOTAM")
         st.text_area(
             "NOTAM per Copy & Paste",
             key="manual_input",
@@ -4042,14 +5992,14 @@ def main() -> None:
                 "F) SFC G) UNL"
             ),
             help=(
-                "Beliebiges NOTAM-Format: ICAO-Items, FAA-Domestic (!FDC ...) oder "
-                "reiner Freitext. Koordinaten in 1936N11057E, 19°36'N 110°57'E oder "
-                "Dezimalgrad. Mehrere NOTAMs auf einmal werden an den Kennungen "
-                "getrennt, sonst an Leerzeilen."
+                "Any NOTAM format: ICAO items, FAA domestic (!FDC ...) or plain "
+                "text. Coordinates as 1936N11057E, 19°36'N 110°57'E or decimal "
+                "degrees. Several NOTAMs at once are split at their identifiers, "
+                "otherwise at blank lines."
             ),
         )
         st.button(
-            "➕ Hinzufügen",
+            "Add",
             on_click=_add_manual_notams,
             use_container_width=True,
             type="primary",
@@ -4057,25 +6007,25 @@ def main() -> None:
 
         feedback = st.session_state.get("manual_feedback")
         if feedback:
-            st.success("{} NOTAM(s) übernommen.".format(feedback))
+            st.success("{} NOTAM(s) added.".format(feedback))
         elif feedback == 0:
             st.warning("Kein auswertbarer Text erkannt.")
 
         manual_items = st.session_state["manual_notams"]
         if manual_items:
-            with st.expander("Manuelle Einträge ({})".format(len(manual_items)), expanded=True):
+            with st.expander("Pasted entries ({})".format(len(manual_items)), expanded=True):
                 for i, entry in enumerate(manual_items):
                     preview = re.sub(r"\s+", " ", entry["text"])[:60]
                     st.caption("**{}** · {} …".format(entry["added"], preview))
                     st.button(
-                        "🗑️ Entfernen",
+                        "Remove",
                         key="del_manual_{}".format(i),
                         on_click=_remove_manual,
                         args=(i,),
                         use_container_width=True,
                     )
             st.button(
-                "Alle manuellen Einträge verwerfen",
+                "Discard all pasted entries",
                 on_click=_clear_manual,
                 use_container_width=True,
             )
@@ -4083,13 +6033,13 @@ def main() -> None:
         st.divider()
         min_conf = st.select_slider(
             "Mindest-Konfidenz",
-            options=["HOCH", "MITTEL", "NIEDRIG"],
-            value="MITTEL",
+            options=["HIGH", "MEDIUM", "LOW"],
+            value="MEDIUM",
             help=(
-                "Die Trigger der Spezifikation (SFC/UNL, 000/999, Gebietskeywords) "
-                "sprechen auch auf Wetterballons, Schiessuebungen und Suchscheinwerfer an. "
-                "Das Scoring gewichtet raumfahrtspezifische Begriffe positiv und "
-                "Ausschlussbegriffe negativ. Verworfene NOTAMs bleiben im Review-Tab sichtbar."
+                "The triggers from the specification (SFC/UNL, 000/999, area keywords) "
+                "also fire on weather balloons, gunnery exercises and searchlights. The "
+                "scoring weights space-specific terms positively and exclusion terms "
+                "negatively. Rejected NOTAMs stay visible under Review."
             ),
         )
 
@@ -4104,11 +6054,11 @@ def main() -> None:
             imported = read_notam_table(uploaded, uploaded.name)
             source_label = uploaded.name
         except Exception as exc:
-            st.error("Upload konnte nicht gelesen werden: {}".format(exc))
+            st.error("Could not read the upload: {}".format(exc))
             st.stop()
     elif use_demo:
         imported = build_demo_notams()
-        source_label = "Demo-Datensatz"
+        source_label = "demo data set"
 
     # Manuelle Eintraege in die Volltextspalte des Imports schreiben, damit beide
     # Quellen anschliessend identisch durch die Pipeline laufen.
@@ -4124,37 +6074,36 @@ def main() -> None:
     notams = combine_sources(imported, manual_df)
 
     if manual_entries:
-        source_label = "{}{}{} manuell erfasst".format(
+        source_label = "{}{}{} pasted".format(
             source_label, " + " if source_label else "", len(manual_entries)
         )
 
     if notams.empty:
         st.info(
-            "⬅️ Lade links eine NOTAM-Datei hoch, füge ein NOTAM per Copy & Paste ein "
-            "oder aktiviere den Demo-Datensatz, um die Auswertung zu starten."
+            "Upload a NOTAM file on the left, paste a NOTAM, or switch on the "
+            "demo data set to start the analysis."
         )
         col_a, col_b = st.columns(2)
         with col_a:
-            with st.expander("Erwartetes Dateiformat"):
+            with st.expander("Expected file format"):
                 st.markdown(
-                    "CSV, XLS oder XLSX. Der Parser erkennt Spalten automatisch; "
-                    "hilfreich sind `NOTAM ID`, `NOTAM Text`, `FIR`, `Valid From`, "
-                    "`Valid To`. Liegt nur eine Volltextspalte vor, wird diese "
-                    "komplett ausgewertet. Vorspannzeilen (z.B. FAA-FNS-Exporte) "
-                    "werden übersprungen."
+                    "CSV, XLS or XLSX. The parser detects columns automatically; "
+                    "`NOTAM ID`, `NOTAM Text`, `FIR`, `Valid From` and `Valid To` "
+                    "help. If only a full-text column exists, it is analysed as a "
+                    "whole. Leading title rows (e.g. FAA FNS exports) are skipped."
                 )
                 st.dataframe(build_demo_notams().head(3), use_container_width=True)
         with col_b:
-            with st.expander("Freitext-Eingabe"):
+            with st.expander("Paste field"):
                 st.markdown(
-                    "Im Feld **NOTAM manuell einfügen** lässt sich ein NOTAM direkt "
-                    "einsetzen - ICAO-Items, FAA-Domestic-Format oder reiner Freitext. "
-                    "Die Einträge werden in Tabelle, Karte und Export als `Manuell` "
-                    "geführt und bleiben erhalten, bis du sie verwirfst."
+                    "The **Paste NOTAM** field takes a NOTAM directly - ICAO items, "
+                    "FAA domestic format or plain text. Those entries are marked "
+                    "`Pasted` in the table, on the map and in the export, and stay "
+                    "until you discard them."
                 )
         return
 
-    with st.spinner("NOTAMs werden ausgewertet ..."):
+    with st.spinner("Analysing NOTAMs \u2026"):
         events, stats = analyze_notams(
             notams,
             spaceports,
@@ -4163,15 +6112,32 @@ def main() -> None:
             confirmed_keys=st.session_state["confirmed_launches"],
             rejected_keys=st.session_state["rejected_launches"],
         )
-    hidden_keys = st.session_state["hidden_events"]
+    # Automatisch ausgeblendet wird erst hier, nicht in der Auswertung: so bleibt
+    # die Entscheidung an einer Stelle, und ein von Hand zurueckgeholtes NOTAM
+    # bleibt zurueck.
+    zurueckgeholt = st.session_state["restored_events"]
+    auto_hidden_keys = {
+        e.key for e in events if e.auto_hidden_reason and e.key not in zurueckgeholt
+    }
+    st.session_state["auto_hidden_keys"] = auto_hidden_keys
+    hidden_keys = set(st.session_state["hidden_events"]) | auto_hidden_keys
     hidden_events = [e for e in events if e.key in hidden_keys]
     visible_events = [e for e in events if e.key not in hidden_keys]
-    table = events_to_dataframe(visible_events)
+    apply_vehicle_assignments(
+        events, stats.get("groups", []), st.session_state["vehicle_assignments"]
+    )
+    apply_payload_assignments(
+        events, stats.get("groups", []), st.session_state["payload_assignments"]
+    )
+    table = events_to_dataframe(visible_events, vehicles)
+    _update_archive(events, stats.get("groups", []), table)
+    _update_sea_launches(events, stats.get("groups", []), table, spaceports)
+    _show_archive_status(archiv_status)
 
     # ----------------------------- Filter --------------------------------- #
     with st.sidebar:
         st.divider()
-        st.header("🎛️ Filter")
+        st.header("Filter")
         nations_available = sorted(
             n for n in table["Startnation"].dropna().unique() if n and n != "-"
         )
@@ -4187,7 +6153,7 @@ def main() -> None:
             if len(sources_available) > 1
             else sources_available
         )
-        show_review = st.checkbox("Review-Faelle in der Tabelle anzeigen", value=False)
+        show_review = st.checkbox("Show review cases in the table", value=False)
 
         valid_dates = [d for d in list(table["_from"].dropna()) if d is not None]
         date_filter = None
@@ -4225,6 +6191,14 @@ def main() -> None:
     review_rows = table[table["Status"] == "REVIEW"]
     display_rows = filtered if show_review else ok_rows
     event_by_row = {e.row_index: e for e in events}
+    # Eine Traegersystem-Wahl gilt fuer alle Sperrzonen desselben Starts.
+    group_keys: Dict[str, List[str]] = {}
+    for gruppe in stats.get("groups", []):
+        geschwister = [
+            event_by_row[r].key for r in gruppe.row_indices if r in event_by_row
+        ]
+        for schluessel in geschwister:
+            group_keys[schluessel] = geschwister
     review_events = [e for e in visible_events if e.status == "REVIEW"]
     confirmed_events = [e for e in visible_events if e.manual_override]
 
@@ -4235,16 +6209,16 @@ def main() -> None:
         for g in stats.get("groups", [])
         if g.spaceport_code and visible_rows & set(g.row_indices)
     ]
-    group_table = groups_to_dataframe(visible_groups)
+    group_table = groups_to_dataframe(visible_groups, vehicles)
 
     # ------------------------------ Tabs ---------------------------------- #
     reiter = [
-        "📊 Launch Overview",
-        "🗺️ Flightpath Map",
-        "📄 NOTAM Data",
-        "📥 Export",
-        "⚠️ Unassigned / Review ({})".format(len(review_events)),
-        "❗ Ausgeblendet ({})".format(len(hidden_events)),
+        "Launch Overview",
+        "Flightpath Map",
+        "NOTAM Data",
+        "Export",
+        "Review ({})".format(len(review_events)),
+        "Excluded ({})".format(len(hidden_events)),
     ]
     # Bewusst kein st.tabs: dessen aktiver Reiter liegt im Client und laesst sich
     # nicht aus dem Programm heraus umschalten. Mit der Segmentleiste kann ein
@@ -4262,36 +6236,38 @@ def main() -> None:
     ) or reiter[0]
 
     if bereich == reiter[0]:
+        # Kurze Beschriftungen: sechs Kacheln nebeneinander schneiden lange
+        # Woerter ab - aus "Erkannte Nationen" wurde "Erkannte Na...".
         c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric(
-            "Erfasste Launches",
+            "Launches",
             len(visible_groups),
-            help="Starts nach Zusammenfassung mehrerer Sperrzonen desselben Fluges.",
+            help="Launches after merging the drop zones that belong to one flight.",
         )
         c2.metric(
-            "Aktive Sperrzonen",
+            "Drop Zones",
             len(ok_rows),
-            help="Einzelne NOTAMs - ein Start kann mehrere Zonen entlang der Bahn haben.",
+            help="Individual NOTAMs - one launch can close several zones along its track.",
         )
         c3.metric(
-            "Erkannte Nationen",
+            "Nations",
             ok_rows["Startnation"].nunique() if len(ok_rows) else 0,
         )
         c4.metric(
-            "Manuell",
+            "Pasted",
             int((ok_rows["Quelle"] == SOURCE_MANUAL).sum()) if len(ok_rows) else 0,
-            help="Per Copy & Paste eingefügte NOTAMs unter den erfassten Launches.",
+            help="NOTAMs added by copy & paste.",
         )
         c5.metric(
-            "{} Geprüft".format(MANUAL_MARK),
+            "Verified",
             len(confirmed_events),
-            help="Im Review geprüfte und manuell als Start bestätigte NOTAMs.",
+            help="Reviewed by hand and confirmed as a launch.",
         )
         c6.metric("Review", len(review_rows))
-        st.caption(
-            "Quelle: {} · {} Zeilen gelesen · {} ohne Weltraum-Trigger verworfen · "
-            "{} Mehrfachlistungen entfernt · Mindest-Konfidenz: {} · "
-            "{} Start(s) mit mehreren Sperrzonen zusammengefasst".format(
+        lauf = (
+            "Source: {} \u00b7 {} rows read \u00b7 {} without launch trigger \u00b7 "
+            "{} duplicates removed \u00b7 minimum confidence: {} \u00b7 "
+            "{} launch(es) merged from several drop zones".format(
                 source_label,
                 stats["rows"],
                 stats["no_trigger"],
@@ -4300,17 +6276,24 @@ def main() -> None:
                 stats.get("grouped", 0),
             )
         )
+        # Nur nennen, wenn es welche gibt - eine stehende Null macht die Zeile
+        # nur laenger, ohne etwas zu sagen.
+        if stats.get("advance", 0):
+            lauf += " \u00b7 {} advance notice(s) assigned to a launch".format(
+                stats["advance"]
+            )
+        st.caption(lauf)
 
         if visible_groups:
-            st.markdown("#### Klartext-Auswertung")
+            st.markdown("#### Plain-language summary")
             st.caption(
-                "Jeder erkannte Start in einem Satz - mit der Begruendung, woran er "
-                "erkannt wurde und wie belastbar die Abschaetzung ist."
+                "Every recognised launch in one paragraph - with the reasoning behind it "
+                "and how reliable the estimate is."
             )
             for group in visible_groups:
-                titel = "🚀 {} · {} · {} · {} · {}".format(
+                titel = "{} \u00b7 {} \u00b7 {} \u00b7 {} \u00b7 {}".format(
                     mark_id_markdown(group.group_id, group.manual_override),
-                    group.nation or "unbestimmt",
+                    nation_label(group.nation) or "undetermined",
                     group.spaceport_code or "-",
                     group.launch_window,
                     group.orbit_type,
@@ -4320,23 +6303,22 @@ def main() -> None:
             st.divider()
 
         st.caption(
-            "Tipp: Ein Klick auf eine Zeile springt zum zugehörigen NOTAM-Volltext "
-            "unter *NOTAM Data*."
+            "Select a row using the checkbox on the left to open that NOTAM "
+            "under *NOTAM Data*."
         )
         view = st.radio(
-            "Ansicht",
-            ["Nach Start gruppiert", "Einzelne NOTAMs"],
+            "View",
+            ["Grouped by launch", "Individual NOTAMs"],
             horizontal=True,
             help=(
-                "Ein Start erzeugt mehrere Sperrzonen entlang der Flugbahn. Die "
-                "Start-Ansicht fasst sie zu einer Zeile zusammen, die NOTAM-Ansicht "
-                "zeigt jede Zone einzeln."
+                "One launch closes several zones along its track. The launch view "
+                "merges them into a single row, the NOTAM view lists every zone."
             ),
         )
 
-        if view == "Nach Start gruppiert":
+        if view == "Grouped by launch":
             if group_table.empty:
-                st.warning("Keine Starts entsprechen den aktuellen Filtern.")
+                st.warning("No launches match the current filters.")
             else:
                 auswahl = st.dataframe(
                     _style_manual(group_table),
@@ -4344,6 +6326,8 @@ def main() -> None:
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
+                    column_config=table_config(group_table),
+                    column_order=visible_order(group_table, GROUP_COLUMN_ORDER),
                     key="auswahl_starts",
                 )
                 gewaehlt = _auswahl_zeilen(auswahl)
@@ -4352,14 +6336,17 @@ def main() -> None:
                     _zur_notam_springen(gruppe.row_indices)
                     st.rerun()
         elif display_rows.empty:
-            st.warning("Keine Events entsprechen den aktuellen Filtern.")
+            st.warning("No NOTAMs match the current filters.")
         else:
+            sichtbar = display_rows.drop(columns=["_row", "_from", "_to"])
             auswahl = st.dataframe(
-                _style_manual(display_rows.drop(columns=["_row", "_from", "_to"])),
+                _style_manual(sichtbar),
                 use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
                 selection_mode="single-row",
+                column_config=table_config(sichtbar),
+                column_order=visible_order(sichtbar, EVENT_COLUMN_ORDER),
                 key="auswahl_notams",
             )
             gewaehlt = _auswahl_zeilen(auswahl)
@@ -4369,11 +6356,11 @@ def main() -> None:
 
     if bereich == reiter[1]:
         if ok_rows.empty:
-            st.info("Keine georeferenzierten Events fuer die Kartendarstellung.")
+            st.info("No georeferenced events to draw on the map.")
         elif not FOLIUM_AVAILABLE:
             st.warning(
-                "`folium` / `streamlit-folium` sind nicht installiert - "
-                "Fallback auf die einfache Punktkarte."
+                "`folium` / `streamlit-folium` are not installed - "
+                "falling back to the simple point map."
             )
             pts = [
                 {"lat": e.centroid_lat, "lon": e.centroid_lon}
@@ -4383,12 +6370,12 @@ def main() -> None:
             if pts:
                 st.map(pd.DataFrame(pts))
         else:
-            options = ["Alle Starts"] + [
+            options = ["All launches"] + [
                 "{} · {} · {}".format(g.group_id, g.nation, ", ".join(g.notam_ids))
                 for g in visible_groups
             ]
             choice = st.selectbox("Darstellung", options, index=0)
-            if choice == "Alle Starts":
+            if choice == "All launches":
                 selection = [event_by_row[int(r)] for r in ok_rows["_row"]]
             else:
                 group = visible_groups[options.index(choice) - 1]
@@ -4402,7 +6389,7 @@ def main() -> None:
                 m4.metric(
                     "Sperrzonen",
                     group.zone_count,
-                    help="Zonen entlang der Flugbahn: {}".format(", ".join(group.notam_ids)),
+                    help="Zones along the track: {}".format(", ".join(group.notam_ids)),
                 )
                 st.caption(
                     "Orbit-Typ: **{}** · Startplatz: {} · Azimut-Streuung {:.1f}° · "
@@ -4413,7 +6400,7 @@ def main() -> None:
                         compass_name(group.azimuth_deg),
                     )
                 )
-                with st.expander("Was bedeutet das?"):
+                with st.expander("What does this show?"):
                     st.markdown(describe_launch(group, events))
             st_folium(
                 build_event_map(selection),
@@ -4422,9 +6409,9 @@ def main() -> None:
                 returned_objects=[],
             )
             st.caption(
-                "Gestrichelt: Grosskreis vom Startplatz entlang des berechneten "
-                "Launch-Azimuts. Je Start wird eine Bahn gezeichnet - mehrere "
-                "Sperrzonen desselben Fluges liegen darauf."
+                "Dashed: great circle from the launch site along the computed "
+                "launch azimuth. One track is drawn per launch - several closure "
+                "zones of the same flight lie on it."
             )
 
     if bereich == reiter[2]:
@@ -4435,15 +6422,15 @@ def main() -> None:
             )
             hinweis, zuruecksetzen = st.columns([4, 1])
             hinweis.info(
-                "Aus der Launch Overview geöffnet: **{}** — "
-                "die Auswahl steht oben und ist aufgeklappt.".format(kennungen)
+                "Opened from the Launch Overview: **{}**: "
+                "the selection is listed first and expanded.".format(kennungen)
             )
-            if zuruecksetzen.button("Auswahl aufheben", use_container_width=True):
+            if zuruecksetzen.button("Clear selection", use_container_width=True):
                 st.session_state["focus_rows"] = []
                 st.rerun()
 
         if display_rows.empty:
-            st.info("Keine NOTAMs zur Anzeige.")
+            st.info("No NOTAMs to show.")
         else:
             # Die gewaehlten NOTAMs zuerst, damit man nicht suchen muss.
             rang = {z: i for i, z in enumerate(fokus)}
@@ -4455,9 +6442,9 @@ def main() -> None:
                 ist_fokus = int(row["_row"]) in rang
                 header = "{}{} · {} · {} · {}".format(
                     mark_id_markdown(event.notam_id, event.manual_override),
-                    " ✍️ manuell eingefügt" if event.source == SOURCE_MANUAL else "",
-                    event.nation or "unbestimmt",
-                    event.spaceport_code or "ohne Startplatz",
+                    "  pasted" if event.source == SOURCE_MANUAL else "",
+                    nation_label(event.nation) or "undetermined",
+                    event.spaceport_code or "no launch site",
                     event.orbit_type,
                 )
                 with st.expander(header, expanded=ist_fokus):
@@ -4475,33 +6462,37 @@ def main() -> None:
                     )
                     if event.fir_code:
                         st.caption(
-                            "FIR {} ({}) · Zuordnung via {}".format(
-                                event.fir_code, event.fir_name, event.fir_match_method
+                            "FIR {} ({}) · matched via {}".format(
+                                event.fir_code,
+                                event.fir_name,
+                                fir_method_label(event.fir_match_method),
                             )
                         )
                     st.divider()
+                    _vehicle_picker(event, vehicles, group_keys, "data")
+                    _payload_field(event, group_keys, "data")
+                    st.divider()
                     zu_review, zu_versteckt = st.columns(2)
                     zu_review.button(
-                        "⚠️ In den Review",
+                        "Move to review",
                         key="reject_{}".format(event.key),
                         on_click=_reject_launch,
                         args=(event.key,),
                         use_container_width=True,
-                        help="Aus der Launch-Tabelle nehmen und zur Prüfung "
-                        "in Unassigned / Review verschieben.",
+                        help="Take out of the launch table and move to Review "
+                        "for checking.",
                     )
                     zu_versteckt.button(
-                        "❗ Ausblenden",
+                        "Exclude",
                         key="hide_data_{}".format(event.key),
                         on_click=_hide_event,
                         args=(event.key,),
                         use_container_width=True,
-                        help="Aus allen Auswertungen nehmen und im Reiter "
-                        "'Ausgeblendet' ablegen.",
+                        help="Take out of every analysis and file it under Excluded.",
                     )
 
     if bereich == reiter[3]:
-        st.subheader("Tagesergebnis exportieren")
+        st.subheader("Export the day's result")
         export_df = (filtered if show_review else ok_rows).drop(
             columns=["_row", "_from", "_to"]
         )
@@ -4512,27 +6503,21 @@ def main() -> None:
         )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
         col_a, col_b, col_c = st.columns(3)
-        starts_csv = group_table.copy()
-        if not starts_csv.empty:
-            starts_csv["Klartext"] = [
-                re.sub(r"\*\*|\n+", " ", describe_launch(g, events)).strip()
-                for g in visible_groups
-            ]
         col_a.download_button(
-            "📥 CSV · Starts",
-            data=starts_csv.to_csv(index=False).encode("utf-8-sig"),
+            "CSV \u00b7 Launches",
+            data=group_table.to_csv(index=False).encode("utf-8-sig"),
             file_name="notam_starts_{}.csv".format(stamp),
             mime="text/csv",
             use_container_width=True,
-            help="Eine Zeile je Start, mit allen zugehoerigen NOTAM-Kennungen.",
+            help="One row per launch, with all its NOTAM identifiers.",
         )
         col_b.download_button(
-            "📥 CSV · NOTAMs",
+            "CSV \u00b7 NOTAMs",
             data=export_df.to_csv(index=False).encode("utf-8-sig"),
             file_name="notam_launches_{}.csv".format(stamp),
             mime="text/csv",
             use_container_width=True,
-            help="Eine Zeile je NOTAM, mit Start-Kennung in der Spalte 'Start'.",
+            help="One row per NOTAM, with the launch identifier in the Launch column.",
         )
         selected_rows = set(int(r) for r in (filtered if show_review else ok_rows)["_row"])
         payload = {
@@ -4545,17 +6530,15 @@ def main() -> None:
                 "launches": len(visible_groups),
                 "ok": stats["ok"],
                 "review": stats["review"],
+                "advance_notices": stats.get("advance", 0),
             },
-            "launches": [
-                dict(group_to_export_dict(g), klartext=describe_launch(g, events))
-                for g in visible_groups
-            ],
+            "launches": [group_to_export_dict(g) for g in visible_groups],
             "events": [
                 event_to_export_dict(e) for e in events if e.row_index in selected_rows
             ],
         }
         col_c.download_button(
-            "📥 JSON herunterladen",
+            "JSON",
             data=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
             file_name="notam_launches_{}.json".format(stamp),
             mime="application/json",
@@ -4567,24 +6550,24 @@ def main() -> None:
     if bereich == reiter[4]:
         if confirmed_events:
             with st.expander(
-                "{} Manuell bestätigte NOTAMs ({})".format(MANUAL_MARK, len(confirmed_events)),
+                "{} Verified by hand ({})".format(MANUAL_MARK, len(confirmed_events)),
                 expanded=False,
             ):
                 st.caption(
-                    "Diese NOTAMs wurden hier geprüft und in die Launch-Tabelle "
-                    "übernommen. Sie tragen dort das Hexagon vor der Kennung."
+                    "These NOTAMs were checked here and taken into the launch table. "
+                    "They carry the hexagon before their identifier there."
                 )
                 for event in confirmed_events:
                     st.markdown(
                         "{} · {} · {}".format(
                             mark_id_html(event.notam_id, True),
-                            event.nation or "unbestimmt",
+                            nation_label(event.nation) or "undetermined",
                             event.launch_group or "keine Bahnberechnung",
                         ),
                         unsafe_allow_html=True,
                     )
                     st.button(
-                        "↩️ Bestätigung zurücknehmen",
+                        "Undo verification",
                         key="revoke_{}".format(event.key),
                         on_click=_revoke_launch,
                         args=(event.key,),
@@ -4592,30 +6575,30 @@ def main() -> None:
                     )
             st.divider()
 
-        st.subheader("NOTAMs ohne belastbare Zuordnung")
+        st.subheader("NOTAMs without a reliable assignment")
         if not review_events:
-            st.success("Alle getriggerten NOTAMs konnten vollstaendig zugeordnet werden.")
+            st.success("Every triggered NOTAM could be assigned completely.")
         else:
             zurueck = sum(
                 1 for e in review_events if e.key in st.session_state["rejected_launches"]
             )
             st.caption(
-                "Jedes NOTAM einzeln prüfen: **Space Launch** übernimmt es in die "
-                "Launch-Tabelle und markiert es dort als manuell geprüft. "
-                "**Ausblenden** verschiebt es in den Reiter *Ausgeblendet*."
+                "Check each NOTAM on its own: **Confirm launch** takes it into the "
+                "launch table and marks it as verified by hand. **Exclude** moves it "
+                "to the *Excluded* section."
                 + (
-                    "  \n{} davon wurden aus der Launch-Tabelle hierher zurückgestellt.".format(
+                    "  \n{} of them were moved back here from the launch table.".format(
                         zurueck
                     )
                     if zurueck
                     else ""
                 )
             )
-            review_table = events_to_dataframe(review_events)
+            review_table = events_to_dataframe(review_events, vehicles)
             st.dataframe(
                 review_table[
                     ["NOTAM ID", "Quelle", "FIR Code", "FIR liegt in", "Höhenprofil",
-                     "Konfidenz", "Hinweis"]
+                     "Trägersystem", "Konfidenz", "Hinweis"]
                 ],
                 use_container_width=True,
                 hide_index=True,
@@ -4640,11 +6623,12 @@ def main() -> None:
                             event.fir_country or "-",
                         )
                     )
-                    st.markdown("**Grund für den Review:** {}".format(event.review_reason))
+                    st.markdown("**Reason for review:** {}".format(event.review_reason))
+                    _vehicle_picker(event, vehicles, group_keys, "review")
                     zurueckgestellt = event.key in st.session_state["rejected_launches"]
                     if zurueckgestellt:
                         st.button(
-                            "↩️ Zurückstellung aufheben (wieder automatisch bewerten)",
+                            "Undo, assess automatically again",
                             key="unreject_{}".format(event.key),
                             on_click=_reset_decision,
                             args=(event.key,),
@@ -4652,68 +6636,105 @@ def main() -> None:
                         )
                     act_a, act_b = st.columns(2)
                     act_a.button(
-                        "🚀 Space Launch",
+                        "Confirm launch",
                         key="confirm_{}".format(event.key),
                         on_click=_confirm_launch,
                         args=(event.key,),
                         type="primary",
                         use_container_width=True,
-                        help="Als geprüften Raumfahrtstart in die Launch-Tabelle übernehmen.",
+                        help="Take into the launch table as a checked space launch.",
                     )
                     act_b.button(
-                        "❗ Ausblenden",
+                        "Exclude",
                         key="hide_{}".format(event.key),
                         on_click=_hide_event,
                         args=(event.key,),
                         use_container_width=True,
-                        help="Aus dem Review entfernen und im Reiter 'Ausgeblendet' ablegen.",
+                        help="Remove from review and file it under Excluded.",
                     )
 
     if bereich == reiter[5]:
-        st.subheader("Ausgeblendete NOTAMs")
+        st.subheader("Excluded NOTAMs")
         if not hidden_events:
             st.info(
-                "Noch nichts ausgeblendet. Im Reiter *Unassigned / Review* lassen sich "
-                "geprüfte NOTAMs hierher verschieben, wenn sie kein Raumfahrtstart sind."
+                "Nothing excluded yet. NOTAMs land here in two ways: automatically, "
+                "when their confidence is low and the text carries an exclusion term "
+                "or because you moved them here from *Review*."
             )
         else:
+            automatisch = [e for e in hidden_events if e.key in auto_hidden_keys]
+            von_hand = [e for e in hidden_events if e.key not in auto_hidden_keys]
             st.caption(
-                "Hier liegen die geprüften und verworfenen NOTAMs. Sie zählen in keiner "
-                "Auswertung mit und erscheinen nicht im Export - lassen sich aber "
-                "jederzeit wieder einblenden."
+                "{} excluded automatically, {} by hand. They count in no analysis and "
+                "appear in no export. Restoring one is permanent: it will not be "
+                "excluded again on the next import.".format(
+                    len(automatisch), len(von_hand)
+                )
             )
+            uebersicht = events_to_dataframe(hidden_events, vehicles)[
+                ["NOTAM ID", "Quelle", "FIR Code", "FIR liegt in", "H\u00f6henprofil",
+                 "Konfidenz", "Hinweis"]
+            ].copy()
+            uebersicht.insert(
+                1,
+                "Excluded by",
+                ["rule" if e.key in auto_hidden_keys else "by hand" for e in hidden_events],
+            )
+            uebersicht["Hinweis"] = [
+                e.auto_hidden_reason if e.key in auto_hidden_keys
+                else (e.review_reason or e.assignment_note)
+                for e in hidden_events
+            ]
             st.dataframe(
-                events_to_dataframe(hidden_events)[
-                    ["NOTAM ID", "Quelle", "FIR Code", "FIR liegt in", "Höhenprofil",
-                     "Konfidenz", "Hinweis"]
-                ],
+                uebersicht,
                 use_container_width=True,
                 hide_index=True,
+                column_config=dict(
+                    table_config(uebersicht),
+                    **{"Excluded by": st.column_config.Column("Excluded by")}
+                ),
             )
             st.button(
-                "↩️ Alle wieder einblenden",
+                "Restore all",
                 key="unhide_all",
-                on_click=lambda: (
-                    st.session_state["hidden_events"].clear(), _persist_workspace()
-                ),
+                on_click=_unhide_all,
                 use_container_width=True,
+                help="Also lifts the automatic exclusions - permanently.",
             )
             st.divider()
             for event in hidden_events:
+                per_regel = event.key in auto_hidden_keys
+                grund = (
+                    event.auto_hidden_reason
+                    if per_regel
+                    else (event.review_reason or "moved here by hand")
+                )
                 with st.expander(
-                    "{} · {}".format(event.notam_id, (event.review_reason or "-")[:90])
+                    "{} \u00b7 {} \u00b7 {}".format(
+                        event.notam_id,
+                        "excluded by rule" if per_regel else "excluded by hand",
+                        grund[:80],
+                    )
                 ):
+                    if per_regel:
+                        st.caption(
+                            "The rule caught this one: confidence {} (score {}) and "
+                            "an exclusion term in the text. Restore it and it stays "
+                            "restored; the next import will leave it alone.".format(
+                                event.confidence_level, event.confidence_score
+                            )
+                        )
                     st.code(event.raw_text, language="text")
                     single_a, single_b = st.columns(2)
                     single_a.button(
-                        "↩️ Wieder einblenden",
+                        "Restore",
                         key="unhide_{}".format(event.key),
                         on_click=_unhide_event,
                         args=(event.key,),
                         use_container_width=True,
                     )
                     single_b.button(
-                        "🚀 Doch ein Space Launch",
+                        "Confirm launch after all",
                         key="hconfirm_{}".format(event.key),
                         on_click=_confirm_launch,
                         args=(event.key,),
