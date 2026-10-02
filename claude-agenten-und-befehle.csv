@@ -1,0 +1,45 @@
+﻿Kategorie;Name;Aufruf;Status;Zweck
+Eingebauter Agent;Explore;ueber Agent-Tool;aktiv;Read-only-Suche ueber viele Dateien liefert nur das Ergebnis
+Eingebauter Agent;Plan;ueber Agent-Tool;aktiv;Entwirft Implementierungsplaene und waegt Architektur-Trade-offs ab
+Eingebauter Agent;general-purpose;ueber Agent-Tool;aktiv;Mehrstufige Recherche- und Suchaufgaben
+Eingebauter Agent;claude;ueber Agent-Tool;aktiv;Auffangbecken fuer Aufgaben ohne spezielleren Agenten
+Eingebauter Agent;claude-code-guide;ueber Agent-Tool;aktiv;Fragen zu Claude Code Agent SDK und Claude API
+Eingebauter Agent;statusline-setup;ueber Agent-Tool;aktiv;Konfiguriert die Statuszeile
+Repo-Agent;code-reviewer;-;nicht installiert;Review ueber fuenf Achsen Korrektheit Lesbarkeit Architektur Security Performance
+Repo-Agent;security-auditor;-;nicht installiert;Schwachstellensuche Threat Modeling und Hardening
+Repo-Agent;test-engineer;-;nicht installiert;Teststrategie Tests schreiben und Coverage-Luecken finden
+Repo-Agent;web-performance-auditor;-;nicht installiert;Core Web Vitals Loading Rendering und Network
+Repo-Command;spec;/spec;nicht installiert;Spezifikation schreiben bevor Code entsteht
+Repo-Command;plan;/plan;nicht installiert;Arbeit in kleine pruefbare Tasks zerlegen
+Repo-Command;build;/build;nicht installiert;Inkrementell umsetzen bauen testen verifizieren committen
+Repo-Command;test;/test;nicht installiert;TDD-Loop bei Bugs das Prove-It-Muster
+Repo-Command;review;/review;nicht installiert;Fuenf-Achsen-Code-Review
+Repo-Command;code-simplify;/code-simplify;nicht installiert;Komplexitaet senken ohne Verhaltensaenderung
+Repo-Command;constraints;/constraints;nicht installiert;Qualitaetsniveau als CONSTRAINTS.md festschreiben
+Repo-Command;ship;/ship;nicht installiert;Pre-Launch-Checkliste drei Personas parallel Go/No-Go plus Rollback
+Repo-Command;webperf;/webperf;nicht installiert;Web-Performance-Audit nur fuer Browser-Code sinnvoll
+Skill;api-and-interface-design;/api-and-interface-design;aktiv;Stabile APIs Modulgrenzen und oeffentliche Schnittstellen entwerfen
+Skill;browser-testing-with-devtools;/browser-testing-with-devtools;aktiv;Im echten Browser testen via Chrome DevTools MCP
+Skill;ci-cd-and-automation;/ci-cd-and-automation;aktiv;Build- und Deployment-Pipelines aufsetzen und Quality Gates automatisieren
+Skill;code-review-and-quality;/code-review-and-quality;aktiv;Mehrachsiges Code-Review vor dem Merge
+Skill;code-simplification;/code-simplification;aktiv;Code fuer Klarheit refaktorieren ohne Verhalten zu aendern
+Skill;constraint-driven-development;/constraint-driven-development;aktiv;Qualitaetsbar schriftlich fixieren und heimliches Absenken verhindern
+Skill;context-engineering;/context-engineering;aktiv;Agent-Kontext und Regeldateien fuer ein Projekt optimieren
+Skill;debugging-and-error-recovery;/debugging-and-error-recovery;aktiv;Systematische Ursachensuche bei Fehlern und Testfehlschlaegen
+Skill;deprecation-and-migration;/deprecation-and-migration;aktiv;Altsysteme abloesen und Migrationen ohne Downtime planen
+Skill;documentation-and-adrs;/documentation-and-adrs;aktiv;Architekturentscheidungen als ADR festhalten
+Skill;doubt-driven-development;/doubt-driven-development;aktiv;Jede nicht-triviale Entscheidung adversarial gegenpruefen lassen
+Skill;frontend-ui-engineering;/frontend-ui-engineering;aktiv;Barrierefreie responsive UIs in Produktionsqualitaet bauen
+Skill;git-workflow-and-versioning;/git-workflow-and-versioning;aktiv;Commits Branches PRs Releases und Changelogs strukturieren
+Skill;idea-refine;/idea-refine;aktiv;Rohe Ideen divergent und konvergent zu klaren Konzepten schaerfen
+Skill;incremental-implementation;/incremental-implementation;aktiv;Aenderungen in duennen verifizierbaren Scheiben liefern
+Skill;interview-me;/interview-me;aktiv;Per Einzelfragen herausarbeiten was wirklich gewollt ist
+Skill;observability-and-instrumentation;/observability-and-instrumentation;aktiv;Logging Metriken Tracing und Alerting einbauen
+Skill;performance-optimization;/performance-optimization;aktiv;Performance in Frontend Backend Queries und Datenbank optimieren
+Skill;planning-and-task-breakdown;/planning-and-task-breakdown;aktiv;Arbeit in geordnete umsetzbare Tasks zerlegen
+Skill;security-and-hardening;/security-and-hardening;aktiv;Gegen Schwachstellen haerten inklusive OWASP und Abhaengigkeiten
+Skill;shipping-and-launch;/shipping-and-launch;aktiv;Produktions-Launch vorbereiten Monitoring Rollout Rollback
+Skill;source-driven-development;/source-driven-development;aktiv;Entscheidungen an offizieller Dokumentation belegen
+Skill;spec-driven-development;/spec-driven-development;aktiv;Spezifikation oder PRD vor dem Coden erstellen
+Skill;test-driven-development;/test-driven-development;aktiv;Red-Green-Refactor-Loop fuer Logik und Bugfixes
+Skill;using-agent-skills;/using-agent-skills;aktiv;Meta-Skill entscheidet welcher Skill zur Aufgabe passt

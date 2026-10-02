@@ -33,12 +33,22 @@ check("Bearing NE-Quadrant", 0 < b < 90, round(b,2))
 i = app.estimate_inclination_deg(28.5, 90)
 check("Inklination KSC-aehnlich (28.5/90) = 28.5", abs(i-28.5)<1e-6, round(i,3))
 i = app.estimate_inclination_deg(45, 180)
-check("Azimut 180 -> i=90", abs(i-90)<1e-6, round(i,3))
-check("Klassifikation SSO", app.classify_orbit(98.0).startswith("Sonnensynchron"))
-check("Klassifikation retrograd", app.classify_orbit(108.0) == "Retrograder Orbit")
-check("Klassifikation LEO", app.classify_orbit(51.6).startswith("Standard LEO"))
-check("Klassifikation aequatorial", app.classify_orbit(20.0).startswith("Aequatorial"))
-check("Klassifikation None", app.classify_orbit(None) == "Unbestimmt")
+# Nicht exakt 90: Bei einem Start genau nach Sueden traegt die Erddrehung eine
+# Ostkomponente bei, die Bahn wird dadurch leicht rechtlaeufig. Das ist der
+# physikalische Wert, nicht ein Rundungsfehler.
+check("Azimut 180 von 45N -> knapp unter 90", 88.0 < i < 88.5, round(i, 3))
+check("  ... ohne Erdrotation waeren es 90", abs(
+    __import__("math").degrees(__import__("math").acos(
+        __import__("math").cos(__import__("math").radians(45))
+        * __import__("math").sin(__import__("math").radians(180)))) - 90) < 1e-6)
+check("Start nach Osten bleibt unveraendert - die Drehung wirkt dort laengs",
+      abs(app.estimate_inclination_deg(28.5, 90) - 28.5) < 1e-6,
+      round(app.estimate_inclination_deg(28.5, 90), 3))
+check("Klassifikation SSO", app.classify_orbit(98.0) == app.ORBIT_SSO)
+check("Klassifikation retrograd", app.classify_orbit(108.0) == app.ORBIT_RETROGRADE)
+check("Klassifikation LEO", app.classify_orbit(51.6) == app.ORBIT_LEO_MEO)
+check("Klassifikation aequatorial", app.classify_orbit(20.0) == app.ORBIT_GTO)
+check("Klassifikation None", app.classify_orbit(None) == app.ORBIT_UNKNOWN)
 lat,lon = app.destination_point(0,0,90,111.19)
 check("Zielpunkt 111km Ost ~ 1 Grad", abs(lat)<1e-6 and abs(lon-1.0)<1e-3, (round(lat,5),round(lon,5)))
 cen = app.polygon_centroid([(0,0),(0,2),(2,2),(2,0)])
@@ -134,14 +144,14 @@ check("irrelevante Zeile erzeugt kein Event", st3["events"] == 0, st3)
 print("== 9. Konfidenz-Scoring ==")
 balloon = "E) MET AIR BALLOON LAUNCH FM NAVAL SHIP 1700N07000E F) SFC G) UNL"
 sc, lvl, notes = app.score_confidence(balloon, app.detect_triggers(balloon, {}))
-check("Wetterballon -> NIEDRIG", lvl == "NIEDRIG", (sc, lvl))
+check("Wetterballon -> LOW", lvl == "LOW", (sc, lvl))
 launch = ("E) TEMPORARY RESTRICTED AREA FOR SPACE LAUNCH ACTIVITY. FALLING DEBRIS "
           "EXPECTED. ROCKET STAGE IMPACT 1936N11057E SFC/UNL")
 sc, lvl, notes = app.score_confidence(launch, app.detect_triggers(launch, {"Q": "W/000/999"}))
-check("echtes Launch-NOTAM -> HOCH", lvl == "HOCH", (sc, lvl))
+check("echtes Launch-NOTAM -> HIGH", lvl == "HIGH", (sc, lvl))
 searchlight = "E) SEARCHLIGHT DISPLAY WI 0.5NM RADIUS OF 512846N 0001745W F) SFC G) UNL"
-check("Suchscheinwerfer -> NIEDRIG",
-      app.score_confidence(searchlight, app.detect_triggers(searchlight, {}))[1] == "NIEDRIG")
+check("Suchscheinwerfer -> LOW",
+      app.score_confidence(searchlight, app.detect_triggers(searchlight, {}))[1] == "LOW")
 
 print("== 10. Nations-Attribution ==")
 check("NORTH KOREA erkannt", app.detect_nation_hint("ROCKET LAUNCHED FROM NORTH KOREA")[0] == "Nordkorea")
@@ -159,7 +169,7 @@ check("  ... sondern ein US-Hinweis",
 check("Ariane bleibt Fremdbetreiber", app.detect_foreign_operator("ARIANE 6 FROM KOUROU") != [])
 check("Amateurraketen werden ausgeschlossen",
       app.score_confidence("ROCKET LAUNCH BY ASSOCIATION OF EXPERIMENTAL ROCKETRY (AEROPAC)",
-                           ["Keyword: ROCKET"])[1] == "NIEDRIG")
+                           ["Keyword: ROCKET"])[1] == "LOW")
 check("kein Fremdbetreiber bei CZ-Start", app.detect_foreign_operator("LONG MARCH CZ-5 LAUNCH") == [])
 
 print("== 11. Regressionen aus Echtdaten ==")
@@ -177,7 +187,7 @@ cases = pd.DataFrame({"Location": ["EGLL", "FIMM", "ZLC", "RJJJ"], "Text": [
     "FOR THE DESTRUCTION OF AN OBJECT PROPELLED BY ROCKET LAUNCHED FROM NORTH KOREA. "
     "AIRSPACE BOUNDED BY 264419N1275729E 255619N1275729E 255619N1272129E 264419N1272129E",
 ]})
-ev, _ = app.analyze_notams(cases, sp, fir, min_confidence="MITTEL")
+ev, _ = app.analyze_notams(cases, sp, fir, min_confidence="MEDIUM")
 res = {e.raw_text[:8].strip(): e for e in ev}
 london = [e for e in ev if "SEARCHLIGHT" in e.raw_text][0]
 check("Londoner Suchscheinwerfer nicht als Start", london.status == "REVIEW", london.review_reason)
@@ -211,7 +221,7 @@ if xls:
     check("Excel-Export mit Vorspann gelesen", len(real) > 100 and "Location" in real.columns,
           (len(real), list(real.columns)[:2]))
     check("Kopfzeile korrekt erkannt", not str(real.columns[0]).startswith("Unnamed"), real.columns[0])
-    ev_real, st_real = app.analyze_notams(real, sp, fir, min_confidence="MITTEL")
+    ev_real, st_real = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
     check("Echtdaten laufen ohne Fehler durch", st_real["events"] > 0, st_real["events"])
     no_eu = [e for e in ev_real if e.status == "OK" and e.fir_code in ("EGTT","EGLL","EGPX","LFRR")]
     check("keine europaeischen FIRs als Zielnations-Start", no_eu == [], [e.notam_id for e in no_eu])
@@ -267,7 +277,7 @@ STYLES = {
 for name, txt in STYLES.items():
     chunks = app.split_pasted_notams(txt)
     mdf = app.manual_entries_to_dataframe([{"text": c, "added": "x"} for c in chunks])
-    evs, _ = app.analyze_notams(mdf, sp, fir, min_confidence="MITTEL")
+    evs, _ = app.analyze_notams(mdf, sp, fir, min_confidence="MEDIUM")
     good = len(evs) == 1 and evs[0].status == "OK" and evs[0].spaceport_code is not None
     check("Schreibweise '{}' wird zugeordnet".format(name), good,
           (evs[0].status, evs[0].review_reason) if evs else "kein Event")
@@ -280,7 +290,7 @@ manual = app.manual_entries_to_dataframe(
 comb = app.combine_sources(app.build_demo_notams(), manual)
 check("Tabellen zusammengefuehrt", len(comb) == len(app.build_demo_notams()) + 1, len(comb))
 check("Quellspalte vorhanden", app.SOURCE_COLUMN in comb.columns)
-ev_c, st_c = app.analyze_notams(comb, sp, fir, min_confidence="MITTEL")
+ev_c, st_c = app.analyze_notams(comb, sp, fir, min_confidence="MEDIUM")
 check("importierte Events unveraendert", st_c["ok"] == 6, st_c["ok"])
 check("genau ein manuelles Event", st_c["manual"] == 1, st_c["manual"])
 man_ev = [e for e in ev_c if e.source == app.SOURCE_MANUAL]
@@ -290,20 +300,20 @@ check("Marker-Spalte nicht im Analysetext", app.SOURCE_COLUMN not in man_ev[0].r
 tbl_c = app.events_to_dataframe(ev_c)
 check("Spalte 'Quelle' in der Ergebnistabelle", "Quelle" in tbl_c.columns)
 check("Import und Manuell unterscheidbar",
-      set(tbl_c["Quelle"]) == {"Import", "Manuell"}, set(tbl_c["Quelle"]))
+      set(tbl_c["Quelle"]) == {"Import", "Pasted"}, set(tbl_c["Quelle"]))
 
 check("ID-Spalte greift nicht die Volltextspalte ab",
       app.map_notam_columns(manual)["id"] != "NOTAM Text",
       app.map_notam_columns(manual))
 only_manual = app.combine_sources(None, manual)
-ev_m, _ = app.analyze_notams(only_manual, sp, fir, min_confidence="MITTEL")
+ev_m, _ = app.analyze_notams(only_manual, sp, fir, min_confidence="MEDIUM")
 check("Kennung aus reinem Freitext-Import korrekt",
       ev_m[0].notam_id.startswith("MANUELL-") or len(ev_m[0].notam_id) < 12, ev_m[0].notam_id)
 withid = app.manual_entries_to_dataframe(
     [{"text": "Z9876/26 NOTAMN Q) ZLHW/QRTCA/IV/BO/W/000/999 A) ZLHW E) SPACE LAUNCH FROM "
               "JIUQUAN. FALLING DEBRIS 3830N10230E 3745N10410E 3650N10320E F) SFC G) UNL",
       "added": "x"}], "NOTAM Text")
-ev_w, _ = app.analyze_notams(withid, sp, fir, min_confidence="MITTEL")
+ev_w, _ = app.analyze_notams(withid, sp, fir, min_confidence="MEDIUM")
 check("Kennung aus dem Text uebernommen", ev_w[0].notam_id == "Z9876/26", ev_w[0].notam_id)
 check("Manuell-only Lauf ordnet Jiuquan zu", ev_w[0].spaceport_code == "JSLC", ev_w[0].spaceport_code)
 
@@ -312,13 +322,13 @@ ok_c = tbl_c[tbl_c["Status"] == "OK"]
 csv_c = ok_c.drop(columns=["_row", "_from", "_to"]).to_csv(index=False)
 check("CSV-Export enthaelt Quelle-Spalte", "Quelle" in csv_c.splitlines()[0])
 check("CSV-Export enthaelt den manuellen Eintrag",
-      any("Manuell" in line for line in csv_c.splitlines()[1:]))
+      any("Pasted" in line for line in csv_c.splitlines()[1:]))
 payload_c = [app.event_to_export_dict(e) for e in ev_c if e.source == app.SOURCE_MANUAL]
-check("JSON-Export markiert die Quelle", payload_c[0]["source"] == "Manuell", payload_c[0]["source"])
+check("JSON-Export markiert die Quelle", payload_c[0]["source"] == "Pasted", payload_c[0]["source"])
 html_c = app.build_event_map([e for e in ev_c if e.status == "OK"]).get_root().render()
-check("Karte enthaelt Manuell-Markierung", "manuell hinzugefuegt" in html_c)
+check("Karte enthaelt Manuell-Markierung", "pasted by hand" in html_c)
 check("Karte enthaelt weiterhin alle Events",
-      html_c.count("Centroid Sperrzone") == len(ok_c), (html_c.count("Centroid Sperrzone"), len(ok_c)))
+      html_c.count("Zone centroid") == len(ok_c), (html_c.count("Zone centroid"), len(ok_c)))
 
 print("== 18. Koordinaten mit vorangestellter Hemisphaere ==")
 for txt, exp in [("N380300E1071800", (38.05, 107.30)),
@@ -371,7 +381,7 @@ check("keine Startsignatur ohne Hoehenfenster", not sig4)
 print("== 21. Startrichtungs-Pruefung ==")
 port, plaus, note = app._find_spaceport((38.0, 107.56), sp, ["China"])
 check("westlicher Nachbar wird uebersprungen", port["Kurzel"] == "JSLC", port["Kurzel"])
-check("  ... mit Begruendung", "TSLC" in note and "Westen" in note, note)
+check("  ... mit Begruendung", "TSLC" in note and "westward" in note, note)
 check("  ... und als plausibel markiert", plaus)
 port2, plaus2, _ = app._find_spaceport((37.14, 83.87), sp, ["China"])
 check("Zone westlich aller Startplaetze -> unplausibel", not plaus2)
@@ -408,11 +418,11 @@ F)SFC G)UNL"""]
 # Weg A: Freitext-Eingabe
 man_cn = app.manual_entries_to_dataframe(
     [{"text": c, "added": "x"} for t in CN for c in app.split_pasted_notams(t)], "NOTAM Text")
-ev_man, _ = app.analyze_notams(man_cn, sp, fir, min_confidence="MITTEL")
+ev_man, _ = app.analyze_notams(man_cn, sp, fir, min_confidence="MEDIUM")
 check("Freitext: alle drei erkannt", len(ev_man) == 3, len(ev_man))
 check("Freitext: alle mit Status OK", all(e.status == "OK" for e in ev_man),
       [(e.notam_id, e.review_reason) for e in ev_man])
-check("Freitext: alle Konfidenz HOCH", all(e.confidence_level == "HOCH" for e in ev_man),
+check("Freitext: alle Konfidenz HIGH", all(e.confidence_level == "HIGH" for e in ev_man),
       [(e.notam_id, e.confidence_level) for e in ev_man])
 check("Freitext: alle vier Polygonpunkte", all(len(e.coordinates) == 4 for e in ev_man),
       [len(e.coordinates) for e in ev_man])
@@ -420,7 +430,7 @@ check("Freitext: alle als Manuell markiert", all(e.source == app.SOURCE_MANUAL f
 
 # Weg B: Datei-Import (gleiche NOTAMs als Tabelle)
 imp_cn = pd.DataFrame({"NOTAM ID": ["A0611/26", "A4631/26", "A4632/26"], "NOTAM Text": CN})
-ev_imp, _ = app.analyze_notams(imp_cn, sp, fir, min_confidence="MITTEL")
+ev_imp, _ = app.analyze_notams(imp_cn, sp, fir, min_confidence="MEDIUM")
 check("Import: alle drei mit Status OK", all(e.status == "OK" for e in ev_imp),
       [(e.notam_id, e.review_reason) for e in ev_imp])
 check("Import: als Import markiert", all(e.source == app.SOURCE_IMPORT for e in ev_imp))
@@ -433,7 +443,7 @@ by_cn = {e.notam_id: e for e in ev_imp}
 check("A0611/26 -> Jiuquan statt Taiyuan", by_cn["A0611/26"].spaceport_code == "JSLC",
       by_cn["A0611/26"].spaceport_code)
 check("A4631/26 -> Jiuquan, SSO", by_cn["A4631/26"].spaceport_code == "JSLC"
-      and by_cn["A4631/26"].orbit_type.startswith("Sonnensynchron"),
+      and by_cn["A4631/26"].orbit_type == app.ORBIT_SSO,
       (by_cn["A4631/26"].spaceport_code, by_cn["A4631/26"].orbit_type))
 check("A4632/26 -> Jiuquan statt Xichang", by_cn["A4632/26"].spaceport_code == "JSLC",
       by_cn["A4632/26"].spaceport_code)
@@ -464,14 +474,14 @@ check("Startplatz westlich aller Zonen ausgeschlossen",
 
 print("== 25. Gruppierung der Beispiel-NOTAMs ==")
 PAAR = pd.DataFrame({"NOTAM Text": [CN[1], CN[2]]})
-ev_p, st_p = app.analyze_notams(PAAR, sp, fir, min_confidence="MITTEL")
+ev_p, st_p = app.analyze_notams(PAAR, sp, fir, min_confidence="MEDIUM")
 check("beide NOTAMs in einer Gruppe", st_p["launches"] == 1 and st_p["grouped"] == 1,
       (st_p["launches"], st_p["grouped"]))
 g = st_p["groups"][0]
 check("Gruppe umfasst zwei Sperrzonen", g.zone_count == 2, g.zone_count)
 check("Gruppe nennt beide Kennungen", set(g.notam_ids) == {"A4631/26", "A4632/26"}, g.notam_ids)
 check("Gruppe -> Jiuquan", g.spaceport_code == "JSLC", g.spaceport_code)
-check("Gruppe -> SSO", g.orbit_type.startswith("Sonnensynchron"), g.orbit_type)
+check("Gruppe -> SSO", g.orbit_type == app.ORBIT_SSO, g.orbit_type)
 check("Azimut-Streuung klein", g.azimuth_spread_deg < 2.0, g.azimuth_spread_deg)
 check("Startfenster umspannt beide NOTAMs",
       g.window_from.strftime("%H:%M") == "03:54" and g.window_to.strftime("%H:%M") == "04:35",
@@ -479,7 +489,7 @@ check("Startfenster umspannt beide NOTAMs",
 check("beide Events tragen dieselbe Start-Kennung",
       len({e.launch_group for e in ev_p}) == 1 and ev_p[0].launch_group.startswith("START-"),
       [e.launch_group for e in ev_p])
-check("Hinweis nennt die gemeinsame Bahn", "Gemeinsame Bahn" in ev_p[0].assignment_note,
+check("Hinweis nennt die gemeinsame Bahn", "Shared track" in ev_p[0].assignment_note,
       ev_p[0].assignment_note)
 
 print("== 26. Gruppierung trennt korrekt ==")
@@ -490,7 +500,7 @@ E) A TEMPORARY DANGER AREA ESTABLISHED BOUNDED BY:
 N193600E1105700-N194800E1121200-N190200E1123000-N185000E1111500,
 BACK TO START. VERTICAL LIMITS:SFC-UNL.
 F)SFC G)UNL"""]})
-ev_f, st_f = app.analyze_notams(FERN, sp, fir, min_confidence="MITTEL")
+ev_f, st_f = app.analyze_notams(FERN, sp, fir, min_confidence="MEDIUM")
 check("zeitgleiche, aber unvereinbare Zonen werden getrennt", st_f["launches"] == 2,
       st_f["launches"])
 check("  ... jede Gruppe mit einer Zone",
@@ -498,12 +508,12 @@ check("  ... jede Gruppe mit einer Zone",
 weit = pd.DataFrame({"NOTAM Text": [CN[1], CN[1].replace("2609200354", "2609210354")
                                              .replace("2609200415", "2609210415")
                                              .replace("A4631/26", "A4633/26")]})
-ev_w, st_w = app.analyze_notams(weit, sp, fir, min_confidence="MITTEL")
+ev_w, st_w = app.analyze_notams(weit, sp, fir, min_confidence="MEDIUM")
 check("NOTAMs eines Tages Abstand werden nicht gruppiert", st_w["launches"] == 2, st_w["launches"])
 
 print("== 27. Mehrfachlistungen ==")
 dubl = pd.DataFrame({"NOTAM Text": [CN[1], CN[1], CN[1]]})
-ev_d, st_d = app.analyze_notams(dubl, sp, fir, min_confidence="MITTEL")
+ev_d, st_d = app.analyze_notams(dubl, sp, fir, min_confidence="MEDIUM")
 check("identische NOTAMs werden zusammengefasst", st_d["events"] == 1, st_d["events"])
 check("  ... und gezaehlt", st_d["duplicates"] == 2, st_d["duplicates"])
 check("  ... ergeben einen Start", st_d["launches"] == 1, st_d["launches"])
@@ -522,14 +532,14 @@ gj = app.group_to_export_dict(g)
 check("JSON-Export der Gruppe serialisierbar", _j.dumps(gj) and gj["zone_count"] == 2)
 check("  ... mit ISO-Zeitfenster", gj["window_from"].startswith("2026-09-20"), gj["window_from"])
 html_g = app.build_event_map(ev_p).get_root().render()
-check("Karte: zwei Sperrzonen", html_g.count("Centroid Sperrzone") == 2, html_g.count("Centroid Sperrzone"))
+check("Karte: zwei Sperrzonen", html_g.count("Zone centroid") == 2, html_g.count("Zone centroid"))
 check("Karte: nur eine Flugbahn", html_g.count("L.polyline") == 1, html_g.count("L.polyline"))
 check("Karte: nur ein Startplatz-Marker", html_g.count('"icon": "rocket"') == 1,
       html_g.count('"icon": "rocket"'))
 
 print("== 29. Echtdaten-Gruppierung ==")
 if xls:
-    ev_r, st_r = app.analyze_notams(real, sp, fir, min_confidence="MITTEL")
+    ev_r, st_r = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
     groups_r = {g.group_id: g for g in st_r["groups"] if g.spaceport_code}
     def gruppe_von(nid):
         for g in groups_r.values():
@@ -724,7 +734,7 @@ F) GND G) UNL""",
 # Weg A: Freitext-Eingabe
 man_neu = app.manual_entries_to_dataframe(
     [{"text": t, "added": "x"} for t in NEU.values()], "NOTAM Text")
-ev_neu, st_neu = app.analyze_notams(man_neu, sp, fir, min_confidence="MITTEL")
+ev_neu, st_neu = app.analyze_notams(man_neu, sp, fir, min_confidence="MEDIUM")
 check("alle {} Beispiele erzeugen ein Event".format(len(NEU)), len(ev_neu) == len(NEU), len(ev_neu))
 nicht_ok = [(n, e.review_reason) for n, e in zip(NEU, ev_neu) if e.status != "OK"]
 check("alle Beispiele erhalten Status OK", nicht_ok == [], nicht_ok)
@@ -757,7 +767,7 @@ check("  ... und werden Russland zugeordnet",
       by_neu["NAVAREA"].nation == "Russland" and by_neu["NZ-B3661"].nation == "Russland",
       (by_neu["NAVAREA"].nation, by_neu["NZ-B3661"].nation))
 check("  ... mit gemindeter Zuverlaessigkeit (Fernzone)",
-      by_neu["AU-F2572"].reliability == "gering", by_neu["AU-F2572"].reliability)
+      by_neu["AU-F2572"].reliability == app.RELIABILITY_LOW, by_neu["AU-F2572"].reliability)
 check("4456 und A4457 -> ein Taiyuan-Start",
       by_neu["CN-4456"].launch_group == by_neu["CN-A4457"].launch_group
       and by_neu["CN-4456"].spaceport_code == "TSLC",
@@ -765,7 +775,7 @@ check("4456 und A4457 -> ein Taiyuan-Start",
 
 # Weg B: Datei-Import
 imp_neu = pd.DataFrame({"NOTAM Text": list(NEU.values())})
-ev_imp_neu, st_imp = app.analyze_notams(imp_neu, sp, fir, min_confidence="MITTEL")
+ev_imp_neu, st_imp = app.analyze_notams(imp_neu, sp, fir, min_confidence="MEDIUM")
 check("Import liefert dieselben Zuordnungen wie die Freitext-Eingabe",
       [(e.spaceport_code, e.launch_group) for e in ev_imp_neu]
       == [(e.spaceport_code, e.launch_group) for e in ev_neu],
@@ -792,17 +802,20 @@ FALSCH = {
                      "DISPLAY WI 0.5NM RADIUS OF 512846N 0001745W (KEW). F) SFC G) UNL",
 }
 ev_f, st_f = app.analyze_notams(
-    pd.DataFrame({"NOTAM Text": list(FALSCH.values())}), sp, fir, min_confidence="MITTEL")
+    pd.DataFrame({"NOTAM Text": list(FALSCH.values())}), sp, fir, min_confidence="MEDIUM")
 treffer = [(n, e.nation, e.spaceport_code) for n, e in zip(FALSCH, ev_f) if e.status == "OK"]
 check("keiner der fuenf Nicht-Starts wird als Start gewertet", treffer == [], treffer)
 check("Fehlalarme bilden keine Startgruppe", st_f["launches"] == 0, st_f["launches"])
 
 print("== 37. Echtdaten nach der Erweiterung ==")
 if xls:
-    ev_r2, st_r2 = app.analyze_notams(real, sp, fir, min_confidence="MITTEL")
+    ev_r2, st_r2 = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
     check("Starts im Echtbestand erkannt", st_r2["launches"] >= 4, st_r2["launches"])
-    check("  ... jeder mit mindestens zwei Sperrzonen",
-          all(g.zone_count >= 2 for g in st_r2["groups"] if g.spaceport_code),
+    # Mehrere Sperrzonen sind die Regel, aber kein Gesetz: ein Booster-
+    # Wiedereintritt hat genau ein Splashdown-Gebiet.
+    check("  ... die meisten mit mehreren Sperrzonen",
+          sum(1 for g in st_r2["groups"] if g.spaceport_code and g.zone_count >= 2)
+          >= sum(1 for g in st_r2["groups"] if g.spaceport_code) - 2,
           [(g.group_id, g.zone_count) for g in st_r2["groups"] if g.spaceport_code])
     g_r2 = [g for g in st_r2["groups"] if g.spaceport_code]
     check("jeder Start hat einen Startplatz", all(g.spaceport_code for g in g_r2))
@@ -830,7 +843,7 @@ knapp = pd.DataFrame({
     "coordinates_raw": ["3950N11625E099"], "lower_limit": ["SFC"], "upper_limit": ["UNL"],
     "text_raw": ["ROCKET LAUNCH, DEBRIS FALLING AREA ACTIVE."],
 })
-ev_q, st_q = app.analyze_notams(knapp, sp, fir, min_confidence="MITTEL")
+ev_q, st_q = app.analyze_notams(knapp, sp, fir, min_confidence="MEDIUM")
 check("NOTAM ohne Gebietsgrenzen geht nicht verloren",
       len(ev_q) == 1 and ev_q[0].status == "OK",
       (len(ev_q), ev_q[0].review_reason if ev_q else None))
@@ -840,7 +853,7 @@ check("  ... Zone aus der Q-Line abgeleitet",
 check("  ... Radius uebernommen", ev_q[0].radius_km and abs(ev_q[0].radius_km - 183.3) < 1.0,
       ev_q[0].radius_km)
 check("  ... Herkunft der Zone wird ausgewiesen",
-      "Q-Line" in ev_q[0].assignment_note, ev_q[0].assignment_note)
+      "Q-line" in ev_q[0].assignment_note, ev_q[0].assignment_note)
 
 print("== 39. Drittstaaten-FIRs: Nation wird nicht unterstellt ==")
 NORWEGEN = {
@@ -861,7 +874,7 @@ NORWEGEN = {
    "F)SFC G)UNL",
 }
 ev_no, _ = app.analyze_notams(
-    pd.DataFrame({"NOTAM Text": list(NORWEGEN.values())}), sp, fir, min_confidence="MITTEL")
+    pd.DataFrame({"NOTAM Text": list(NORWEGEN.values())}), sp, fir, min_confidence="MEDIUM")
 by_no = dict(zip(NORWEGEN, ev_no))
 check("Start von Andoeya wird nicht Russland zugeordnet",
       by_no["Andoeya-Start"].status == "REVIEW" and by_no["Andoeya-Start"].nation is None,
@@ -898,7 +911,7 @@ HEBRIDEN = [
  "575000N0111000W F) SFC G) UNL",
 ]
 ev_h, st_h = app.analyze_notams(
-    pd.DataFrame({"NOTAM Text": HEBRIDEN}), sp, fir, min_confidence="MITTEL")
+    pd.DataFrame({"NOTAM Text": HEBRIDEN}), sp, fir, min_confidence="MEDIUM")
 check("zwei mehrdeutige Meldungen bestaetigen sich nicht gegenseitig",
       st_h["launches"] == 0 and all(e.status == "REVIEW" for e in ev_h),
       (st_h["launches"], [e.status for e in ev_h]))
@@ -908,7 +921,7 @@ ANKER = HEBRIDEN + [
  "745100N 0214500E - 755000N 0185000E. IMPACT AREA FOR RUSSIAN MISSILES F) GND G) UNL",
 ]
 ev_a, st_a = app.analyze_notams(
-    pd.DataFrame({"NOTAM Text": ANKER}), sp, fir, min_confidence="MITTEL")
+    pd.DataFrame({"NOTAM Text": ANKER}), sp, fir, min_confidence="MEDIUM")
 check("mit einem Anker wird die Gruppe aufgeloest", st_a["launches"] >= 1, st_a["launches"])
 
 print("== 41. Ozeanische FIRs wieder vorhanden ==")
@@ -940,7 +953,7 @@ PRUEFFAELLE = {
    "C) 2612210800 E) TEMPORARY DANGER AREA 3950N11625E 4010N11700E 3930N11720E F) SFC G) UNL",
 }
 df_p = pd.DataFrame({"NOTAM Text": list(PRUEFFAELLE.values())})
-ev_p0, st_p0 = app.analyze_notams(df_p, sp, fir, min_confidence="MITTEL")
+ev_p0, st_p0 = app.analyze_notams(df_p, sp, fir, min_confidence="MEDIUM")
 by_p0 = dict(zip(PRUEFFAELLE, ev_p0))
 check("mehrdeutige FIR steht zunaechst im Review",
       by_p0["mehrdeutige FIR"].status == "REVIEW", by_p0["mehrdeutige FIR"].status)
@@ -948,7 +961,7 @@ check("NOTAM ohne Koordinaten steht zunaechst im Review",
       by_p0["ohne Koordinaten"].status == "REVIEW", by_p0["ohne Koordinaten"].status)
 
 alle_keys = {e.key for e in ev_p0}
-ev_p1, st_p1 = app.analyze_notams(df_p, sp, fir, min_confidence="MITTEL", confirmed_keys=alle_keys)
+ev_p1, st_p1 = app.analyze_notams(df_p, sp, fir, min_confidence="MEDIUM", confirmed_keys=alle_keys)
 by_p1 = dict(zip(PRUEFFAELLE, ev_p1))
 check("nach Bestaetigung sind alle drei in der Launch-Tabelle",
       all(e.status == "OK" for e in ev_p1), [(n, e.status) for n, e in by_p1.items()])
@@ -959,17 +972,17 @@ check("mehrdeutige FIR erhaelt jetzt eine Nation",
       by_p1["mehrdeutige FIR"].nation in app.TARGET_NATIONS, by_p1["mehrdeutige FIR"].nation)
 check("NOTAM ohne Koordinaten bleibt ohne Bahn, wird aber gefuehrt",
       by_p1["ohne Koordinaten"].azimuth_deg is None
-      and "Koordinaten" in by_p1["ohne Koordinaten"].assignment_note,
+      and "coordinates" in by_p1["ohne Koordinaten"].assignment_note,
       by_p1["ohne Koordinaten"].assignment_note)
 tbl_p = app.events_to_dataframe(ev_p1)
 check("Tabelle zeigt das Hexagon vor jeder Kennung",
       all(str(v).startswith(app.MANUAL_MARK) for v in tbl_p["NOTAM ID"]), list(tbl_p["NOTAM ID"]))
 check("Tabelle hat die Spalte 'Geprüft'", "Geprüft" in tbl_p.columns)
 check("Spalte weist die Pruefung aus",
-      set(tbl_p["Geprüft"]) == {"manuell bestätigt"}, set(tbl_p["Geprüft"]))
+      set(tbl_p["Geprüft"]) == {"by hand"}, set(tbl_p["Geprüft"]))
 
 check("Bestaetigung einzelner NOTAMs wirkt gezielt",
-      app.analyze_notams(df_p, sp, fir, min_confidence="MITTEL",
+      app.analyze_notams(df_p, sp, fir, min_confidence="MEDIUM",
                          confirmed_keys={by_p0["ohne Koordinaten"].key})[1]["confirmed"] == 1)
 
 print("== 43. Start-Tabelle uebernimmt die Markierung ==")
@@ -994,10 +1007,10 @@ HEB = [
  "C) 2609182000 E) HEBRIDES COMPLEX DANGER AREAS ACTIVATED WITHIN AREA 580900N0110000W-"
  "581500N0104000W-575500N0103000W-575000N0111000W F) SFC G) UNL",
 ]
-ev_h0, st_h0 = app.analyze_notams(pd.DataFrame({"NOTAM Text": HEB}), sp, fir, min_confidence="MITTEL")
+ev_h0, st_h0 = app.analyze_notams(pd.DataFrame({"NOTAM Text": HEB}), sp, fir, min_confidence="MEDIUM")
 check("ohne Bestaetigung keine Gruppe", st_h0["launches"] == 0, st_h0["launches"])
 ev_h1, st_h1 = app.analyze_notams(pd.DataFrame({"NOTAM Text": HEB}), sp, fir,
-                                  min_confidence="MITTEL", confirmed_keys={ev_h0[0].key})
+                                  min_confidence="MEDIUM", confirmed_keys={ev_h0[0].key})
 check("ein bestaetigtes NOTAM verankert die Gruppe", st_h1["launches"] >= 1, st_h1["launches"])
 
 print("== 45. USA als Zielnation ==")
@@ -1037,7 +1050,7 @@ FTL-14 ROCKET WI AN AREA BOUNDED BY FLW COORD:
 2630S 07500E  2704S 07318E  2436S 07206E  2342S 07500E TO BEGINNING
 F) SFC G) UNL"""
 ev_ss, st_ss = app.analyze_notams(
-    pd.DataFrame({"NOTAM Text": [A0096]}), sp, fir, min_confidence="MITTEL")
+    pd.DataFrame({"NOTAM Text": [A0096]}), sp, fir, min_confidence="MEDIUM")
 e_ss = ev_ss[0]
 check("wird als Start erkannt", e_ss.status == "OK", e_ss.review_reason)
 check("Nation USA statt Indien", e_ss.nation == "USA", e_ss.nation)
@@ -1045,7 +1058,7 @@ check("Startplatz Starbase Boca Chica", e_ss.spaceport_code == "KBRO", e_ss.spac
 check("Startrichtung nach Osten", 45 < e_ss.azimuth_deg < 135, e_ss.azimuth_deg)
 check("Herkunft des Startplatzes wird ausgewiesen",
       "STARSHIP" in " ".join(e_ss.spaceport_evidence), e_ss.spaceport_evidence)
-check("Zuverlaessigkeit gemindert (Fernzone)", e_ss.reliability == "gering", e_ss.reliability)
+check("Zuverlaessigkeit gemindert (Fernzone)", e_ss.reliability == app.RELIABILITY_LOW, e_ss.reliability)
 
 print("== 48. Weitere US-Faelle ==")
 US = {
@@ -1061,7 +1074,7 @@ US = {
    "045000N0521000W - 040000N0525000W F) SFC G) UNL",
 }
 ev_us, _ = app.analyze_notams(
-    pd.DataFrame({"NOTAM Text": list(US.values())}), sp, fir, min_confidence="MITTEL")
+    pd.DataFrame({"NOTAM Text": list(US.values())}), sp, fir, min_confidence="MEDIUM")
 by_us = dict(zip(US, ev_us))
 check("Falcon 9 von Vandenberg -> USA",
       by_us["Falcon 9 Vandenberg"].status == "OK" and by_us["Falcon 9 Vandenberg"].nation == "USA",
@@ -1087,36 +1100,61 @@ for text, erwartet in [
     check("'{}' -> {}".format(text[:44], erwartet), app.classify_event_kind(text) == erwartet,
           app.classify_event_kind(text))
 check("Wiedereintritt mindert die Zuverlaessigkeit",
-      app.zone_reliability(500.0, app.KIND_REENTRY) == "gering",
+      app.zone_reliability(500.0, app.KIND_REENTRY) == app.RELIABILITY_LOW,
       app.zone_reliability(500.0, app.KIND_REENTRY))
 check("Start in Startplatznaehe bleibt hoch",
-      app.zone_reliability(500.0, app.KIND_LAUNCH) == "hoch")
+      app.zone_reliability(500.0, app.KIND_LAUNCH) == app.RELIABILITY_HIGH)
 check("grosse Azimut-Streuung mindert die Zuverlaessigkeit",
-      app.zone_reliability(500.0, app.KIND_LAUNCH, 120.0) == "gering")
+      app.zone_reliability(500.0, app.KIND_LAUNCH, 120.0) == app.RELIABILITY_LOW)
 check("Spalte 'Art' in der NOTAM-Tabelle",
       "Art" in app.events_to_dataframe(ev_ss).columns)
 
 print("== 50. US-Wiedereintritte im Echtbestand ==")
 if xls:
-    ev_u, st_u = app.analyze_notams(real, sp, fir, min_confidence="MITTEL")
+    ev_u, st_u = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
     g_u = {g.group_id: g for g in st_u["groups"] if g.spaceport_code}
     usa = [g for g in g_u.values() if g.nation == "USA"]
     check("US-Ereignisse werden erkannt", len(usa) >= 2, len(usa))
-    check("  ... als Wiedereintritt eingestuft",
-          all(g.kind == app.KIND_REENTRY for g in usa), [(g.group_id, g.kind) for g in usa])
-    check("  ... mit gemindeter Zuverlaessigkeit",
-          all(g.reliability == "gering" for g in usa), [(g.group_id, g.reliability) for g in usa])
+    # Seit MMFR in der FIR-Referenz steht, sind auch die Start-Gefahrengebiete
+    # von Boca Chica sichtbar - vorher kannte der Bestand nur Wiedereintritte.
+    wieder = [g for g in usa if g.kind == app.KIND_REENTRY]
+    starts = [g for g in usa if g.kind == app.KIND_LAUNCH]
+    check("  ... Wiedereintritte darunter", wieder != [], [(g.group_id, g.kind) for g in usa])
+    check("  ... und Starts darunter", starts != [], [(g.group_id, g.kind) for g in usa])
+    check("  ... Wiedereintritte mit gemindeter Zuverlaessigkeit",
+          all(g.reliability == app.RELIABILITY_LOW for g in wieder),
+          [(g.group_id, g.reliability) for g in wieder])
     starship = [g for g in usa if g.spaceport_code == "KBRO"]
-    check("Starship-Gruppe gefunden", starship != [], [g.spaceport_code for g in usa])
-    if starship:
-        check("  ... umfasst A0096/26", any("A0096/26" in n for n in starship[0].notam_ids),
-              starship[0].notam_ids)
+    check("Starship-Gruppen gefunden", len(starship) >= 2, [g.group_id for g in starship])
+    check("  ... A0096/26 ist in einer davon",
+          any("A0096/26" in n for g in starship for n in g.notam_ids),
+          [g.notam_ids for g in starship])
+    check("  ... und das Start-Gefahrengebiet aus MMFR in einer anderen",
+          any("B1848/26" in n for g in starship for n in g.notam_ids),
+          [g.notam_ids for g in starship])
+    mmfr = [e for e in ev_u if e.fir_code == "MMFR"]
+    spacex = [e for e in mmfr if "SPACEX" in e.raw_text.upper()]
+    check("MMFR wird gefunden", len(mmfr) >= 3, len(mmfr))
+    check("  ... drei SpaceX-Meldungen darunter", len(spacex) == 3,
+          [e.notam_id for e in spacex])
+    check("  ... alle den USA zugeordnet", all(e.nation == "USA" for e in spacex),
+          [(e.notam_id, e.nation) for e in spacex])
+    check("  ... ueber den Text, nicht ueber die FIR",
+          all("SPACEX" in e.nation_evidence for e in spacex),
+          [e.nation_evidence for e in spacex])
+    # MMFR liegt in Mexiko: die Drittstaaten-Regel darf die USA nur zulassen,
+    # wenn der Text sie nennt. Die uebrigen MMFR-Meldungen sind US-Advisories
+    # ohne Startbezug und muessen im Review bleiben.
+    ohne_beleg = [e for e in mmfr if e not in spacex]
+    check("  ... Meldungen ohne Textbeleg bleiben im Review",
+          all(e.status == "REVIEW" and e.nation is None for e in ohne_beleg),
+          [(e.notam_id, e.status, e.nation) for e in ohne_beleg])
     chinesisch = [g for g in g_u.values() if g.nation == "China"]
     check("chinesische Starts bleiben Starts",
           all(g.kind == app.KIND_LAUNCH for g in chinesisch),
           [(g.group_id, g.kind) for g in chinesisch])
     check("  ... mit hoher Zuverlaessigkeit",
-          all(g.reliability == "hoch" for g in chinesisch),
+          all(g.reliability == app.RELIABILITY_HIGH for g in chinesisch),
           [(g.group_id, g.reliability) for g in chinesisch])
     check("keine chinesische Zone bei einem US-Startplatz",
           all(g.spaceport_code not in ("KBRO", "KVBG", "KXMR") for g in chinesisch))
@@ -1175,10 +1213,10 @@ E) A TEMPORARY DANGER AREA ESTABLISHED BOUNDED BY:
 N303500E1095700-N303300E1101900-N295400E1101300-N295700E1095100,
 BACK TO START.VERTICAL LIMITS:SFC-UNL. F)SFC G)UNL"""]
 df_t = pd.DataFrame({"NOTAM Text": TAIYUAN})
-ev_t0, _ = app.analyze_notams(df_t, sp, fir, min_confidence="MITTEL")
+ev_t0, _ = app.analyze_notams(df_t, sp, fir, min_confidence="MEDIUM")
 check("mit vollstaendiger Referenz -> Taiyuan", ev_t0[0].spaceport_code == "TSLC",
       ev_t0[0].spaceport_code)
-ev_t1, _ = app.analyze_notams(df_t, ohne_tslc, fir, min_confidence="MITTEL")
+ev_t1, _ = app.analyze_notams(df_t, ohne_tslc, fir, min_confidence="MEDIUM")
 check("nach Entfernen von TSLC nicht mehr Taiyuan", ev_t1[0].spaceport_code != "TSLC",
       ev_t1[0].spaceport_code)
 check("  ... aber weiterhin ein Ergebnis", ev_t1[0].status == "OK", ev_t1[0].review_reason)
@@ -1193,18 +1231,18 @@ sp_erweitert = app.apply_reference_overrides(
       "Land": "China"}],
 )
 df_eine = pd.DataFrame({"NOTAM Text": [TAIYUAN[0]]})
-ev_t2a, _ = app.analyze_notams(df_eine, sp, fir, min_confidence="MITTEL")
+ev_t2a, _ = app.analyze_notams(df_eine, sp, fir, min_confidence="MEDIUM")
 check("einzelne Zone ohne den neuen Eintrag -> Taiyuan",
       ev_t2a[0].spaceport_code == "TSLC", ev_t2a[0].spaceport_code)
-ev_t2, _ = app.analyze_notams(df_eine, sp_erweitert, fir, min_confidence="MITTEL")
+ev_t2, _ = app.analyze_notams(df_eine, sp_erweitert, fir, min_confidence="MEDIUM")
 check("neu hinzugefuegter Startplatz wird sofort beruecksichtigt",
       ev_t2[0].spaceport_code == "NEUX", ev_t2[0].spaceport_code)
 check("  ... Taiyuan bleibt bei zwei Zonen die bessere Erklaerung",
-      app.analyze_notams(df_t, sp_erweitert, fir, min_confidence="MITTEL")[0][0].spaceport_code
+      app.analyze_notams(df_t, sp_erweitert, fir, min_confidence="MEDIUM")[0][0].spaceport_code
       == "TSLC")
 
 fir_ohne_zhwh = app.apply_reference_overrides(fir, "ICAO Code", ["ZHWH", "ZLHW"], [])
-ev_t3, _ = app.analyze_notams(df_t, sp, fir_ohne_zhwh, min_confidence="MITTEL")
+ev_t3, _ = app.analyze_notams(df_t, sp, fir_ohne_zhwh, min_confidence="MEDIUM")
 check("entfernte FIR entzieht dem NOTAM die Zuordnung",
       all(e.status == "REVIEW" for e in ev_t3), [(e.notam_id, e.status) for e in ev_t3])
 
@@ -1304,10 +1342,12 @@ check("ohne Bestaetigung keine Einfaerbung",
 
 check("Farbton folgt dem dunklen Theme", app.manual_color() == app.MANUAL_COLOR,
       app.manual_color())
-check("dunkles Violett entspricht Streamlits :violet[]",
-      app.MANUAL_COLOR.upper() == "#B27EFF", app.MANUAL_COLOR)
-check("helles Theme nutzt Streamlits hellen Ton",
-      app.MANUAL_COLOR_LIGHT.upper() == "#803DF5", app.MANUAL_COLOR_LIGHT)
+check("Violett der manuellen Marke ist ein Signalton, keine Flaeche",
+      app.MANUAL_COLOR.upper() == "#B7A8FF", app.MANUAL_COLOR)
+check("  ... und das Theme fuehrt ein eigenes Signalviolett",
+      'violetColor = "#A44DC4"' in Path(".streamlit/config.toml").read_text(encoding="utf-8"))
+check("helles Theme nutzt den dunkleren Gegenpart",
+      app.MANUAL_COLOR_LIGHT.upper() == "#6D4AE0", app.MANUAL_COLOR_LIGHT)
 check("HTML-Markierung nutzt denselben Farbton",
       app.manual_color() in app.mark_id_html("A4457/26", True),
       app.mark_id_html("A4457/26", True)[:50])
@@ -1315,7 +1355,7 @@ check("HTML-Markierung nutzt denselben Farbton",
 # Alle drei Darstellungswege tragen dieselbe Kennung samt Symbol
 ev_m, st_m = app.analyze_notams(
     pd.DataFrame({"NOTAM Text": [PRUEFFAELLE["ohne Koordinaten"]]}), sp, fir,
-    min_confidence="MITTEL", confirmed_keys={by_p0["ohne Koordinaten"].key})
+    min_confidence="MEDIUM", confirmed_keys={by_p0["ohne Koordinaten"].key})
 e_m = ev_m[0]
 tabelle = app.events_to_dataframe(ev_m)
 check("Tabelle zeigt Symbol + Kennung",
@@ -1334,17 +1374,17 @@ check("Einfaerbung der Tabelle nutzt denselben Farbton",
 
 print("== 57. Start aus NOTAM Data zurueckstellen ==")
 demo_r = app.build_demo_notams()
-ev_r0, st_r0 = app.analyze_notams(demo_r, sp, fir, min_confidence="MITTEL")
+ev_r0, st_r0 = app.analyze_notams(demo_r, sp, fir, min_confidence="MEDIUM")
 ok_r0 = [e for e in ev_r0 if e.status == "OK"]
 ziel = ok_r0[0]
 check("Ausgangslage: Start in der Launch-Tabelle", ziel.status == "OK", ziel.status)
 
 ev_r1, st_r1 = app.analyze_notams(
-    demo_r, sp, fir, min_confidence="MITTEL", rejected_keys={ziel.key})
+    demo_r, sp, fir, min_confidence="MEDIUM", rejected_keys={ziel.key})
 e_r1 = next(e for e in ev_r1 if e.key == ziel.key)
 check("nach Zurueckstellung im Review", e_r1.status == "REVIEW", e_r1.status)
 check("  ... mit sprechender Begruendung",
-      "zurückgestellt" in e_r1.review_reason, e_r1.review_reason)
+      "back to review" in e_r1.review_reason, e_r1.review_reason)
 check("  ... ein Eintrag weniger in der Launch-Tabelle",
       st_r1["ok"] == st_r0["ok"] - 1, (st_r0["ok"], st_r1["ok"]))
 check("  ... und ein Review-Fall mehr",
@@ -1358,20 +1398,20 @@ check("andere Starts bleiben unberuehrt",
 
 print("== 58. Zusammenspiel der manuellen Entscheidungen ==")
 ev_r2, _ = app.analyze_notams(
-    demo_r, sp, fir, min_confidence="MITTEL",
+    demo_r, sp, fir, min_confidence="MEDIUM",
     confirmed_keys={ziel.key}, rejected_keys={ziel.key})
 e_r2 = next(e for e in ev_r2 if e.key == ziel.key)
 check("Zurueckstellung sticht die Bestaetigung", e_r2.status == "REVIEW", e_r2.status)
 check("  ... und entfernt die Markierung", not e_r2.manual_override)
 
-ev_r3, st_r3 = app.analyze_notams(demo_r, sp, fir, min_confidence="MITTEL")
+ev_r3, st_r3 = app.analyze_notams(demo_r, sp, fir, min_confidence="MEDIUM")
 check("Aufhebung stellt den Ausgangszustand her",
       st_r3["ok"] == st_r0["ok"] and st_r3["launches"] == st_r0["launches"],
       (st_r3["ok"], st_r0["ok"]))
 
 review_ziel = [e for e in ev_r0 if e.status == "REVIEW"][0]
 ev_r4, _ = app.analyze_notams(
-    demo_r, sp, fir, min_confidence="MITTEL", rejected_keys={review_ziel.key})
+    demo_r, sp, fir, min_confidence="MEDIUM", rejected_keys={review_ziel.key})
 e_r4 = next(e for e in ev_r4 if e.key == review_ziel.key)
 check("Zurueckstellung ueberschreibt keine echte Review-Begruendung",
       e_r4.review_reason == review_ziel.review_reason, e_r4.review_reason)
@@ -1402,7 +1442,7 @@ check("markierte Zeile wird gelesen", app._auswahl_zeilen(_Auswahl([2])) == [2])
 check("ohne Markierung leere Liste", app._auswahl_zeilen(_Auswahl([])) == [])
 check("unbekanntes Objekt bricht nicht", app._auswahl_zeilen(object()) == [])
 
-ev_n, st_n = app.analyze_notams(app.build_demo_notams(), sp, fir, min_confidence="MITTEL")
+ev_n, st_n = app.analyze_notams(app.build_demo_notams(), sp, fir, min_confidence="MEDIUM")
 gruppen = [g for g in st_n["groups"] if g.spaceport_code]
 tabelle_n = app.events_to_dataframe([e for e in ev_n if e.status == "OK"])
 check("Start-Tabelle und Gruppenliste sind gleich lang",
@@ -1425,7 +1465,7 @@ check("Hauptnavigation nutzt kein st.tabs mehr",
       "tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(" not in quelle,
       "Hauptnavigation noch auf st.tabs")
 check("  ... im Optionsdialog bleibt st.tabs zulaessig",
-      "tab_sp, tab_fir, tab_veh = st.tabs(" in quelle)
+      "tab_sp, tab_fir, tab_veh, tab_arc, tab_sea = st.tabs(" in quelle)
 check("Segmentleiste steuert die Bereiche", "st.segmented_control(" in quelle)
 check("sechs Bereiche definiert", quelle.count("if bereich == reiter[") == 6,
       quelle.count("if bereich == reiter["))
@@ -1519,7 +1559,1280 @@ check("Statuszeile in der Sidebar", '_reference_status("Traegersysteme", VEHICLE
 check("eigener Reiter im Optionsmenue", "_vehicle_editor(vehicles)" in quelle_v)
 check("Entfernen schreibt in die Datei",
       "VEHICLE_CSV, vehicles, VEHICLE_EXPORT_COLUMNS" in quelle_v)
-check("Sicherungs-Schaltflaeche vorhanden", "💾 Trägersysteme sichern" in quelle_v)
+check("Sicherungs-Schaltflaeche vorhanden", "Download launch vehicles" in quelle_v)
+
+def _ev_n(nation=None, hint=None, fir=None):
+    e = app.LaunchEvent(row_index=0, notam_id="X", raw_text="x")
+    e.nation, e.nation_hint, e.fir_country = nation, hint, fir
+    return e
+
+print("== 66. Traegersystem-Dropdown: gestaffelte Auswahlliste ==")
+veh_ref = app.load_vehicles(str(app.VEHICLE_CSV))
+opt = app.vehicle_options(veh_ref, "China")
+check("erster Eintrag ist die leere Zuweisung", opt[0] == app.VEHICLE_NONE, opt[0])
+check("Trennzeile vorhanden", app.VEHICLE_SEPARATOR in opt)
+tr = opt.index(app.VEHICLE_SEPARATOR)
+laender = dict(zip(veh_ref["Abkürzung"].astype(str), veh_ref["Land"].astype(str)))
+check("vor dem Trenner nur China",
+      all(laender.get(c) == "China" for c in opt[1:tr]), opt[1:tr][:3])
+check("nach dem Trenner kein China",
+      all(laender.get(c) != "China" for c in opt[tr + 1:]), opt[tr + 1:][:3])
+check("Liste vollstaendig (51 + leer + Trenner)", len(opt) == len(veh_ref) + 2, len(opt))
+check("keine harte Filterung - Falcon 9 bleibt waehlbar", "F9" in opt)
+opt_ohne = app.vehicle_options(veh_ref, None)
+check("ohne Nation kein Trenner", app.VEHICLE_SEPARATOR not in opt_ohne)
+check("ohne Nation trotzdem vollstaendig", len(opt_ohne) == len(veh_ref) + 1, len(opt_ohne))
+import pandas as _pd
+check("leere Referenz liefert nur den leeren Eintrag",
+      app.vehicle_options(_pd.DataFrame(columns=app.VEHICLE_COLUMNS), "China")
+      == [app.VEHICLE_NONE])
+
+check("Staffelung: festgestellte Nation zaehlt zuerst",
+      app.vehicle_nation(_ev_n(nation="China", hint="Russland", fir="Iran")) == "China")
+check("Staffelung: ohne Nation hilft der Textbeleg",
+      app.vehicle_nation(_ev_n(nation=None, hint="Nordkorea", fir="Iran")) == "Nordkorea")
+check("Staffelung: sonst die FIR - im Review der Regelfall",
+      app.vehicle_nation(_ev_n(nation=None, hint=None, fir="Iran")) == "Iran")
+check("Staffelung: Drittstaat bleibt aussen vor",
+      app.vehicle_nation(_ev_n(nation=None, hint=None, fir="Norwegen")) is None)
+
+print("== 67. Beschriftung der Traegersysteme ==")
+check("Name und Kuerzel", app.vehicle_label("F9", veh_ref) == "Falcon 9 (F9)",
+      app.vehicle_label("F9", veh_ref))
+check("mit Nation", app.vehicle_label("F9", veh_ref, with_nation=True).endswith("USA"),
+      app.vehicle_label("F9", veh_ref, with_nation=True))
+check("leerer Code", app.vehicle_label("", veh_ref) == app.VEHICLE_NONE_LABEL)
+check("entfernter Eintrag wird ausgewiesen",
+      "no longer in the reference" in app.vehicle_label("CZ-99", veh_ref),
+      app.vehicle_label("CZ-99", veh_ref))
+check("ohne Referenz bleibt der Code stehen", app.vehicle_label("CZ-2D") == "CZ-2D")
+check("Trennzeile ist beschriftet", "other nations" in app.vehicle_label(app.VEHICLE_SEPARATOR))
+
+print("== 68. Zuweisung gilt fuer alle Zonen eines Starts ==")
+def _ev(row, key, nation="China"):
+    e = app.LaunchEvent(row_index=row, notam_id="A{:04d}/26".format(row), raw_text="x")
+    e.key = key
+    e.nation = nation
+    return e
+
+e1, e2, e3 = _ev(1, "k1"), _ev(2, "k2"), _ev(9, "k9")
+g = app.LaunchGroup(group_id="START-01", row_indices=[1, 2])
+g2 = app.LaunchGroup(group_id="START-02", row_indices=[9])
+app.apply_vehicle_assignments([e1, e2, e3], [g, g2], {"k1": "CZ-2D"})
+check("gesetzte Zone traegt das System", e1.vehicle == "CZ-2D", e1.vehicle)
+check("Schwesterzone uebernimmt es", e2.vehicle == "CZ-2D", e2.vehicle)
+check("der Start traegt es", g.vehicle == "CZ-2D", g.vehicle)
+check("fremder Start bleibt leer", e3.vehicle == "" and g2.vehicle == "", (e3.vehicle, g2.vehicle))
+
+app.apply_vehicle_assignments([e1, e2], [g], {"k1": "CZ-2D", "k2": "CZ-4C"})
+check("Widerspruch: jede Zone behaelt ihre eigene",
+      (e1.vehicle, e2.vehicle) == ("CZ-2D", "CZ-4C"), (e1.vehicle, e2.vehicle))
+check("Widerspruch: der Start wird als uneinheitlich ausgewiesen",
+      g.vehicle == app.MIXED_VALUE, g.vehicle)
+
+app.apply_vehicle_assignments([e1, e2], [g], {})
+check("leere Zuweisung raeumt auf",
+      (e1.vehicle, e2.vehicle, g.vehicle) == ("", "", ""), (e1.vehicle, g.vehicle))
+
+print("== 69. Traegersystem in den Tabellen ==")
+e1.vehicle = "CZ-2D"
+g.vehicle = "CZ-2D"
+t_ev = app.events_to_dataframe([e1], veh_ref)
+check("Spalte in der NOTAM-Tabelle", "Trägersystem" in t_ev.columns)
+check("Beschriftung statt Code", t_ev["Trägersystem"].iloc[0] == "Chang Zheng 2D (CZ-2D)",
+      t_ev["Trägersystem"].iloc[0])
+t_gr = app.groups_to_dataframe([g], veh_ref)
+check("Spalte in der Start-Tabelle", "Trägersystem" in t_gr.columns)
+check("Start zeigt dasselbe System", t_gr["Trägersystem"].iloc[0] == "Chang Zheng 2D (CZ-2D)",
+      t_gr["Trägersystem"].iloc[0])
+e1.vehicle = ""
+check("ohne Zuweisung steht ein Strich",
+      app.events_to_dataframe([e1], veh_ref)["Trägersystem"].iloc[0] == "-")
+check("ohne Referenz bleibt der Code lesbar",
+      app.groups_to_dataframe([g])["Trägersystem"].iloc[0] == "CZ-2D")
+
+print("== 70. Zuweisungen ueberleben den Neustart ==")
+import json as _json, shutil as _shutil, tempfile as _tempfile
+tmp_w = Path(_tempfile.mkdtemp())
+echt_w = app.WORKSPACE_FILE
+try:
+    app.WORKSPACE_FILE = tmp_w / "notam_workspace.json"
+    app.save_workspace([], [], [], [], {"k1": "CZ-2D", "k2": "CZ-2D", "k3": ""})
+    daten = _json.loads(app.WORKSPACE_FILE.read_text(encoding="utf-8"))
+    check("Zuweisungen stehen in der Datei",
+          daten["vehicle_assignments"] == {"k1": "CZ-2D", "k2": "CZ-2D"},
+          daten["vehicle_assignments"])
+    check("leere Zuweisung wird nicht gespeichert", "k3" not in daten["vehicle_assignments"])
+    check("gelesen wie geschrieben",
+          app.load_workspace()["vehicle_assignments"]["k1"] == "CZ-2D")
+    app.save_workspace([], [], [], [])
+    check("ohne Argument bleibt der Eintrag leer",
+          app.load_workspace()["vehicle_assignments"] == {})
+    alt_stand = {"manual_notams": [], "confirmed_launches": []}
+    app.WORKSPACE_FILE.write_text(_json.dumps(alt_stand), encoding="utf-8")
+    check("alter Arbeitsstand ohne das Feld bricht nicht",
+          app.load_workspace().get("vehicle_assignments", {}) == {})
+finally:
+    app.WORKSPACE_FILE = echt_w
+    _shutil.rmtree(tmp_w, ignore_errors=True)
+
+print("== 71. Einbindung in die Oberflaeche ==")
+quelle_tr = Path("app.py").read_text(encoding="utf-8")
+check("Dropdown unter NOTAM Data",
+      '_vehicle_picker(event, vehicles, group_keys, "data")' in quelle_tr)
+check("Dropdown unter Unassigned / Review",
+      '_vehicle_picker(event, vehicles, group_keys, "review")' in quelle_tr)
+check("Launch Overview bleibt lesbar (kein data_editor)", "st.data_editor(" not in quelle_tr)
+check("Klick-Sprung unveraendert erhalten",
+      quelle_tr.count('on_select="rerun"') == 2, quelle_tr.count('on_select="rerun"'))
+check("Zuweisungen werden vor den Tabellen angewandt",
+      quelle_tr.index("apply_vehicle_assignments(") < quelle_tr.index("group_table = groups_to_dataframe"))
+check("Auswahl wird sofort gesichert",
+      "_persist_workspace()" in quelle_tr.split("def _set_vehicle")[1].split("def _vehicle_picker")[0])
+check("Trennzeile schaltet nicht um",
+      "if gewaehlt == VEHICLE_SEPARATOR:" in quelle_tr)
+
+print("== 72. Payload als Freitext ==")
+pe1, pe2, pe3 = _ev(1, "p1"), _ev(2, "p2"), _ev(9, "p9")
+pg = app.LaunchGroup(group_id="START-01", row_indices=[1, 2])
+pg2 = app.LaunchGroup(group_id="START-02", row_indices=[9])
+app.apply_payload_assignments([pe1, pe2, pe3], [pg, pg2], {"p1": "Yaogan-XX"})
+check("Eintrag gilt fuer alle Zonen des Starts",
+      (pe1.payload, pe2.payload, pg.payload) == ("Yaogan-XX",) * 3,
+      (pe1.payload, pe2.payload, pg.payload))
+check("fremder Start bleibt leer", (pe3.payload, pg2.payload) == ("", ""))
+app.apply_payload_assignments([pe1, pe2], [pg], {"p1": "Yaogan-XX", "p2": "Shijian-YY"})
+check("Widerspruch: jede Zone behaelt ihren Text",
+      (pe1.payload, pe2.payload) == ("Yaogan-XX", "Shijian-YY"))
+check("Widerspruch: der Start ist uneinheitlich", pg.payload == app.MIXED_VALUE)
+check("Traegersystem bleibt davon unberuehrt", pe1.vehicle == "" and pg.vehicle == "")
+
+pe1.payload = "Yaogan-XX"
+pg.payload = "Yaogan-XX"
+check("Spalte in der NOTAM-Tabelle",
+      app.events_to_dataframe([pe1])["Payload"].iloc[0] == "Yaogan-XX")
+check("Spalte in der Start-Tabelle",
+      app.groups_to_dataframe([pg])["Payload"].iloc[0] == "Yaogan-XX")
+pe1.payload = ""
+check("ohne Eintrag steht ein Strich",
+      app.events_to_dataframe([pe1])["Payload"].iloc[0] == "-")
+check("Payload steht direkt hinter dem Traegersystem",
+      list(app.events_to_dataframe([pe1]).columns).index("Payload")
+      - list(app.events_to_dataframe([pe1]).columns).index("Trägersystem") == 1)
+
+tmp_p = Path(_tempfile.mkdtemp())
+echt_p = app.WORKSPACE_FILE
+try:
+    app.WORKSPACE_FILE = tmp_p / "notam_workspace.json"
+    app.save_workspace([], [], [], [], {"p1": "CZ-2D"}, {"p1": "Yaogan-XX", "p2": ""})
+    daten_p = _json.loads(app.WORKSPACE_FILE.read_text(encoding="utf-8"))
+    check("Payload steht in der Arbeitsdatei",
+          daten_p["payload_assignments"] == {"p1": "Yaogan-XX"}, daten_p["payload_assignments"])
+    check("Traegersystem steht unabhaengig daneben",
+          daten_p["vehicle_assignments"] == {"p1": "CZ-2D"})
+    check("gelesen wie geschrieben",
+          app.load_workspace()["payload_assignments"]["p1"] == "Yaogan-XX")
+    app.WORKSPACE_FILE.write_text(_json.dumps({"manual_notams": []}), encoding="utf-8")
+    check("alter Arbeitsstand ohne das Feld bricht nicht",
+          app.load_workspace().get("payload_assignments", {}) == {})
+finally:
+    app.WORKSPACE_FILE = echt_p
+    _shutil.rmtree(tmp_p, ignore_errors=True)
+
+quelle_p = Path("app.py").read_text(encoding="utf-8")
+check("Feld nur unter NOTAM Data", quelle_p.count("_payload_field(") == 2)
+check("Feld steht unter dem Traegersystem-Dropdown",
+      quelle_p.index('_vehicle_picker(event, vehicles, group_keys, "data")')
+      < quelle_p.index('_payload_field(event, group_keys, "data")'))
+check("kein Payload-Feld im Review", '_payload_field(event, group_keys, "review")' not in quelle_p)
+check("Eintrag wird sofort gesichert",
+      "_persist_workspace()" in quelle_p.split("def _set_payload")[1].split("def _payload_field")[0])
+
+print("== 73. Startarchiv: Zeile je Start ==")
+from datetime import datetime as _dt
+check("Spalten in genau der vereinbarten Reihenfolge",
+      app.ARCHIVE_COLUMNS == ("NOTAM", "Startdatum", "Startzeit", "Nation",
+                              "Weltraumbahnhof", "Trägersystem", "Payload",
+                              "Orbit", "Inklination", "Azimuth", "Dropzones"),
+      app.ARCHIVE_COLUMNS)
+check("Orbit als Kurzform", app.orbit_short(app.ORBIT_SSO) == "SSO")
+check("Orbit GTO", app.orbit_short(app.ORBIT_GTO) == "GTO")
+check("Orbit unbestimmt", app.orbit_short(app.ORBIT_UNKNOWN) == "-")
+check("unbekannter Orbit bleibt stehen", app.orbit_short("Sonderbahn") == "Sonderbahn")
+
+def _zone(row, key, lat, lon):
+    e = app.LaunchEvent(row_index=row, notam_id="A{:04d}/26".format(row), raw_text="x")
+    e.key, e.centroid_lat, e.centroid_lon = key, lat, lon
+    return e
+
+z1, z2 = _zone(1, "a1", 19.6, 110.95), _zone(2, "a2", 18.8333, 111.25)
+ag = app.LaunchGroup(group_id="START-01", row_indices=[1, 2])
+ag.nation, ag.spaceport_code = "China", "JSLC"
+ag.vehicle, ag.payload = "CZ-2D", "Yaogan-XX"
+ag.orbit_type, ag.inclination_deg, ag.azimuth_deg = app.ORBIT_SSO, 97.44, 190.31
+ag.window_from = _dt(2026, 9, 21, 1, 30)
+row = app.archive_row(ag, [z1, z2])
+check("beide Kennungen in einer Zeile", row["NOTAM"] == "A0001/26, A0002/26", row["NOTAM"])
+check("Datum mit vierstelligem Jahr", row["Startdatum"] == "21.09.2026", row["Startdatum"])
+check("Startzeit", row["Startzeit"] == "01:30")
+check("Startplatz als Kuerzel", row["Weltraumbahnhof"] == "JSLC")
+check("Traegersystem als Kuerzel", row["Trägersystem"] == "CZ-2D")
+check("Payload uebernommen", row["Payload"] == "Yaogan-XX")
+check("Orbit kurz", row["Orbit"] == "SSO")
+check("Inklination auf eine Stelle", row["Inklination"] == "97.4", row["Inklination"])
+check("Azimuth auf eine Stelle", row["Azimuth"] == "190.3", row["Azimuth"])
+check("beide Dropzones in einem Feld",
+      row["Dropzones"] == "19.6000 110.9500; 18.8333 111.2500", row["Dropzones"])
+
+leer_g = app.LaunchGroup(group_id="START-02", row_indices=[])
+leer_row = app.archive_row(leer_g, [])
+check("Start ohne Daten bricht nicht",
+      leer_row["Startdatum"] == "" and leer_row["Inklination"] == "")
+
+print("== 74. Archiv wird fortgeschrieben, nicht verdoppelt ==")
+check("Schluessel ist reihenfolgeunabhaengig",
+      app.archive_key({"NOTAM": "B/26, A/26", "Startdatum": "21.09.2026",
+                       "Weltraumbahnhof": "JSLC"})
+      == app.archive_key({"NOTAM": "A/26 , b/26", "Startdatum": "21.09.2026",
+                          "Weltraumbahnhof": "jslc"}))
+check("anderes Datum ist ein anderer Start",
+      app.archive_key({"NOTAM": "A/26", "Startdatum": "21.09.2026", "Weltraumbahnhof": "JSLC"})
+      != app.archive_key({"NOTAM": "A/26", "Startdatum": "22.09.2026", "Weltraumbahnhof": "JSLC"}))
+
+leer_df = app.pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS))
+erst = app.merge_archive(leer_df, [row])
+check("erster Lauf legt die Zeile an", len(erst) == 1)
+zweit = app.merge_archive(erst, [row])
+check("zweiter Lauf verdoppelt nicht", len(zweit) == 1, len(zweit))
+
+ag.payload = ""
+ag.inclination_deg = 97.9
+ohne = app.merge_archive(erst, [app.archive_row(ag, [z1, z2])])
+check("nachgetragene Payload bleibt erhalten",
+      ohne["Payload"].iloc[0] == "Yaogan-XX", ohne["Payload"].iloc[0])
+check("automatische Spalten werden aktualisiert",
+      ohne["Inklination"].iloc[0] == "97.9", ohne["Inklination"].iloc[0])
+
+ag.payload = "Shijian-YY"
+mit = app.merge_archive(erst, [app.archive_row(ag, [z1, z2])])
+check("neue Payload ueberschreibt die alte", mit["Payload"].iloc[0] == "Shijian-YY")
+
+ag.payload = "Yaogan-XX"
+geloescht = app.merge_archive(leer_df, [row], {app.archive_key(row)})
+check("geloeschte Zeile kommt nicht zurueck", geloescht.empty, len(geloescht))
+
+ag2 = app.LaunchGroup(group_id="START-03", row_indices=[1, 2])
+ag2.nation, ag2.spaceport_code = "China", "XSLC"
+ag2.window_from = _dt(2026, 9, 22, 4, 0)
+zwei = app.merge_archive(erst, [app.archive_row(ag2, [z1, z2])])
+check("ein anderer Start kommt hinzu", len(zwei) == 2, len(zwei))
+check("Reihenfolge bleibt stabil", zwei["Weltraumbahnhof"].tolist() == ["JSLC", "XSLC"])
+
+print("== 75. Archivdatei lesen und schreiben ==")
+tmp_a = Path(_tempfile.mkdtemp())
+try:
+    datei = tmp_a / "startarchiv_updated.csv"
+    check("fehlende Datei ergibt ein leeres Archiv",
+          app.load_archive(datei).empty and list(app.load_archive(datei).columns)
+          == list(app.ARCHIVE_COLUMNS))
+    app.persist_archive(datei, zwei)
+    zurueck = app.load_archive(datei)
+    check("gelesen wie geschrieben", len(zurueck) == 2)
+    check("Spaltenreihenfolge in der Datei bleibt",
+          list(zurueck.columns) == list(app.ARCHIVE_COLUMNS))
+    check("Payload ueberlebt den Dateiweg", zurueck["Payload"].iloc[0] == "Yaogan-XX")
+    (tmp_a / "halb.csv").write_text("NOTAM,Payload\nA/26,Yaogan\n", encoding="utf-8")
+    halb = app.load_archive(tmp_a / "halb.csv")
+    check("unvollstaendige Datei wird ergaenzt statt verworfen",
+          len(halb) == 1 and halb["Weltraumbahnhof"].iloc[0] == "", halb.to_dict("records"))
+finally:
+    _shutil.rmtree(tmp_a, ignore_errors=True)
+
+print("== 76. Einbindung des Archivs ==")
+quelle_a = Path("app.py").read_text(encoding="utf-8")
+check("eigener Pfad definiert", "ARCHIVE_CSV = APP_DIR" in quelle_a)
+check("wird bei jeder Auswertung fortgeschrieben",
+      "_update_archive(events, stats.get(\"groups\", []), table)" in quelle_a)
+check("Filter der Seitenleiste wirken nicht aufs Archiv",
+      quelle_a.index("_update_archive(events") < quelle_a.index("nation_filter = st.multiselect"))
+check("eigener Reiter im Optionsmenue", "_archive_editor()" in quelle_a)
+check("Statuszeile in der Seitenleiste", "Launch archive: {} launch(es)" in quelle_a)
+check("Statuszeile zeigt den Stand nach der Auswertung",
+      quelle_a.count("_show_archive_status(") == 3, quelle_a.count("_show_archive_status("))
+check("Loeschungen werden im Arbeitsstand gemerkt",
+      '"archiv_removed": sorted(archiv_removed)' in quelle_a)
+check("kein Anlege-Formular fuers Archiv", 'st.form("add_archive"' not in quelle_a)
+
+tmp_w2 = Path(_tempfile.mkdtemp())
+echt_w2 = app.WORKSPACE_FILE
+try:
+    app.WORKSPACE_FILE = tmp_w2 / "w.json"
+    app.save_workspace([], [], [], [], {}, {}, ["k-a", "k-b"])
+    check("geloeschte Archivzeilen ueberleben den Neustart",
+          app.load_workspace()["archiv_removed"] == ["k-a", "k-b"])
+finally:
+    app.WORKSPACE_FILE = echt_w2
+    _shutil.rmtree(tmp_w2, ignore_errors=True)
+
+print("== 77. Anzeigesprache und Tabellenformat ==")
+gt = app.groups_to_dataframe([pg])
+cfg = app.table_config(gt)
+check("jede sichtbare Spalte bekommt eine Konfiguration",
+      set(cfg) == {c for c in gt.columns if not c.startswith("_")})
+check("Zahlenspalten bekommen ein Format",
+      app.COLUMN_FORMATS["Launch Azimut (°)"] == "%.1f°")
+check("Entfernungen ohne Nachkommastellen", app.COLUMN_FORMATS["Reichweite (km)"] == "%.0f km")
+check("Spaltenschluessel bleiben deutsch - sie sind ueberall verdrahtet",
+      "Startnation" in gt.columns and "Nation" not in gt.columns)
+check("uebersetzt wird nur das Label",
+      app.COLUMN_LABELS["Startnation"] == "Nation"
+      and app.COLUMN_LABELS["Weltraumbahnhof"] == "Launch Site"
+      and app.COLUMN_LABELS["Zuverlässigkeit"] == "Reliability")
+check("alle sichtbaren Spalten haben eine Uebersetzung",
+      [c for c in gt.columns if not c.startswith("_") and c not in app.COLUMN_LABELS] == [],
+      [c for c in gt.columns if not c.startswith("_") and c not in app.COLUMN_LABELS])
+et = app.events_to_dataframe([pe1])
+check("auch auf NOTAM-Ebene vollstaendig",
+      [c for c in et.columns if not c.startswith("_") and c not in app.COLUMN_LABELS] == [],
+      [c for c in et.columns if not c.startswith("_") and c not in app.COLUMN_LABELS])
+
+ordnung = app.visible_order(gt, app.GROUP_COLUMN_ORDER)
+check("interne Spalten bleiben aussen vor", not any(c.startswith("_") for c in ordnung))
+check("keine Spalte geht verloren",
+      set(ordnung) == {c for c in gt.columns if not c.startswith("_")})
+check("Vehicle und Payload stehen weit vorn",
+      ordnung.index("Trägersystem") < 5 and ordnung.index("Payload") < 6,
+      (ordnung.index("Trägersystem"), ordnung.index("Payload")))
+check("vor dem Azimut - vorher lagen sie dahinter",
+      ordnung.index("Payload") < ordnung.index("Launch Azimut (°)"))
+check("unbekannte Spalten fallen hinten an, statt zu verschwinden",
+      app.visible_order(gt, ("Start",))[0] == "Start"
+      and len(app.visible_order(gt, ("Start",))) == len(ordnung))
+
+quelle_ui = Path("app.py").read_text(encoding="utf-8")
+uebersicht = quelle_ui.split("if bereich == reiter[0]:")[1].split("if bereich == reiter[1]:")[0]
+check("Launch Overview nutzt column_config", uebersicht.count("column_config=table_config(") == 2)
+check("Launch Overview nutzt column_order", uebersicht.count("column_order=visible_order(") == 2)
+check("Kennzahlen englisch und kurz",
+      all(w in uebersicht for w in ('"Launches"', '"Drop Zones"', '"Nations"', '"Verified"')))
+check("kein Emoji mehr in den Kennzahlen", "{} Geprüft" not in uebersicht)
+check("Klick-Sprung unveraendert", uebersicht.count('on_select="rerun"') == 2)
+
+print("== 78. Einheitliche Sprache und Symbolvokabular ==")
+quelle_l = Path("app.py").read_text(encoding="utf-8")
+check("keine Piktogramme mehr im Code",
+      not __import__("re").search(
+          r'[\U0001F300-\U0001FAFF⬀-⯿←-⇿☀-➿️]',
+          quelle_l))
+check("Theme-Datei vorhanden", Path(".streamlit/config.toml").exists())
+theme = Path(".streamlit/config.toml").read_text(encoding="utf-8")
+for name, wert in (("backgroundColor", "#141414"), ("secondaryBackgroundColor", "#1E1E1E"),
+                   ("borderColor", "#757575"), ("primaryColor", "#ADAFAF")):
+    check("  unbunter Ton {}".format(name), '{} = "{}"'.format(name, wert) in theme)
+check("Bearbeiten-Knopf als Strichsymbol", 'icon=":material/edit:"' in quelle_l)
+check("  ... ohne Rahmen", 'type="tertiary"' in quelle_l)
+
+check("Stufenwerte englisch",
+      app.CONFIDENCE_LEVELS == ("HIGH", "MEDIUM", "LOW"), app.CONFIDENCE_LEVELS)
+check("Art englisch", (app.KIND_LAUNCH, app.KIND_REENTRY) == ("Launch", "Re-entry"))
+check("Quelle englisch", (app.SOURCE_IMPORT, app.SOURCE_MANUAL) == ("Import", "Pasted"))
+check("Zuverlaessigkeit englisch",
+      (app.RELIABILITY_HIGH, app.RELIABILITY_MEDIUM, app.RELIABILITY_LOW)
+      == ("high", "medium", "low"))
+
+check("Nationen bleiben intern deutsch - Vertrag mit der FIR-Referenz",
+      "Russland" in app.TARGET_NATIONS and "Russia" not in app.TARGET_NATIONS)
+check("  ... und werden nur zur Anzeige uebersetzt",
+      (app.nation_label("Russland"), app.nation_label("Nordkorea"), app.nation_label("China"))
+      == ("Russia", "North Korea", "China"))
+check("  ... in der Tabelle",
+      app.groups_to_dataframe([ag])["Startnation"].iloc[0] == "China")
+check("  ... und im Archiv", app.archive_row(ag, [z1, z2])["Nation"] == "China")
+ru = app.LaunchGroup(group_id="START-09", row_indices=[])
+ru.nation = "Russland"
+check("  ... auch fuer Russland", app.archive_row(ru, [])["Nation"] == "Russia")
+check("unbekannte Nation bleibt unveraendert", app.nation_label("Norwegen") == "Norwegen")
+check("leere Nation ergibt leeren Text", app.nation_label(None) == "")
+
+print("== 79. FIR-Zuordnung verzweigt auf Marken, nicht auf Prosa ==")
+check("Marken sind kurz und sprachfrei",
+      (app.FIR_BY_ICAO, app.FIR_TOO_FAR, app.FIR_OUTSIDE) == ("icao", "too_far", "outside"))
+check("Anzeigetext steht getrennt", app.fir_method_label(app.FIR_BY_ICAO) == "ICAO code")
+check("  ... mit Detail", "1969 km" in app.fir_method_label(app.FIR_TOO_FAR, "1969 km"))
+check("Verzweigung nutzt die Marke",
+      "method.startswith(FIR_TOO_FAR)" in quelle_l
+      and "method.startswith(FIR_OUTSIDE)" in quelle_l)
+check("keine Verzweigung auf uebersetzbaren Text",
+      'startswith("Zu weit")' not in quelle_l and 'startswith("Ausserhalb")' not in quelle_l)
+navarea_fir = app._find_fir("", None, fir, (-59.0, 165.0))[1]
+check("weit entfernte Zone liefert die Marke",
+      navarea_fir.startswith(app.FIR_TOO_FAR), navarea_fir)
+
+def _em_dashes_in_ui():
+    """Gedankenstriche in sichtbaren Zeichenketten - Docstrings zaehlen nicht."""
+    import ast as _ast
+    quelle = Path("app.py").read_text(encoding="utf-8")
+    baum = _ast.parse(quelle)
+    doc = set()
+    for n in _ast.walk(baum):
+        if isinstance(n, (_ast.FunctionDef, _ast.ClassDef, _ast.Module)):
+            d = _ast.get_docstring(n, clean=False)
+            if d and n.body and isinstance(n.body[0], _ast.Expr):
+                for ln in range(n.body[0].lineno, (n.body[0].end_lineno or 0) + 1):
+                    doc.add(ln)
+    # Die Normalisierungstabelle wandelt Gedankenstriche aus NOTAM-Texten in
+    # Bindestriche um - das ist Parsing, keine Oberflaeche.
+    return [n.value[:60] for n in _ast.walk(baum)
+            if isinstance(n, _ast.Constant) and isinstance(n.value, str)
+            and n.lineno not in doc and "\u2014" in n.value and len(n.value) > 2]
+
+
+print("== 80. Wortmarke und Gestaltungsregeln ==")
+kopf = app.HEADER_HTML
+stil = app.STYLE_HTML.format(
+    grotesk=app.FONT_GROTESK, humanist=app.FONT_HUMANIST, leading=app.LEADING_REM,
+    weiss=app.INK_WHITE, silber=app.INK_SILVER, coolgray=app.INK_COOLGRAY,
+    anthrazit=app.INK_ANTHRACITE)
+
+print("-- Logoaufbau --")
+check("Akronym steht in der ersten Zeile", ">NOLA<" in kopf)
+check("Langform steht darunter", kopf.index("Notam") > kopf.index(">NOLA<"))
+check("keine Wortzwischenraeume in der Langform",
+      "Notam Launch" not in kopf and "Launch Analyzer" not in kopf, kopf)
+check("Versalbuchstaben trennen die Woerter, nicht Leerzeichen",
+      "Notam<span" in kopf and "</span>Analyzer." in kopf,
+      kopf[kopf.index("nola-lang"):][:120])
+check("Schlusspunkt auf der zweiten Zeile",
+      "Analyzer.</div>" in kopf.replace("\n", ""), kopf)
+check("Reiterbeschriftung ist das Akronym", 'page_title="NOLA"' in quelle_l)
+check("kein Farbverlauf mehr im Schriftzug",
+      "linear-gradient" not in stil and "NEON" not in quelle_l)
+check("Farbdifferenzierung der Wortteile bleibt unbunt",
+      app.INK_SILVER == "#9A9B9C" and app.INK_COOLGRAY == "#ADAFAF")
+check("  ... und das Akronym steht in Weiss", app.INK_WHITE == "#FFFFFF")
+
+print("-- Typografie --")
+check("Grotesk fuer Wortmarke und Ueberschriften",
+      "Helvetica" in app.FONT_GROTESK and "h1, h2, h3" in stil)
+check("humanistische Grotesk fuer den Mengensatz", "Myriad" in app.FONT_HUMANIST)
+check("beide Stapel enden bei der Ersatzschrift",
+      app.FONT_GROTESK.endswith("sans-serif") and "Arial" in app.FONT_GROTESK
+      and "Arial" in app.FONT_HUMANIST)
+check("keine Webschrift wird geladen", "@font-face" not in stil and "fonts.googleapis" not in stil)
+check("Ligatur-Icons behalten ihre Schrift",
+      'Material Symbols Rounded" !important' in stil
+      and '[data-testid="stIconMaterial"]' in stil)
+check("Durchschuss wiederholt sich",
+      stil.count("var(--nola-durchschuss)") >= 2, stil.count("var(--nola-durchschuss)"))
+
+print("-- Unbunte Buehne --")
+theme = Path(".streamlit/config.toml").read_text(encoding="utf-8")
+for name, wert in (("backgroundColor", "#141414"), ("secondaryBackgroundColor", "#1E1E1E"),
+                   ("borderColor", "#757575"), ("textColor", "#F2F2F2"),
+                   ("primaryColor", "#ADAFAF")):
+    check("  unbunter Ton {}".format(name), '{} = "{}"'.format(name, wert) in theme)
+def _kontrast(fg, bg):
+    def lin(c):
+        c = int(c, 16) / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    def lum(h):
+        h = h.lstrip("#")
+        return 0.2126*lin(h[0:2]) + 0.7152*lin(h[2:4]) + 0.0722*lin(h[4:6])
+    a, b = lum(fg), lum(bg)
+    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+check("Text erreicht 4,5:1", _kontrast("#F2F2F2", "#141414") >= 4.5,
+      round(_kontrast("#F2F2F2", "#141414"), 2))
+check("Rahmen erreicht 3:1 - vorher waren es 1,55:1",
+      _kontrast("#757575", "#141414") >= 3.0, round(_kontrast("#757575", "#141414"), 2))
+check("gedaempfter Text erreicht 4,5:1", _kontrast("#ADAFAF", "#141414") >= 4.5,
+      round(_kontrast("#ADAFAF", "#141414"), 2))
+
+print("-- Verbotene Muster --")
+check("keine Piktogramme", not __import__("re").search(
+    r'[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]', quelle_l))
+check("keine Einblend- oder Hover-Effekte",
+      not __import__("re").search(r'@keyframes|transition:|:hover', stil))
+check("keine Gedankenstriche in sichtbaren Texten", _em_dashes_in_ui() == [], _em_dashes_in_ui())
+check("keine deutschen Schaltflaechen mehr", '"Entfernen"' not in quelle_l)
+
+print("-- Deckende Flaechen --")
+# Entscheidung des Benutzers: kein Glasmorphismus. Ueber einer fast schwarzen
+# Buehne war der Effekt nur ein hellerer Kasten, und auf dem Optionsmenue
+# verdeckte dieses ohnehin fast das ganze Fenster.
+check("keine Weichzeichnung", "backdrop-filter" not in stil)
+check("keine halbdurchsichtigen Flaechen", "rgba" not in stil)
+check("keine Eingriffe in Streamlits eigene Flaechen",
+      "stDialog" not in stil and "stHeader" not in stil and "stSidebar" not in stil)
+check("kein !important ausser fuer die Icon-Schrift",
+      stil.count("!important") == 1)
+check("die Auswahl stuetzt sich nicht auf erzeugte Klassennamen",
+      "st-emotion-cache" not in stil)
+
+print("== 81. Automatisches Ausblenden ==")
+check("Ausschlussbegriffe kommen als Liste",
+      app.exclusion_hits("AREA CLSD FOR BALLOON AND ADS-B TEST") == ["BALLOON", "ADS-B"],
+      app.exclusion_hits("AREA CLSD FOR BALLOON AND ADS-B TEST"))
+check("ohne Treffer leere Liste", app.exclusion_hits("SPACE LAUNCH DEBRIS AREA") == [])
+check("leerer Text bricht nicht", app.exclusion_hits(None) == [])
+
+check("LOW + Ausschlussbegriff blendet aus",
+      app.auto_hide_reason("LOW", "BALLOON RELEASE").startswith("Low confidence"))
+check("  ... und nennt den Begriff", "BALLOON" in app.auto_hide_reason("LOW", "BALLOON RELEASE"))
+check("LOW ohne Ausschlussbegriff bleibt im Review",
+      app.auto_hide_reason("LOW", "DANGER AREA ACTIVATED") == "")
+check("MEDIUM mit Ausschlussbegriff bleibt - die Konfidenz ist die Bremse",
+      app.auto_hide_reason("MEDIUM", "BALLOON RELEASE") == "")
+check("HIGH mit Ausschlussbegriff bleibt erst recht",
+      app.auto_hide_reason("HIGH", "BALLOON RELEASE") == "")
+
+# Ein echtes Start-NOTAM mit zufaelligem Ausschlussbegriff darf nicht fallen.
+echt = """A9999/26 NOTAMN
+Q) ZLHW/QRTCA/IV/BO/W/000/999/3950N11625E099
+A) ZLHW B) 2609210130 C) 2609210430
+E) TEMPORARY RESTRICTED AREA FOR SPACE LAUNCH. FALLING DEBRIS.
+   WEATHER BALLOON ACTIVITY IN THE VICINITY.
+   AREA 3936N11057E 3948N11212E 3902N11230E
+F) SFC G) UNL"""
+score_e, level_e, _ = app.score_confidence(
+    echt, app.detect_triggers(echt, app.extract_items(echt)), app.extract_items(echt))
+check("echtes Start-NOTAM mit BALLOON im Text erreicht nicht LOW",
+      level_e != "LOW", (score_e, level_e))
+check("  ... und wird deshalb nicht ausgeblendet",
+      app.auto_hide_reason(level_e, echt) == "")
+
+ev_h, st_h = app.analyze_notams(
+    app.manual_entries_to_dataframe(
+        [{"text": echt, "added": "x"},
+         {"text": "B1111/26 NOTAMN\nQ) EGTT/QWLLW/IV/BO/W/000/999/5130N00010W005\n"
+                  "A) EGTT B) 2609210130 C) 2609210430\n"
+                  "E) LASER DISPLAY AND BALLOON RELEASE. RESTRICTED AREA.\nF) SFC G) UNL",
+          "added": "x"}],
+        "NOTAM Text"),
+    sp, fir, min_confidence="MEDIUM")
+markiert = [e for e in ev_h if e.auto_hidden_reason]
+check("in der Auswertung wird genau das Laser-NOTAM markiert",
+      len(markiert) == 1 and markiert[0].notam_id.startswith("B1111"),
+      [(e.notam_id, bool(e.auto_hidden_reason)) for e in ev_h])
+
+print("== 82. Zurueckholen gewinnt dauerhaft ==")
+quelle_h = Path("app.py").read_text(encoding="utf-8")
+check("Zurueckholen merkt sich den Schluessel",
+      'st.session_state.setdefault("restored_events", set()).add(key)'
+      in quelle_h.split("def _unhide_event")[1].split("def _unhide_all")[0])
+check("  ... auch beim Zurueckholen aller",
+      "def _unhide_all" in quelle_h and 'st.session_state["hidden_events"].clear()'
+      in quelle_h.split("def _unhide_all")[1].split("def ")[0])
+check("zurueckgeholte NOTAMs werden von der Regel uebergangen",
+      "e.auto_hidden_reason and e.key not in zurueckgeholt" in quelle_h)
+check("Regel greift erst in der Oberflaeche, nicht in der Auswertung",
+      "auto_hidden_keys" in quelle_h and "auto_hidden_keys" not in
+      quelle_h.split("def analyze_notams")[1].split("def events_to_dataframe")[0])
+check("Excluded weist Urheber aus", '"Excluded by"' in quelle_h)
+check("  ... und die Begruendung", "e.auto_hidden_reason if e.key in auto_hidden_keys" in quelle_h)
+
+tmp_h = Path(_tempfile.mkdtemp()); echt_h = app.WORKSPACE_FILE
+try:
+    app.WORKSPACE_FILE = tmp_h / "w.json"
+    app.save_workspace([], [], [], [], {}, {}, [], ["key-x"])
+    check("zurueckgeholte NOTAMs ueberleben den Neustart",
+          app.load_workspace()["restored_events"] == ["key-x"])
+    app.WORKSPACE_FILE.write_text(_json.dumps({"manual_notams": []}), encoding="utf-8")
+    check("alter Arbeitsstand ohne das Feld bricht nicht",
+          app.load_workspace().get("restored_events", []) == [])
+finally:
+    app.WORKSPACE_FILE = echt_h
+    _shutil.rmtree(tmp_h, ignore_errors=True)
+
+print("== 83. Befunde der Fremdpruefung vom 25.09.2026 ==")
+
+print("-- Befund 1: Stichwoerter treffen nur als ganzes Wort --")
+falsch_positiv = [
+    ("SMART DRAGON 3 CARRIER ROCKET LAUNCH", "chinesischer Traeger, nicht SpaceX Dragon"),
+    ("AREA CLSD NEAR SHARJAH INTL", "Flughafen, nicht Sriharikota"),
+    ("CASCADE VALLEY DANGER AREA ACT", "Tal, nicht CASC"),
+    ("NASAL SPRAY TEST", "nicht NASA"),
+    ("INDIAN OCEAN DANGER AREA", "Ozean, nicht Indien"),
+]
+for txt, warum in falsch_positiv:
+    nation, belege = app.detect_nation_hint(txt)
+    check("kein Treffer: {}".format(warum), nation is None, (txt, nation, belege))
+check("LAS VEGAS ist kein Fremdbetreiber",
+      app.detect_foreign_operator("LAS VEGAS TFR") == [],
+      app.detect_foreign_operator("LAS VEGAS TFR"))
+
+richtig_positiv = [
+    ("SPACE LAUNCH FROM JIUQUAN", "China"),
+    ("CZ-2D LAUNCH DEBRIS", "China"),
+    ("FALCON 9 STARLINK FROM VANDENBERG", "USA"),
+    ("PSLV LAUNCH FROM SDSC", "Indien"),
+    ("NASA ARTEMIS LAUNCH", "USA"),
+    ("CREW DRAGON DOCKING", "USA"),
+    ("SOYUZ LAUNCH FROM PLESETSK", "Russland"),
+]
+for txt, erwartet in richtig_positiv:
+    check("weiterhin erkannt: {}".format(txt[:34]),
+          app.detect_nation_hint(txt)[0] == erwartet,
+          (txt, app.detect_nation_hint(txt)))
+check("Fremdbetreiber weiterhin erkannt",
+      "VEGA" in app.detect_foreign_operator("VEGA C LAUNCH FROM KOUROU"))
+check("Praefix-Begriffe behalten ihre Wirkung",
+      app.detect_nation_hint("CZ-5B CORE STAGE REENTRY")[0] == "China")
+
+print("-- Befund 4: Daueranordnung ist keine Startankuendigung --")
+from datetime import datetime as _dtb, timezone as _tzb
+def _zeit(h):
+    return (_dtb(2026, 8, 17, 7, 9, tzinfo=_tzb.utc),
+            _dtb(2026, 8, 17, 7, 9, tzinfo=_tzb.utc) + __import__("datetime").timedelta(hours=h))
+
+dauer_txt = ("ALL VFR ACFT ARE REQUESTED TO AVOID FLYING IN FOLLOWING AIRSPACE DUE TO "
+             "THE ANTIBALLISTIC MISSILES MAY BE LAUNCHED FOR THE DESTRUCTION OF AN "
+             "OBJECT PROPELLED BY ROCKET LAUNCHED FROM NORTH KOREA")
+von, bis = _zeit(2192)
+sc, lvl, notes = app.score_confidence(dauer_txt, ["Keyword: ROCKET"], {}, von, bis)
+check("91 Tage ohne Tagesfenster -> LOW", lvl == "LOW", (sc, lvl))
+check("  ... mit sprechender Begruendung",
+      any("Daueranordnung" in n for n in notes), notes)
+check("  ... der Score bleibt sichtbar, nur die Stufe faellt", sc >= 3, sc)
+check("  ... ohne Deckel waere es nicht LOW",
+      app.score_confidence(dauer_txt, ["Keyword: ROCKET"], {}, None, None)[1] != "LOW",
+      app.score_confidence(dauer_txt, ["Keyword: ROCKET"], {}, None, None))
+
+von, bis = _zeit(216)
+check("216 h ohne Tagesfenster bleiben unberuehrt (NAVAREA-Startwarnung)",
+      app.score_confidence(dauer_txt, ["Keyword: ROCKET"], {}, von, bis)[1] != "LOW")
+von, bis = _zeit(2192)
+check("lange Laufzeit MIT Tagesfenster bleibt unberuehrt",
+      app.score_confidence(dauer_txt, ["Keyword: ROCKET"], {"D": "DAILY 1200-1400"},
+                           von, bis)[1] != "LOW")
+check("Grenze ist an Messwerten gewaehlt", app.STANDING_ORDER_HOURS == 720.0)
+
+print("-- Befund 2: die ausgewiesene Streuung ist die wahre --")
+# Eigener Lauf statt der Ergebnisse aus Abschnitt 37: die Kopplung ueber
+# 700 Zeilen hinweg ist schwer nachvollziehbar und war selbst schon Ursache
+# eines irrefuehrenden Fehlschlags.
+if xls:
+    ev_r2, st_r2 = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
+per_r = {e.row_index: e for e in ev_r2} if xls else {}
+if xls:
+    abweichung = []
+    for g in st_r2["groups"]:
+        if not g.spaceport_code: continue
+        az = [per_r[r].azimuth_deg for r in g.row_indices
+              if per_r.get(r) and per_r[r].azimuth_deg is not None]
+        if len(az) < 2: continue
+        echt = app._angular_spread(az)
+        if abs(echt - g.azimuth_spread_deg) > 0.05:
+            abweichung.append((g.group_id, g.azimuth_spread_deg, echt))
+    check("gemeldete Streuung deckt sich mit der gerechneten", abweichung == [], abweichung)
+    weit = [g for g in st_r2["groups"] if g.spaceport_code and g.azimuth_spread_deg > 60]
+    check("  ... und weit gestreute Gruppen werden als solche sichtbar",
+          weit != [] and all(g.reliability == app.RELIABILITY_LOW for g in weit),
+          [(g.group_id, round(g.azimuth_spread_deg, 1), g.reliability) for g in weit])
+    for g in weit:
+        text = app.describe_launch(g, ev_r2)
+        check("  ... der Klartext behauptet keine gemeinsame Richtung",
+              "lie in the same direction" not in text, text[:160])
+        check("  ... sondern weist den Mittelwert als bedeutungsarm aus",
+              "without much meaning" in text)
+
+print("-- Befund 4b: keine sich selbst widersprechenden Begruendungen --")
+lang = app.LaunchGroup(group_id="START-99", row_indices=[1])
+lang.nation, lang.spaceport_code, lang.spaceport_name = "Nordkorea", "KSS", "Sohae"
+lang.kind, lang.reliability = app.KIND_LAUNCH, app.RELIABILITY_LOW
+e_lang = app.LaunchEvent(row_index=1, notam_id="P0000/26", raw_text="ROCKET LAUNCH AREA")
+e_lang.valid_from, e_lang.valid_to = _zeit(2192)
+lang.window_from, lang.window_to = e_lang.valid_from, e_lang.valid_to
+txt_lang = app.describe_launch(lang, [e_lang])
+check("91 Tage werden nicht als 'kurze Zeit' verkauft",
+      "for that short a time" not in txt_lang, txt_lang[:200])
+check("  ... sondern als lang benannt", "long for a launch window" in txt_lang)
+
+print("-- Befund 8: US-Bezirkszentralen und Textbeleg --")
+check("ARTCC-Kennung wird als Luftraum erkannt",
+      app._luftraum_kennungen("!FDC 6/2736 ZLC AIRSPACE") == ["ZLC"],
+      app._luftraum_kennungen("!FDC 6/2736 ZLC AIRSPACE"))
+check("  ... vierstellige ICAO weiterhin auch",
+      "ZLHW" in app._luftraum_kennungen("A) ZLHW B) 2609210130"))
+check("  ... beliebige Dreibuchstaben-Woerter nicht",
+      app._luftraum_kennungen("ACT SFC UNL GND NOT AND FIR") == [],
+      app._luftraum_kennungen("ACT SFC UNL GND NOT AND FIR"))
+# RE_ICAO trifft im Freitext jedes vierbuchstabige Wort ("ZONE", "AREA") -
+# das war immer so und ist harmlos, weil nur Treffer zaehlen, die auch in der
+# FIR-Referenz stehen. Tragend ist, dass das neue ARTCC-Muster nicht jedes
+# dreibuchstabige Wort dazunimmt.
+check("  ... ARTCC-Muster bleibt auf Z plus zwei Buchstaben beschraenkt",
+      app.RE_ARTCC.findall("ZONE ACT SFC AND NOT ZLA") == ["ZLA"],
+      app.RE_ARTCC.findall("ZONE ACT SFC AND NOT ZLA"))
+check("  ... und keiner dieser Treffer steht in der FIR-Referenz",
+      not ({"ZONE", "AREA"} & set(fir["ICAO Code"].astype(str))))
+artcc = [c for c in fir["ICAO Code"].astype(str) if len(c) == 3]
+check("die 21 ARTCC-Zeilen der Referenz sind erreichbar",
+      artcc != [] and all(app._luftraum_kennungen(c) == [c] for c in artcc),
+      [c for c in artcc if app._luftraum_kennungen(c) != [c]])
+
+vandenberg = """W1234/26 NOTAMN
+Q) KVBG/QRDCA/IV/BO/W/000/999/3444N12034W020
+A) KVBG B) 2609210130 C) 2609210430
+E) SPACE LAUNCH FROM VANDENBERG. FALCON 9 STARLINK. DEBRIS AREA
+   3400N12100W 3330N12200W 3300N12130W
+F) SFC G) UNL"""
+ev_vb, _ = app.analyze_notams(pd.DataFrame({"NOTAM Text": [vandenberg]}), sp, fir,
+                              min_confidence="MEDIUM")
+check("Flugplatzkennung blockiert den Textbeleg nicht mehr",
+      ev_vb[0].status == "OK" and ev_vb[0].nation == "USA",
+      (ev_vb[0].status, ev_vb[0].nation, ev_vb[0].review_reason[:60]))
+check("  ... und der Startplatz wird gefunden", ev_vb[0].spaceport_code == "KVBG",
+      ev_vb[0].spaceport_code)
+
+# Gegenprobe: ohne Textbeleg bleibt eine fremde FIR im Review.
+ohne_beleg = vandenberg.replace(
+    "SPACE LAUNCH FROM VANDENBERG. FALCON 9 STARLINK.", "DANGER AREA ACTIVATED.")
+ev_ob, _ = app.analyze_notams(pd.DataFrame({"NOTAM Text": [ohne_beleg]}), sp, fir,
+                              min_confidence="MEDIUM")
+check("  ... ohne Beleg bleibt es im Review",
+      ev_ob[0].status == "REVIEW", (ev_ob[0].status, ev_ob[0].nation))
+check("  ... das ist die Drittstaaten-Regel, nicht ihr Wegfall",
+      ev_ob[0].nation is None, ev_ob[0].nation)
+
+print("-- Befund 3: eine geratene FIR belegt keinen eigenen Luftraum --")
+nicaragua = """MANUELL NOTAM
+Q) /QRDCA/IV/BO/W/000/999/
+E) TEMPORARY RESTRICTED AREA FOR SPACE LAUNCH. FALLING DEBRIS.
+   AREA BOUNDED BY 1300N08400W 1330N08330W 1230N08330W
+F) SFC G) UNL"""
+ev_ni, _ = app.analyze_notams(pd.DataFrame({"NOTAM Text": [nicaragua]}), sp, fir,
+                              min_confidence="MEDIUM")
+e_ni = ev_ni[0]
+check("Zone ueber Nicaragua wird kein US-Start",
+      e_ni.status == "REVIEW" and e_ni.nation is None,
+      (e_ni.status, e_ni.nation, e_ni.spaceport_code))
+check("  ... die Konfidenz bleibt hoch - es scheitert an der Zuordnung, nicht am Score",
+      e_ni.confidence_level == "HIGH", e_ni.confidence_level)
+check("  ... und die Begruendung nennt den Abstand",
+      "nearest reference point" in e_ni.review_reason and "km" in e_ni.review_reason,
+      e_ni.review_reason[:90])
+check("  ... es bleibt ueber die Gruppe aufloesbar", e_ni.requires_group)
+check("die Schwelle liegt zwischen Echtfall und Fehlfall",
+      541 < app.FIR_OWN_AIRSPACE_KM < 1460, app.FIR_OWN_AIRSPACE_KM)
+check("  ... und unter der Grenze, ab der ueberhaupt eine FIR gefunden wird",
+      app.FIR_OWN_AIRSPACE_KM < app.MAX_FIR_FALLBACK_KM)
+nah = """MANUELL NOTAM
+E) ROCKET LAUNCH DEBRIS AREA 1936N11057E SFC/UNL"""
+ev_nah, _ = app.analyze_notams(pd.DataFrame({"NOTAM Text": [nah]}), sp, fir,
+                               min_confidence="MEDIUM")
+check("eine nahe geratene FIR traegt weiterhin (213 km, Suedchinesisches Meer)",
+      ev_nah[0].status == "OK" and ev_nah[0].nation == "China",
+      (ev_nah[0].status, ev_nah[0].nation, ev_nah[0].fir_code))
+check("  ... und die FIR wird im Fernfall trotzdem noch angezeigt",
+      e_ni.fir_code is not None, e_ni.fir_code)
+
+# Mit Textbeleg darf dieselbe Zone durchgehen - das ist die Regel des Massstabs.
+mit_beleg = nicaragua.replace("FALLING DEBRIS.", "FALLING DEBRIS. FALCON 9 STARLINK.")
+ev_mb, _ = app.analyze_notams(pd.DataFrame({"NOTAM Text": [mit_beleg]}), sp, fir,
+                              min_confidence="MEDIUM")
+check("  ... mit Nennung im Text dagegen schon",
+      ev_mb[0].status == "OK" and ev_mb[0].nation == "USA",
+      (ev_mb[0].status, ev_mb[0].nation))
+
+if xls:
+    ev_g, st_g = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
+    geo_ok = [e for e in ev_g if e.fir_match_method == app.FIR_BY_GEOMETRY
+              and e.status == "OK" and not e.manual_override]
+    check("kein Start im Echtbestand beruht allein auf einer geratenen FIR",
+          geo_ok == [], [(e.notam_id, e.fir_code, e.nation) for e in geo_ok])
+    check("  ... und die Starts bleiben vollzaehlig",
+          len([g for g in st_g["groups"] if g.spaceport_code]) >= 8,
+          len([g for g in st_g["groups"] if g.spaceport_code]))
+
+print("== 84. Seestarts von beweglichen Plattformen ==")
+# Realer Fall: chinesischer Start aus dem Ostchinesischen Meer am 22.07.2026.
+# Fuenf NOTAMs aus drei Luftraumregionen; der Startpunkt steht als kleiner
+# Kreis in chinesischer FIR, die Dropzones liegen in taiwanesischem und
+# japanischem Luftraum.
+SEE = {
+"TW-A2371": """A2371/26 NOTAMN
+Q) RCAA/QRALW/IV/NBO/W/000/999/2814N12349E024
+A) RCAA
+B) 2607210200 C) 2607270600
+D) 0200-0600
+E) AIRSPACE BLOCKED DUE TO AEROSPACE FLIGHT ACTIVITY:
+3.AREA AS FLW:
+2836N12400E
+2753N12400E
+2752N12339E
+2835N12337E
+F) SFC G) UNL""",
+"JP-P3423": """P3423/26 NOTAMN
+Q)RJJJ/QXXXX/IV/NBO/E/000/999/2125N12408E029
+A)RJJJ B)2607210200 C)2607270600
+D)0200/0600
+E)DUE TO AN AEROSPACE FLIGHT ACTIVITY, THE FLIGHT SAFETY OF THE
+AIRCRAFT IN FOLLOWING AREA MAY BE AFFECTED THRU JUL 21-27 2026
+AREA:
+2151N12417E - 2150N12354E - 2100N12354E - 2100N12422E
+F)SFC G)UNL""",
+"TW-A2385": """A2385/26 NOTAMN
+Q) RCAA/QRALW/IV/NBO/W/000/999/2814N12349E025
+A) RCAA
+B) 2607220245 C) 2607220312
+E) AIRSPACE BLOCKED DUE TO AEROSPACE FLIGHT ACTIVITY:
+3.AREA AS FLW:
+2835N12337E
+2836N12400E
+2752N12400E
+2751N12339E
+F) SFC G) UNL""",
+"CN-A2827": """A2827/26 NOTAMN
+Q)ZSHA/QRDCA/IV/BO/W/000/999/3112N12342E011
+A)ZSHA B)2607220244 C)2607220309
+E) A TEMPORARY DANGER AREA ESTABLISHED,THE AREA WITHIN A CIRCLE
+CENTERED AT N311200E1234200 WITH RADIUS OF 20KM.
+VERTICAL LIMITS:SFC-UNL.
+F)SFC G)UNL""",
+"JP-P3438": """P3438/26 NOTAMN
+Q)RJJJ/QXXXX/IV/NBO/E/000/999/2448N12408E228
+A)RJJJ B)2607220245 C)2607220321
+E)DUE TO AN AEROSPACE FLIGHT ACTIVITY ON JUL 22 2026,0245-0321
+AREA1:0245-0312
+2836N12402E - 2836N12400E - 2752N12400E - 2752N12404E
+FOUR-POINT CONNECTION RANGE
+AREA2:0246-0321
+2151N12418E - 2150N12354E - 2100N12355E - 2100N12420E
+FOUR-POINT CONNECTION RANGE
+F)SFC G)UNL""",
+}
+
+print("-- Mehrgebiets-NOTAMs werden getrennt --")
+z_jp = app.extract_zones(app.extract_items(SEE["JP-P3438"])["E"])
+check("AREA1/AREA2 ergeben zwei Zonen", len(z_jp) == 2, len(z_jp))
+mitten = [app.polygon_centroid(z) for z in z_jp]
+check("  ... mit Mittelpunkten 740 km auseinander",
+      app.surface_distance_km(mitten[0][0], mitten[0][1], mitten[1][0], mitten[1][1]) > 700,
+      round(app.surface_distance_km(mitten[0][0], mitten[0][1], mitten[1][0], mitten[1][1])))
+check("  ... und keiner davon ist der frühere Phantompunkt",
+      all(abs(m[0] - 21.904) > 0.1 for m in mitten), mitten)
+for text in ("DEBRIS AREA 1936N11057E 1948N11212E 1902N11230E",
+             "TEMPORARY RESTRICTED AREA 2836N12400E 2753N12400E 2752N12339E"):
+    check("  ... 'AREA <Koordinate>' wird weiterhin nicht getrennt: {}".format(text[:28]),
+          len(app.extract_zones(text)) == 1, len(app.extract_zones(text)))
+
+print("-- Der Startpunkt wird aus der Geometrie abgeleitet --")
+df_see = app.manual_entries_to_dataframe(
+    [{"text": t, "added": "x"} for t in SEE.values()], "NOTAM Text")
+ev_see, st_see = app.analyze_notams(df_see, sp, fir, min_confidence="MEDIUM")
+by_see = dict(zip(SEE, ev_see))
+g_see = [g for g in st_see["groups"] if g.spaceport_code]
+check("genau ein Start erkannt", len(g_see) == 1,
+      [(g.group_id, g.spaceport_code) for g in g_see])
+g1 = g_see[0]
+check("Startpunkt stammt aus der Geometrie", g1.site_from_geometry)
+check("  ... Kennung traegt die Position", g1.spaceport_code == "SEA-31N124E",
+      g1.spaceport_code)
+check("  ... und liegt auf dem Kreismittelpunkt",
+      abs(g1.spaceport_lat - 31.2) < 0.01 and abs(g1.spaceport_lon - 123.7) < 0.01,
+      (g1.spaceport_lat, g1.spaceport_lon))
+check("Nation ueber den Anker in chinesischer FIR", g1.nation == "China", g1.nation)
+check("  ... obwohl die Dropzones in Taiwan und Japan liegen",
+      {by_see["TW-A2385"].fir_country, by_see["JP-P3438"].fir_country} == {"Taiwan", "Japan"},
+      [e.fir_country for e in ev_see])
+check("die drei Starttag-NOTAMs bilden die Gruppe",
+      sorted(n.replace(app.MANUAL_MARK, "").strip() for n in g1.notam_ids)
+      == ["A2385/26", "A2827/26", "P3438/26"], g1.notam_ids)
+check("Bahn ist schluessig: Streuung unter 5 Grad", g1.azimuth_spread_deg < 5.0,
+      round(g1.azimuth_spread_deg, 2))
+check("  ... Azimut nach Sueden", 170 < g1.azimuth_deg < 185, round(g1.azimuth_deg, 1))
+check("  ... Inklination nahe polar", 85 < g1.inclination_deg < 90,
+      round(g1.inclination_deg, 1))
+
+print("-- Die Referenz haette den Start verfehlt --")
+hyos = sp[sp["Kurzel"] == "HYOS"].iloc[0]
+abstand = app.surface_distance_km(31.2, 123.7, hyos["Latitude"], hyos["Longitude"])
+check("naechster verzeichneter Platz liegt weit weg", abstand > 400, round(abstand))
+ref_az = [app.initial_bearing_deg(hyos["Latitude"], hyos["Longitude"], la, lo)
+          for la, lo, _ in app.cluster_zone_points(
+              [by_see["CN-A2827"], by_see["TW-A2385"], by_see["JP-P3438"]])]
+check("  ... und ergaebe eine deutlich schlechtere Bahn",
+      app._angular_spread(ref_az) > 3 * g1.azimuth_spread_deg,
+      (round(app._angular_spread(ref_az), 1), round(g1.azimuth_spread_deg, 1)))
+
+print("-- Die Ableitung bleibt zurueckhaltend --")
+nah = app.derive_launch_point([by_see["CN-A2827"]], sp)
+check("ein einzelnes NOTAM ergibt keinen Startpunkt", nah is None, nah)
+check("zwei Zonen genuegen nicht",
+      app.derive_launch_point([by_see["TW-A2371"], by_see["JP-P3423"]], sp) is None)
+check("Schwellen sind benannt und eng",
+      (app.SEA_LAUNCH_MAX_RADIUS_KM, app.SEA_LAUNCH_MAX_SPREAD_DEG,
+       app.SEA_LAUNCH_MIN_SITE_DISTANCE_KM) == (60.0, 15.0, 150.0))
+check("Kennung kodiert die Position", app.sea_launch_code(31.2, 123.7) == "SEA-31N124E")
+check("  ... auch auf der Suedhalbkugel", app.sea_launch_code(-28.7, -121.2) == "SEA-29S121W",
+      app.sea_launch_code(-28.7, -121.2))
+
+print("-- Archiv und Protokoll --")
+arc = app.archive_row(g1, ev_see)
+check("der Startpunkt steht nicht unter Dropzones",
+      "31.2000 123.7000" not in arc["Dropzones"], arc["Dropzones"])
+check("  ... jede Sperrzone dagegen einzeln",
+      len(arc["Dropzones"].split(";")) == 3, arc["Dropzones"])
+see_row = app.sea_launch_row(g1, ev_see, sp)
+check("Protokollzeile enthaelt die Position",
+      see_row["Breite"] == "31.2000" and see_row["Länge"] == "123.7000", see_row)
+check("  ... den Kreisradius", see_row["Radius (km)"] == "20", see_row["Radius (km)"])
+check("  ... und den Abstand zum naechsten bekannten Platz",
+      see_row["Nächster bekannter Platz"].startswith("HYOS"),
+      see_row["Nächster bekannter Platz"])
+leer_see = pd.DataFrame(columns=list(app.SEA_LAUNCH_COLUMNS))
+check("zweiter Lauf verdoppelt nicht",
+      len(app.merge_sea_launches(app.merge_sea_launches(leer_see, [see_row]), [see_row])) == 1)
+check("geloeschte Zeile kommt nicht zurueck",
+      app.merge_sea_launches(leer_see, [see_row], {app.sea_launch_key(see_row)}).empty)
+
+quelle_see = Path("app.py").read_text(encoding="utf-8")
+check("das Protokoll fliesst NICHT in die Startplatz-Suche zurueck",
+      "load_sea_launches" not in quelle_see.split("def _find_spaceport")[1].split("\ndef ")[0]
+      and "SEA_LAUNCH_CSV" not in quelle_see.split("def _select_spaceport_for_zones")[1].split("\ndef ")[0])
+check("  ... und wird gesondert gefuehrt", "seestarts_updated.csv" in quelle_see)
+
+print("== 85. Zweiter Seestart und die Bahnrechnung ==")
+# Chinesischer Seestart aus dem Suedchinesischen Meer, 11. und 12.02.2026.
+# Derselbe Versuch an zwei Tagen: vier Luftraumregionen, eine Zone 6000 km weit.
+SEE2 = {
+"CN-Kreis-T1": """A0436/26 NOTAMN
+Q) ZGZU/QRDCA/IV/BO/W/000/999/2122N11208E006
+A) ZGZU B) 2602110626 C) 2602110647
+E) A TEMPORARY DANGER AREA ESTABLISHED,THE AREA WITHIN A CIRCLE
+CENTERED AT N212200E1120800 WITH RADIUS OF 10KM.VERTICAL
+LIMITS:SFC-UNL.
+F) SFC G) UNL""",
+"SG-T1": """A0433/26 NOTAMN
+Q) WSJC/QRALW/IV/BO/W/000/999/0757N10937E021
+A) WSJC B) 2602110629 C) 2602110705
+E) UNBURNED DEBRIS IS EXPECTED TO FALL WI 074150N1094911E -
+074630N1091943E - 080657N1095446E DUE TO AEROSPACE FLT ACT BY CHINA.
+F) SFC G) UNL""",
+"VN-T1": """A0430/26 NOTAMN
+Q) VVHM/QAFXX/IV/BO/E/000/999/0841N10937E060
+A) VVHM B) 2602110629 C) 2602110705
+E) DUE TO AEROSPACE FLIGHT ACTIVITY FM CHINA, THE FLIGHT
+SAFETY OF THE ACFT IN THE FLW AREAS MAY BE AFFECTED:
+- AREA 1: 094049N1092600E - 093253N1100900E - 080734N1095300E
+- 081528N1091010E
+- AREA 2: 091503N1092206E - 090711N1100502E - 080728N1095355E
+- 074715N1091937E - 074940N1090623E
+F) SFC G) UNL""",
+"AU-T1": """F0494/26 NOTAMN
+Q) YMMM/QWMLW/IV/BO/W/000/999/3205S10303E100
+A) YMMM
+B) 2602110629 C) 2602110707
+E) CHINESE AEROSPACE ACTIVITIES WILL TAKE PLACE
+BOUNDED BY: 303945S 1025332E - 304618S 1034303E - 332646S 1031434E -
+332202S 1022337E
+F) SFC G) UNL""",
+"CN-Kreis-T2": """A0465/26 NOTAMN
+Q) ZGZU/QRDCA/IV/BO/W/000/999/2122N11208E006
+A) ZGZU B) 2602120626 C) 2602120647
+E) A TEMPORARY DANGER AREA ESTABLISHED,THE AREA WITHIN A CIRCLE
+CENTERED AT N212200E1120800 WITH RADIUS OF 10KM.VERTICAL
+LIMITS:SFC-UNL.
+F) SFC G) UNL""",
+"CN-Polygon-T2": """A0466/26 NOTAMN
+Q) ZGZU/QRDCA/IV/BO/W/000/999/2038N11157E016
+A) ZGZU B) 2602120627 C) 2602120648
+E) A TEMPORARY DANGER AREA ESTABLISHED BOUNDED BY:
+N205303E1115154-N204919E1120844-N202257E1120205-N202641E1114518,
+BACK TO START.VERTICAL LIMITS:SFC-UNL.
+F) SFC G) UNL""",
+"VN-T2": """A0443/26 NOTAMN
+Q) VVHM/QAFXX/IV/BO/E/000/999/0841N10937E060
+A) VVHM B) 2602120629 C) 2602120705
+E) DUE TO AEROSPACE FLIGHT ACTIVITY FM CHINA, THE FLIGHT
+SAFETY OF THE ACFT IN THE FLW AREAS MAY BE AFFECTED:
+- AREA 1: 094049N1092600E - 093253N1100900E - 080734N1095300E
+- 081528N1091010E
+- AREA 2: 091503N1092206E - 090711N1100502E - 080728N1095355E
+- 074715N1091937E - 074940N1090623E
+F) SFC G) UNL""",
+"AU-T2": """F0511/26 NOTAMN
+Q) YMMM/QWMLW/IV/BO/W/000/999/3204S10303E087
+A) YMMM
+B) 2602120629 C) 2602120707
+E) CHINESE AEROSPACE ACTIVITIES WILL TAKE PLACE
+BOUNDED BY: 303945S 1025332E - 304618S 1034303E - 332646S 1031434E -
+332202S 1022337E
+F) SFC G) UNL""",
+}
+df_s2 = app.manual_entries_to_dataframe(
+    [{"text": t, "added": "x"} for t in SEE2.values()], "NOTAM Text")
+ev_s2, st_s2 = app.analyze_notams(df_s2, sp, fir, min_confidence="MEDIUM")
+g_s2 = [g for g in st_s2["groups"] if g.spaceport_code]
+check("zwei Starttage, zwei Gruppen", len(g_s2) == 2,
+      [(g.group_id, g.launch_window) for g in g_s2])
+check("beide vom selben abgeleiteten Punkt",
+      {g.spaceport_code for g in g_s2} == {"SEA-21N112E"},
+      [g.spaceport_code for g in g_s2])
+check("  ... und beide aus der Geometrie", all(g.site_from_geometry for g in g_s2))
+check("die 6000-km-Zone zieht die Bahn nicht auseinander",
+      all(g.azimuth_spread_deg < 5 for g in g_s2),
+      [round(g.azimuth_spread_deg, 1) for g in g_s2])
+check("  ... und wird als Reichweite ausgewiesen",
+      all(g.max_range_km > 5000 for g in g_s2), [round(g.max_range_km) for g in g_s2])
+check("derselbe Start ergibt an beiden Tagen dieselbe Orbitklasse",
+      len({g.orbit_type for g in g_s2}) == 1, [(g.group_id, g.orbit_type) for g in g_s2])
+check("  ... naemlich sonnensynchron",
+      {g.orbit_type for g in g_s2} == {app.ORBIT_SSO}, [g.orbit_type for g in g_s2])
+check("Nation ueber den Text, nicht ueber die FIR",
+      all(e.nation == "China" for e in ev_s2), [(e.notam_id, e.nation) for e in ev_s2])
+# Die Ableitung braucht mindestens drei Zonenpunkte. Zwei NOTAMs allein - etwa
+# wenn an einem Tag nur Kreis und Fernzone veroeffentlicht werden - genuegen
+# nicht, und dann entscheidet wieder die Referenz.
+duenn = app.manual_entries_to_dataframe(
+    [{"text": SEE2["CN-Kreis-T2"], "added": "x"}, {"text": SEE2["AU-T2"], "added": "x"}],
+    "NOTAM Text")
+ev_d, st_d = app.analyze_notams(duenn, sp, fir, min_confidence="MEDIUM")
+check("zwei Zonen allein ergeben keinen abgeleiteten Startpunkt",
+      not any(g.site_from_geometry for g in st_d["groups"]),
+      [(g.group_id, g.spaceport_code, g.site_from_geometry) for g in st_d["groups"]])
+
+print("-- Erdrotation in der Bahnrechnung --")
+check("Startazimut und Bahnazimut unterscheiden sich",
+      abs(app.orbital_azimuth_deg(21.3667, 190.4) - 190.4) > 2.0,
+      round(app.orbital_azimuth_deg(21.3667, 190.4), 1))
+check("  ... bei einem Start nach Osten dagegen nicht",
+      abs(app.orbital_azimuth_deg(28.5, 90.0) - 90.0) < 1e-6)
+check("  ... die Drehung schiebt immer nach Osten",
+      app.orbital_azimuth_deg(45.0, 180.0) < 180.0,
+      round(app.orbital_azimuth_deg(45.0, 180.0), 2))
+check("Konstanten sind benannt",
+      (app.ORBITAL_VELOCITY_MS, app.EARTH_ROTATION_MS) == (7800.0, 465.1))
+
+print("-- Die Orbitbaender tragen die Genauigkeit der Abschaetzung --")
+for name, lat, az in (("Taiyuan", 38.85, 188.8), ("Jiuquan", 40.96, 189.3),
+                      ("Seestart Tag 1", 21.3667, 190.4), ("Seestart Tag 2", 21.3667, 191.3)):
+    i = app.estimate_inclination_deg(lat, az)
+    check("bekannter SSO-Start wird als SSO gefuehrt: {}".format(name),
+          app.classify_orbit(i) == app.ORBIT_SSO, (name, round(i, 1), app.classify_orbit(i)))
+for name, lat, az, erwartet in (
+        ("Vandenberg polar", 34.74, 180.0, app.ORBIT_HIGH_INC),
+        ("Baikonur ISS", 45.96, 44.9, app.ORBIT_LEO_MEO),
+        ("Cape Canaveral GTO", 28.5, 90.0, app.ORBIT_GTO)):
+    i = app.estimate_inclination_deg(lat, az)
+    check("  ... und nichts anderes rutscht hinein: {}".format(name),
+          app.classify_orbit(i) == erwartet, (name, round(i, 1), app.classify_orbit(i)))
+check("echte Rueckwaertsbahnen bleiben moeglich",
+      app.classify_orbit(110.0) == app.ORBIT_RETROGRADE)
+
+print("== 86. CSV-Export der Starts ==")
+quelle_x = Path("app.py").read_text(encoding="utf-8")
+check("keine Klartext-Spalte mehr im Starts-Export",
+      'starts_csv["Klartext"]' not in quelle_x)
+check("  ... der Export nutzt die Tabelle unveraendert",
+      "data=group_table.to_csv(index=False)" in quelle_x)
+gt_x = app.groups_to_dataframe([pg])
+check("  ... und die Tabelle fuehrt die Spalte nicht",
+      "Klartext" not in gt_x.columns, list(gt_x.columns))
+check("auch der JSON-Export fuehrt ihn nicht mehr",
+      "klartext" not in quelle_x)
+check("  ... und reicht die Startdaten unveraendert durch",
+      '"launches": [group_to_export_dict(g) for g in visible_groups]' in quelle_x)
+check("die Klartext-Auswertung in der Oberflaeche bleibt",
+      quelle_x.count("st.markdown(describe_launch(group, events))") == 2)
+check("  ... und ist weiterhin erzeugbar",
+      app.describe_launch(pg, [pe1]).startswith("**What:**"),
+      app.describe_launch(pg, [pe1])[:40])
+check("der Startdatensatz im JSON hat kein Klartextfeld",
+      "klartext" not in app.group_to_export_dict(pg),
+      sorted(app.group_to_export_dict(pg))[:6])
+
+print("== 87. Vorankuendigungen ==")
+
+print("-- D-Item: beide Trennzeichen --")
+# Gemessen an der Echtdatei vom 18.09.2026: von 100 D-Items mit Tagesfenster
+# nutzen 8 den Schraegstrich. Vorher las der Parser nur den Bindestrich.
+check("Bindestrich 0200-0600", app.daily_window_hours("0200-0600") == 4.0,
+      app.daily_window_hours("0200-0600"))
+check("Schraegstrich 0200/0600", app.daily_window_hours("0200/0600") == 4.0,
+      app.daily_window_hours("0200/0600"))
+check("Echtform 'DLY BTN 1700/0400' laeuft ueber Mitternacht",
+      app.daily_window_hours("DLY BTN 1700/0400") == 11.0,
+      app.daily_window_hours("DLY BTN 1700/0400"))
+check("zwei Fenster: das laengere zaehlt",
+      app.daily_window_hours("DLY BTN 1600/1900 AND BTN 2300/0200") == 3.0,
+      app.daily_window_hours("DLY BTN 1600/1900 AND BTN 2300/0200"))
+# Verstuemmelt - hier wird nicht geraten. 200 koennte 0200 oder 2000 meinen.
+check("dreistellige Zeitangabe wird nicht geraten",
+      app.daily_window_hours("DLY BTN 1700/200") is None,
+      app.daily_window_hours("DLY BTN 1700/200"))
+# "EVERY DAY, 24 HOURS" heisst durchgehend aktiv. Kein Fenster zu finden ist
+# hier das richtige Ergebnis: der Daueranordnungs-Deckel soll greifen.
+check("'EVERY DAY,24 HOURS' bleibt ohne Fenster - absichtlich",
+      app.daily_window_hours("EVERY DAY,24 HOURS") is None)
+check("Minutenbereiche kommen unveraendert heraus",
+      app.daily_windows("0200/0600") == [(120, 360)], app.daily_windows("0200/0600"))
+check("  ... und ein Fenster ueber Mitternacht behaelt die kleinere Endzeit",
+      app.daily_windows("1700/0400") == [(1020, 240)], app.daily_windows("1700/0400"))
+
+print("-- Liegt das Startfenster im Tagesfenster? --")
+def _utc(tag, stunde, minute):
+    return datetime(2026, 7, tag, stunde, minute, tzinfo=timezone.utc)
+check("0245-0312 liegt in 0200-0600",
+      app.window_within_daily(_utc(22, 2, 45), _utc(22, 3, 12), "0200-0600"))
+check("0745 liegt nicht darin",
+      not app.window_within_daily(_utc(22, 7, 45), _utc(22, 8, 12), "0200-0600"))
+check("0245 liegt in 'DLY BTN 1700/0400' - das Fenster laeuft ueber Mitternacht",
+      app.window_within_daily(_utc(22, 2, 45), _utc(22, 3, 12), "DLY BTN 1700/0400"))
+check("1200 liegt nicht darin",
+      not app.window_within_daily(_utc(22, 12, 0), _utc(22, 12, 30), "DLY BTN 1700/0400"))
+check("ohne D-Item schraenkt nichts ein",
+      app.window_within_daily(_utc(22, 2, 45), _utc(22, 3, 12), None))
+check("ein Fenster, das aus dem Tagesfenster herauslaeuft, passt nicht",
+      not app.window_within_daily(_utc(22, 5, 30), _utc(22, 6, 30), "0200-0600"))
+
+print("-- Deckungsgleiche Zonen --")
+kreis = app.LaunchEvent(row_index=0, notam_id="K", raw_text="", zones=[[(31.2, 123.7)]],
+                        radius_km=20.0)
+check("ein Kreis-NOTAM bringt seinen Radius als Ausdehnung mit",
+      app.event_zone_shapes(kreis) == [(31.2, 123.7, 20.0)], app.event_zone_shapes(kreis))
+check("zwei gleich grosse Zonen 1 km versetzt sind deckungsgleich",
+      app.zones_congruent((28.2, 123.5, 45.0), (28.21, 123.5, 45.0)))
+check("  ... 328 km versetzt nicht",
+      not app.zones_congruent((28.2, 123.5, 45.0), (31.2, 123.7, 45.0)))
+check("ein 20-km-Kreis im Mittelpunkt einer 45-km-Zone ist keine Paarung",
+      not app.zones_congruent((28.2, 123.5, 45.0), (28.2, 123.5, 20.0)))
+check("Zonen ohne Ausdehnung paaren nicht",
+      not app.zones_congruent((28.2, 123.5, 0.0), (28.2, 123.5, 0.0)))
+check("Schwellen sind benannt",
+      (app.ADVANCE_ZONE_OFFSET_SHARE, app.ADVANCE_ZONE_SIZE_SHARE,
+       app.ADVANCE_MIN_DURATION_FACTOR, app.ADVANCE_MIN_DURATION_HOURS)
+      == (0.25, 0.6, 4.0, 24.0))
+
+print("-- Der Echtfall: zwei Vorankuendigungen finden ihren Start --")
+# Dieselben fuenf NOTAMs wie in Abschnitt 84. Vorher blieben A2371/26 und
+# P3423/26 im Review: sie liegen in taiwanesischem und japanischem Luftraum,
+# nennen weder China noch einen Startplatz, und die Drittstaaten-Regel laesst
+# keine geratene Nation zu. Die Geometrie loest das.
+va = [e for e in ev_see if e.kind == app.KIND_ADVANCE]
+check("genau zwei Meldungen als Vorankuendigung gefuehrt", len(va) == 2,
+      [e.notam_id.strip() for e in va])
+check("  ... es sind die beiden mehrtaegigen",
+      sorted(e.notam_id.replace(app.MANUAL_MARK, "").strip() for e in va)
+      == ["A2371/26", "P3423/26"], [e.notam_id for e in va])
+check("  ... sie haben das Review verlassen",
+      all(e.status == "OK" and not e.review_reason for e in va),
+      [(e.status, e.review_reason[:20]) for e in va])
+check("  ... und tragen den Start", all(e.launch_group == g1.group_id for e in va),
+      [e.launch_group for e in va])
+check("  ... mit der Nation des Starts", all(e.nation == "China" for e in va),
+      [e.nation for e in va])
+check("  ... und seinem Startplatz",
+      all(e.spaceport_code == "SEA-31N124E" for e in va), [e.spaceport_code for e in va])
+check("der Hinweis nennt den Vorlauf",
+      all("Advance notice for" in e.assignment_note for e in va),
+      [e.assignment_note[:40] for e in va])
+
+print("-- Die Gruppe bleibt unberuehrt --")
+# Der entscheidende Punkt: die angekuendigte Flaeche IST die Sperrzone am
+# Starttag. Als weitere Zone gezaehlt waere sie eine Doppelzaehlung und wuerde
+# Azimut und Streuung verfaelschen.
+check("drei Sperrzonen, nicht fuenf", g1.zone_count == 3, g1.zone_count)
+check("  ... die Vorankuendigungen stehen nicht unter den NOTAMs des Starttags",
+      not any("A2371" in n or "P3423" in n for n in g1.notam_ids), g1.notam_ids)
+check("  ... sondern in einem eigenen Feld",
+      sorted(n.replace(app.MANUAL_MARK, "").strip() for n in g1.advance_notam_ids)
+      == ["A2371/26", "P3423/26"], g1.advance_notam_ids)
+check("Streuung unveraendert schluessig", g1.azimuth_spread_deg < 5.0,
+      round(g1.azimuth_spread_deg, 2))
+check("Vorlauf wird gerechnet, nicht geschaetzt",
+      abs((g1.advance_notice_hours or 0) - 24.733) < 0.01, g1.advance_notice_hours)
+
+print("-- Anzeige, Klartext, Export --")
+gt_va = app.groups_to_dataframe([g1])
+check("die Startansicht fuehrt eine Spalte Vorankuendigung",
+      "Vorank\u00fcndigung" in gt_va.columns)
+check("  ... mit Kennungen und Vorlauf",
+      "A2371/26" in gt_va["Vorank\u00fcndigung"].iloc[0]
+      and "25 h" in gt_va["Vorank\u00fcndigung"].iloc[0],
+      gt_va["Vorank\u00fcndigung"].iloc[0])
+check("  ... und sie ist englisch beschriftet",
+      app.COLUMN_LABELS["Vorank\u00fcndigung"] == "Advance Notice")
+check("  ... und steht in der Spaltenreihenfolge",
+      "Vorank\u00fcndigung" in app.GROUP_COLUMN_ORDER)
+klartext_va = app.describe_launch(g1, ev_see)
+check("der Klartext nennt die Vorankuendigung",
+      "**Announced in advance:**" in klartext_va)
+check("  ... und begruendet, warum sie keine weitere Zone ist",
+      "not counted as further closure zones" in klartext_va)
+check("  ... und zaehlt weiterhin drei Sperrzonen",
+      "3 airspace closure(s)" in klartext_va)
+exp_va = app.group_to_export_dict(g1)
+import json as _json
+_json.dumps(exp_va)  # darf nicht werfen - advance_from ist ein datetime
+check("der JSON-Export fuehrt die Kennungen",
+      exp_va["advance_notam_ids"] == g1.advance_notam_ids)
+check("  ... das Datum als Text", exp_va["advance_from"].startswith("2026-07-21"),
+      exp_va["advance_from"])
+check("  ... und den Vorlauf gerundet", exp_va["advance_notice_hours"] == 24.7,
+      exp_va["advance_notice_hours"])
+
+print("-- Die Paarung bleibt zurueckhaltend --")
+check("ein kurzes NOTAM ist nie eine Vorankuendigung",
+      not app.is_advance_announcement(
+          by_see["TW-A2385"], g1, app.event_zone_shapes(by_see["CN-A2827"])))
+check("ohne deckungsgleiche Zone keine Paarung",
+      not app.is_advance_announcement(
+          by_see["TW-A2371"], g1, app.event_zone_shapes(by_see["CN-A2827"])))
+# Die Nation der Gruppe muss unter den Kandidaten stehen. Die Paarung darf die
+# Drittstaaten-Regel nicht aushebeln, sondern nur eine zulaessige belegen.
+import copy as _copy
+g_fremd = _copy.deepcopy(g1)
+g_fremd.nation = "Iran"
+check("eine fremde Nation wird nicht angehaengt",
+      not app.is_advance_announcement(
+          by_see["TW-A2371"], g_fremd,
+          [f for e in (by_see["TW-A2385"],) for f in app.event_zone_shapes(e)]))
+check("ausgeblendete Meldungen bleiben ausgeblendet",
+      "event.auto_hidden_reason or not event.zones" in quelle_x)
+
+print("-- Traegersystem und Nutzlast gelten startweit --")
+# Die Vorankuendigung zaehlt nicht als Sperrzone, gehoert aber zum Start. Wer
+# das Traegersystem auf ihrer Zeile waehlt, meint denselben Start.
+app.apply_vehicle_assignments(ev_see, st_see["groups"], {va[0].key: "CZ-11"})
+check("auf der Vorankuendigung gewaehlt, gilt fuer den ganzen Start",
+      g1.vehicle == "CZ-11", g1.vehicle)
+check("  ... und erreicht die NOTAMs des Starttags",
+      all(by_see[k].vehicle == "CZ-11" for k in ("CN-A2827", "TW-A2385", "JP-P3438")),
+      [by_see[k].vehicle for k in ("CN-A2827", "TW-A2385", "JP-P3438")])
+app.apply_payload_assignments(ev_see, st_see["groups"], {by_see["CN-A2827"].key: "Yaogan"})
+check("umgekehrt erreicht die Nutzlast die Vorankuendigung",
+      all(e.payload == "Yaogan" for e in va), [e.payload for e in va])
+check("  ... und die Zonenzahl bleibt davon unberuehrt", g1.zone_count == 3, g1.zone_count)
+app.apply_vehicle_assignments(ev_see, st_see["groups"], {})
+app.apply_payload_assignments(ev_see, st_see["groups"], {})
+check("die Paarung laeuft nach der Gruppierung",
+      quelle_x.index("groups = group_launches(events, spaceports)")
+      < quelle_x.index("pair_advance_announcements(events, groups)"))
+
+if xls:
+    ev_v, st_v = app.analyze_notams(real, sp, fir, min_confidence="MEDIUM")
+    print("-- Gegen den Echtbestand --")
+    # Gemessen: 792 (NOTAM, Start)-Paare kaemen in Frage. Die Zeitbedingungen
+    # bestehen einzeln 41 bis 73 Prozent davon - sie allein wuerden nichts
+    # tragen. Die Deckungsgleichheit der Zonen schliesst alle 792 aus.
+    paare_v = [e for e in ev_v if e.kind == app.KIND_ADVANCE]
+    check("keine Paarung ohne deckungsgleiche Zone",
+          all(any(app.zones_congruent(a, b)
+                  for a in app.event_zone_shapes(e)
+                  for gg in st_v["groups"] if gg.group_id == e.launch_group
+                  for b in [f for o in ev_v if o.launch_group == gg.group_id
+                            and o.kind != app.KIND_ADVANCE
+                            for f in app.event_zone_shapes(o)])
+              for e in paare_v),
+          [e.notam_id for e in paare_v])
+    check("  ... und keine gegen die Drittstaaten-Regel",
+          all(e.nation in e.candidate_nations for e in paare_v),
+          [(e.notam_id, e.nation, e.candidate_nations) for e in paare_v])
+    check("im Bestand vom 18.09.2026 ergibt sich keine - gemessen, nicht geraten",
+          st_v["advance"] == 0, st_v["advance"])
+    check("  ... und die Starts bleiben vollzaehlig", st_v["launches"] >= 8,
+          st_v["launches"])
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

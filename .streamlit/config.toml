@@ -1,0 +1,48 @@
+# Gestaltungsregeln dieses Projekts.
+#
+# Farben: unbunte Buehne, bunte Signale. Die Flaechen, Rahmen und Schriften
+# sind neutral gehalten; Farbe traegt ausschliesslich Information - Status,
+# Konfidenz, die Marke manuell bestaetigter Meldungen. Dadurch gewinnt jedes
+# farbige Zeichen an Gewicht, statt im Bunten unterzugehen.
+#
+# Die unbunte Skala: Schwarz #1E1E1E, Anthrazit #757575, Silber #9A9B9C,
+# Cool Gray #ADAFAF, Weiss. Der Rahmenton ist bewusst der helle Anthrazit:
+# er erreicht gegen den Hintergrund 3,6:1 und bleibt damit auch dort
+# erkennbar, wo ein Rahmen das einzige Merkmal eines Bedienelements ist.
+
+[theme]
+base = "dark"
+backgroundColor = "#141414"
+secondaryBackgroundColor = "#1E1E1E"
+borderColor = "#757575"
+dataframeHeaderBackgroundColor = "#1E1E1E"
+dataframeBorderColor = "#3C3C3C"
+codeBackgroundColor = "#181818"
+textColor = "#F2F2F2"
+linkColor = "#ADAFAF"
+primaryColor = "#ADAFAF"
+
+baseRadius = "none"
+buttonRadius = "none"
+showWidgetBorder = true
+showSidebarBorder = true
+
+# Signalfarben - sie allein sind bunt.
+greenColor = "#92D400"
+redColor = "#E00034"
+orangeColor = "#FF5800"
+yellowColor = "#FECB00"
+violetColor = "#A44DC4"
+blueColor = "#009FDA"
+grayColor = "#ADAFAF"
+
+[theme.sidebar]
+backgroundColor = "#1A1A1A"
+secondaryBackgroundColor = "#1E1E1E"
+borderColor = "#3C3C3C"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

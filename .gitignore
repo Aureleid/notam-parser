@@ -14,3 +14,9 @@ __pycache__/
 # Lokale NOTAM-Rohdaten (bei Bedarf einzeln freigeben)
 fnsNotams_*.xls
 fnsNotams_*.xlsx
+
+# Startarchiv - aus den lokalen NOTAM-Rohdaten abgeleitet, bleibt wie diese lokal
+startarchiv_updated.csv
+
+# Seestart-Protokoll - aus den lokalen NOTAM-Rohdaten abgeleitet, bleibt lokal
+seestarts_updated.csv

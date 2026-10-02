@@ -1,4 +1,4 @@
-# NOTAM Space-Launch Analyzer
+# NOLA — NOTAM Launch Analyzer
 
 Streamlit-Anwendung zur täglichen Auswertung von NOTAM-Dateien mit dem Ziel,
 Raumfahrtstarts von **China, Russland, Indien, Iran, Nordkorea und den USA** zu
@@ -172,7 +172,9 @@ Beispiel:
 > Bahnneigung von rund 97° – sonnensynchron, eine nahezu polare Bahn, die jeden Ort immer
 > zur gleichen Ortszeit überfliegt – typisch für Erdbeobachtungs- und Aufklärungssatelliten.
 
-Die Beschreibung steht auch im JSON-Export und als Spalte `Klartext` in der Start-CSV.
+Die Beschreibung steht ausschließlich in der Oberfläche. Weder die Start-CSV noch der
+JSON-Export führen sie — in einer Tabellenspalte wäre sie ein mehrzeiliger Fließtext,
+und im JSON blähte sie jeden Startdatensatz um ein Vielfaches auf.
 
 ### Zuverlässigkeit
 
@@ -298,6 +300,384 @@ Reiterleiste: bei `st.tabs` liegt der aktive Reiter im Browser und lässt sich n
 dem Programm heraus umschalten. Nebeneffekt: es wird nur noch der sichtbare Bereich
 gerendert statt aller sechs, was die Anwendung spürbar schneller macht.
 
+## Trägersystem zuweisen
+
+Welche Rakete hinter einem Start steckt, lässt sich aus einem NOTAM nicht ableiten — die
+Meldung sperrt Luftraum, sie nennt kein Fluggerät. Deshalb wird das Trägersystem nicht
+geraten, sondern von Hand gesetzt.
+
+Das Dropdown **Trägersystem** steht an zwei Stellen: in jedem aufgeklappten NOTAM unter
+**NOTAM Data** und in jedem Prüffall unter **Unassigned / Review**. Es bietet alle 51
+Einträge der Referenz `traegersysteme_updated.csv`, gestaffelt:
+
+```
+— ohne Zuweisung —
+Chang Zheng 2C (CZ-2C)          ← Träger der erkannten Nation zuerst
+Chang Zheng 2D (CZ-2D)
+…
+──────── andere Nationen ────────
+Soyuz-2.1a (Soyuz-2.1a) · Russland   ← übrige mit Nation dahinter
+…
+```
+
+Eine harte Filterung nach Nation wäre falsch: im Review korrigiert man gerade eine
+möglicherweise falsche Zuordnung und braucht dort die volle Liste. Steht die Startnation
+noch nicht fest — im Review der Regelfall, weil ohne Koordinaten keine Zuordnung möglich
+ist —, staffelt die Liste nach dem Textbeleg oder der FIR, sofern diese auf eine Zielnation
+zeigen. Das ist reine Sortierhilfe und präjudiziert nichts.
+
+Die Trennzeile ist technisch wählbar, weil Streamlit keine inaktiven Einträge kennt. Wird
+sie gewählt, bleibt die bisherige Zuweisung stehen und das Dropdown springt zurück.
+
+**Die Wahl gilt für den ganzen Start.** Gehören mehrere Sperrzonen zu einem erkannten
+Start, übernehmen alle dasselbe Trägersystem — dieselbe Rakete kann nicht in einer Zone
+eine andere sein als in der nächsten. Gespeichert wird trotzdem je NOTAM, weil dessen
+Schlüssel über Sitzungen hinweg stabil ist, die Start-Kennung (`START-01`) dagegen nicht.
+Tragen zwei NOTAMs desselben Starts verschiedene Systeme — möglich, wenn eine spätere
+Gruppierung zwei zuvor getrennte Starts zusammenfasst —, behält jedes NOTAM seine eigene
+Zuweisung und der Start wird als *uneinheitlich* ausgewiesen statt stillschweigend eine der
+beiden zu bevorzugen.
+
+In der **Launch Overview** erscheint das Ergebnis als Spalte `Trägersystem` — dort nur
+lesbar. Grund: `st.dataframe` beherrscht Zeilenauswahl, aber keine editierbaren Zellen;
+`st.data_editor` beherrscht editierbare Zellen, aber keine Zeilenauswahl. Beides zugleich
+gibt Streamlit nicht her, und der Klick-Sprung zum NOTAM-Volltext ist die wertvollere
+Funktion.
+
+Die Zuweisung ist ein Etikett: sie ändert **nichts** an der Erkennung — weder Nation noch
+Startplatz, Azimut oder Orbit. Sie steht in beiden CSV-Exporten und im JSON-Export und wird
+wie die übrigen Entscheidungen in `notam_workspace.json` gespeichert. Wird ein zugewiesenes
+Trägersystem später über das Optionsmenü aus der Referenz entfernt, bleibt die Zuweisung
+sichtbar und wird als *„nicht mehr in der Referenz"* gekennzeichnet, statt unbemerkt zu
+verschwinden.
+
+## Nutzlast eintragen
+
+Unter dem Trägersystem-Dropdown steht in *NOTAM Data* ein Freitextfeld **Payload**. Bewusst
+kein Auswahlfeld: welche Nutzlast an Bord war, steht in keiner Referenz und ist bei
+chinesischen Starts oft erst Tage später bekannt. Das Feld darf leer bleiben und lässt sich
+jederzeit nachtragen.
+
+Es steht nur unter *NOTAM Data*, nicht im Review — dort ist erst die Frage, *ob* die Meldung
+überhaupt einen Start beschreibt. Wie beim Trägersystem gilt der Eintrag für alle Sperrzonen
+desselben Starts; widersprechen sich zwei Texte nach einer Umgruppierung, wird der Start als
+*uneinheitlich* ausgewiesen. Der Wert erscheint als Spalte `Payload` in der Launch Overview
+(nur lesbar) und in beiden CSV-Exporten sowie im JSON.
+
+## Startarchiv
+
+Die vierte Referenz unterscheidet sich von den drei anderen: sie wird nicht eingelesen,
+sondern von der Anwendung selbst geschrieben. `startarchiv_updated.csv` hält fest, was zu
+jedem erkannten Start bekannt ist — eine Zeile je Start, nicht je NOTAM:
+
+| Spalte | Beispiel |
+|---|---|
+| `NOTAM` | `A4631/26, A4632/26, F3573/26` |
+| `Startdatum` | `21.09.2026` |
+| `Startzeit` | `01:30` |
+| `Nation` | `China` |
+| `Weltraumbahnhof` | `JSLC` |
+| `Trägersystem` | `CZ-2D` |
+| `Payload` | `Yaogan-XX` |
+| `Orbit` | `SSO` |
+| `Inklination` | `97.4` |
+| `Azimuth` | `190.3` |
+| `Dropzones` | `19.6000 110.9500; 18.8333 111.2500` |
+
+Eine Zeile entsteht für jeden Start, den die Anwendung als solchen führt — auch ohne
+Nutzlast. Die Filter der Seitenleiste wirken dabei bewusst **nicht**: ob ein Start ins Archiv
+gelangt, soll nicht davon abhängen, was man sich gerade anzeigen lässt.
+
+Beim nächsten Import wird derselbe Start **aktualisiert statt doppelt angelegt**;
+Erkennungsmerkmal ist die Kombination aus Startdatum, Startplatz und NOTAM-Kennungen. Die
+automatischen Spalten werden dabei überschrieben, die Nutzlast nicht: sie ist das Einzige,
+was kein Automat kennt, und bleibt stehen, wenn der neue Durchlauf nichts dazu weiß.
+
+Im Optionsmenü hat das Archiv einen eigenen Reiter — mit Suche und **Entfernen** je Zeile,
+aber ohne Formular zum Anlegen: Zeilen entstehen aus der Auswertung, die Nutzlast trägt man
+unter *NOTAM Data* nach. Eine gelöschte Zeile bleibt gelöscht, auch wenn ihr NOTAM noch in
+der Tagesdatei steht — der Schlüssel wandert dafür in `notam_workspace.json`.
+
+Die Datei ist in `.gitignore` aufgeführt: sie leitet sich aus den lokalen NOTAM-Rohdaten ab
+und bleibt wie diese lokal.
+
+## Warum mehr Referenzdaten den Review nicht leeren
+
+Naheliegende Annahme: mehr FIRs in der Referenz → weniger unzugeordnete NOTAMs → weniger
+Review. **Gemessen stimmt das nicht.** Auf der Echtdatei vom 18.09.2026 alle 19 fehlenden
+ICAO-Codes testweise ergänzt:
+
+```
+ohne Ergänzung              Review 127 | Starts 14
+mit 19 zusätzlichen FIRs    Review 127 | Starts 14
+```
+
+Die Ergänzung verschiebt nur die Begründung, sie löst keinen Fall auf. Denn ein NOTAM
+scheitert nicht daran, dass seine FIR unbekannt ist, sondern daran, dass nichts es mit
+einer Zielnation verbindet.
+
+Auch **weitere Startnationen** leeren den Review nicht — sie schichten ihn um. Die vier
+neuseeländischen `NZZO`-Dropzones (vermutlich Rocket Lab von Māhia) verschwänden nicht, sie
+würden zu vier Starts, die geprüft und eingeordnet werden wollen.
+
+### Was dabei doch herauskam: MMFR
+
+Bei der Prüfung fiel eine echte Lücke auf. Unter den 48 Fällen mit unbekannter FIR hatten
+19 **hohe** Konfidenz, darunter:
+
+```
+B1848/26  MMFR  Score  9  "DANGEROUS AREA FOR LAUNCH OF ROCKET SPACEX STARSHIP FLT-14"
+B1847/26  MMFR  Score  9  dieselbe Aktivität, zweites Gebiet
+B1862/26  MMFR  Score 12  "REENTRY OF ROCKET SPACEX SL 15-27 STAGE 1"
+```
+
+Mexiko hat kein eigenes Weltraumprogramm — und trägt trotzdem SpaceX-Meldungen, weil
+Starship von Boca Chica mexikanischen Luftraum überfliegt. `MMFR` steht seit dem in der
+Referenz (Mexico City ACC, Startnation `USA`), und die Erkennung stieg von **14 auf 17
+Starts**.
+
+Das ist zugleich die Widerlegung der Regel „Land ohne Startprogramm → aussortieren": Ein
+Land braucht kein eigenes Programm, um von fremden Starts überflogen zu werden.
+
+Die Drittstaaten-Regel bleibt dabei wirksam: MMFR liegt in Mexiko, die USA werden nur
+zugelassen, weil `SPACEX` im Text steht. Zwei weitere MMFR-Meldungen — US-Daueradvisories
+mit Laufzeit bis 2027 — bleiben korrekt im Review.
+
+> `SCCZ` (Chile) wurde **nicht** aufgenommen. Die dortige Wiedereintrittszone bei
+> 59°S 127°W wurde im Test *Russland/Vostochny* zugeordnet; bei einer Zone im Südpazifik
+> ist das nicht belastbar, solange nicht entschieden ist, welche Nationen dort plausibel
+> wiedereintreten.
+
+## Seestarts von beweglichen Plattformen
+
+China startet zunehmend von Schiffen und Plattformen. Solche NOTAMs nennen keinen
+Startplatz, und die Plattform steht nicht dort, wo eine Referenztabelle sie vermutet. Für
+diesen Fall entscheidet nicht die Referenz, sondern die **Geometrie des NOTAM-Satzes**.
+
+### Der Fall, an dem es entwickelt wurde
+
+Ein chinesischer Start am 22.07.2026, fünf NOTAMs aus drei Luftraumregionen:
+
+| NOTAM | FIR | Rolle |
+|---|---|---|
+| `A2371/26`, `P3423/26` | Taiwan, Japan | Vorankündigung 21.–27. Juli, täglich 0200–0600 — siehe [Vorankündigungen](#vorankündigungen) |
+| `A2827/26` | Shanghai (China) | **Startpunkt** — Kreis um 31,20N 123,70E, Radius 20 km |
+| `A2385/26` | Taiwan | Dropzone bei 28,2N |
+| `P3438/26` | Japan | zwei Dropzones bei 28,2N und 21,4N |
+
+Die Rechnung entscheidet:
+
+```
+vom Kreismittelpunkt aus   178,0° · 174,7° · 177,7°   Streuung  3,3°
+von HYOS aus (473 km weg)  149,7° · 160,8° · 168,5°   Streuung   19°
+```
+
+Vom Kreis aus ist es eine saubere Bahn mit Inklination 87,9° — eine SSO-Mission. Vorher
+führte NOLA den Startpunkt selbst als Dropzone und schrieb den Start dem 473 km entfernten
+`HYOS` zu.
+
+### Wie die Ableitung arbeitet
+
+`derive_launch_point()` sucht in einem Zeit-Cluster die Zone, von der aus sich die übrigen
+auf einer Bahn aufreihen. Zuerst kreisförmige Zonen — eine Plattformsperrung ist ein
+kleiner Kreis —, danach als Auffangnetz jede Zone des Clusters. Übernommen wird das
+Ergebnis nur, wenn
+
+- die Streuung ≤ 15° beträgt (`SEA_LAUNCH_MAX_SPREAD_DEG`),
+- der abgeleitete Punkt ≥ 150 km von jedem verzeichneten Startplatz entfernt liegt
+  (`SEA_LAUNCH_MIN_SITE_DISTANCE_KM`) — darunter erklärt die gepflegte Referenz den Start
+  besser als eine Schätzung aus drei Zonen,
+- und die Bahn die der Referenz um mindestens 5° schlägt (`SEA_LAUNCH_SPREAD_MARGIN_DEG`).
+
+Die Kennung kodiert die Position: `SEA-31N124E`. Kein Verzeichnis zu pflegen, und zwei
+Starts von derselben Stelle bekommen dieselbe Kennung.
+
+Die Nation kommt aus dem Luftraum des **Ursprungs**-NOTAMs, nicht aus der Geometrie: Der
+Startpunkt liegt in chinesischer FIR, die Dropzones berühren taiwanesischen und japanischen
+Luftraum. Genau dafür gibt es die Anker-Regel — der Ursprung trägt die Nation, die übrigen
+Zonen erben sie.
+
+> **Zwei Fehler mussten dafür erst weichen.** Der Splitter zerlegte den Cluster anhand der
+> Referenz-Streuung und warf dabei ausgerechnet das NOTAM heraus, das den Startpunkt
+> beschrieb — er sah die 19° und nicht die 3,3°. Und `AREA1:`/`AREA2:` wurde nicht
+> getrennt, weil das Trennmuster `AREA\s+\d` ein Leerzeichen verlangte und
+> `extract_items` die Zeilenumbrüche faltet; aus zwei Gebieten 740 km auseinander wurde ein
+> Polygon mit einem Mittelpunkt, der nirgends liegt.
+
+### Zweiter belegter Fall: Südchinesisches Meer, 11./12.02.2026
+
+Acht NOTAMs aus vier Luftraumregionen, derselbe Versuch an zwei Tagen — am 11. abgebrochen,
+am 12. wiederholt. Startpunkt als Kreis mit 10 km Radius bei 21,37N 112,13E in der
+Guangzhou-FIR; Dropzones in Singapur und Vietnam (~1400–1500 km), eine weitere im Indischen
+Ozean vor Australien (**5991 km**).
+
+Dieser Fall brauchte keine neue Erkennungslogik — er lief mit dem gebauten Verfahren
+durch — legte aber einen Fehler in der Bahnrechnung frei:
+
+```
+Tag 1   Azimut 190,4°   Inklination 99,7°   ->  Sun-synchronous
+Tag 2   Azimut 191,3°   Inklination 100,5°  ->  Retrograde
+```
+
+Derselbe Start, zwei Orbitklassen. Ursache: Die Inklination wurde ohne Erdrotation
+gerechnet.
+
+### Die Erdrotation in der Bahnrechnung
+
+Zur Startgeschwindigkeit addiert sich die Ostkomponente der Erddrehung,
+`V_erde · cos φ` (465,1 m/s am Äquator). `orbital_azimuth_deg()` rechnet daraus den
+**Bahnazimut**, und erst dieser geht in `cos(i) = cos φ · sin(Bahnazimut)`:
+
+```
+Startazimut 190,4°  ->  Bahnazimut 187,2°  ->  Inklination 96,7°
+Startazimut 191,3°  ->  Bahnazimut 188,1°  ->  Inklination 97,6°
+```
+
+Beide Tage ergeben jetzt SSO — und 96–98° ist das Band, in dem sonnensynchrone Bahnen
+tatsächlich liegen. Bei einem Start nach Osten ändert die Drehung nichts an der Richtung,
+dort bleibt die Rechnung unverändert.
+
+### Warum die Orbitbänder breit sind
+
+Die Korrektur legte offen, dass die Bänder auf die *unkorrigierte* Formel geeicht waren:
+Taiyuan und Jiuquan, beides echte SSO-Starts, fielen danach mit 94,8° und 95,1° aus dem
+alten Band 96–100 heraus.
+
+Die Inklination ist eine Abschätzung aus Startplatzbreite und einem Azimut, der selbst aus
+der Richtung zu einer Dropzone stammt. Gemessen an vier bekannten SSO-Starts streut sie um
+rund drei Grad. Das SSO-Band liegt deshalb bei **93–103°**, retrograd beginnt bei 103°. Ein
+schmaleres Band hätte denselben Start je nach Tag anders eingeordnet.
+
+### Das Seestart-Protokoll
+
+`seestarts_updated.csv` wird von der Anwendung geschrieben, wie das Startarchiv. Eine Zeile
+je abgeleitetem Start, mit Position, Radius, Bahn, Dropzones — und einer Spalte
+**`Nächster bekannter Platz`** (`HYOS, 473 km`). Diese letzte Spalte zeigt über die Zeit, ob
+sich ein neues Startgebiet herausbildet oder ob eine vorhandene Referenz nur ungenau liegt.
+
+**Das Protokoll ist ein Protokoll, kein Nachschlagewerk.** Es fließt ausdrücklich *nicht* in
+die Startplatz-Suche zurück: Eine Plattform steht beim nächsten Mal woanders, und alte
+Positionen als Kandidaten zu führen hieße, genau den Fehler nachzubauen, den die Ableitung
+behebt. Ein Test wacht darüber.
+
+`HIIS` und `HYOS` bleiben in der Startplatz-Referenz, sind aber als **Heimathäfen** zu
+lesen, nicht als Startpunkte — bei diesem Start hat `HYOS` die falsche Antwort geliefert.
+
+## Vorankündigungen
+
+Derselbe Luftraum wird oft Tage vor dem Start reserviert: eine mehrtägige Meldung mit
+täglichem Fenster, dann am Starttag eine kurze Meldung für dieselbe Fläche. Das sind nicht
+zwei Vorgänge, sondern einer.
+
+Im Seestart-Fall sind das `A2371/26` (Taiwan) und `P3423/26` (Japan), gültig 21.–27. Juli,
+täglich 0200–0600. Sie blieben im Review — zu Recht: sie liegen in taiwanesischem und
+japanischem Luftraum, nennen weder China noch einen Startplatz, und die Drittstaaten-Regel
+lässt keine geratene Nation zu.
+
+### Der Text hilft hier nicht, die Geometrie schon
+
+| Vergleich | Mittelpunkte | Zonengrößen |
+|---|---|---|
+| Vorankündigung Taiwan ↔ Starttag Taiwan | **0,91 km** | 44 / 45 km |
+| Vorankündigung Japan ↔ Starttag Japan | **1,20 km** | 52 / 52 km |
+| nächster Nicht-Treffer | 328,44 km | 44 / 0 km |
+
+Die Mittelpunkte liegen auf **zwei Prozent** des Zonenradius zusammen. Das ist kein Zufall,
+sondern dieselbe im Text ausbuchstabierte Fläche.
+
+### Sechs Bedingungen, alle sprachfrei
+
+Gepaart wird nur, wenn **alle** zutreffen:
+
+1. Die Nation des Starts steht unter den Kandidaten der Meldung. Die Paarung hebelt die
+   Drittstaaten-Regel nicht aus, sie belegt nur eine zulässige Kandidatin — genau das, was
+   Gruppierung auch sonst tut.
+2. Die Meldung läuft mindestens 24 h.
+3. … und mindestens das Vierfache des Startfensters, das sie ankündigt. Sonst würde eine
+   zweite kurze Meldung desselben Starts als dessen eigene Vorankündigung gelten.
+4. Das Startfenster liegt vollständig in ihrer Laufzeit.
+5. Nennt sie ein tägliches Fenster, liegt das Startfenster darin.
+6. Mindestens eine ihrer Zonen ist deckungsgleich mit einer Zone des Starts.
+
+Die Schwellen für Bedingung 6 sind **relativ**, nicht absolut: zulässiger Versatz höchstens
+25 % der kleineren Zone, und die kleinere muss mindestens 60 % der größeren halten. Ein
+fester Kilometerwert wäre einem 20-km-Kreis zu weit und einer 500-km-Dropzone zu eng.
+
+**Welche Bedingung trägt?** Gemessen am Bestand vom 18.09.2026: 792 (NOTAM, Start)-Paare
+kämen in Frage. Die Zeitbedingungen bestehen einzeln 41 bis 73 % davon — sie allein würden
+nichts tragen. Die Deckungsgleichheit der Zonen schließt **alle 792** aus. Es gab dort keine
+einzige Paarung, auch keine falsche.
+
+**Eindeutigkeit ist Bedingung.** Passt eine Meldung auf zwei Starts, bleibt sie liegen. Eine
+falsche Zuordnung wägt in diesem Programm schwerer als ein Fall mehr zur Durchsicht.
+
+### Was die Paarung ändert — und was nicht
+
+Die Meldung erhält Nation und Startplatz des Starts, bekommt die Art `Advance notice` und
+verlässt das Review. Der **Start selbst bleibt unberührt**: die angekündigte Fläche *ist*
+die Sperrzone vom Starttag, als weitere Zone gezählt wäre sie eine Doppelzählung und würde
+Azimut und Streuung verfälschen. Die Paarung läuft deshalb erst *nach* der Gruppierung, und
+die Kennungen stehen in einem eigenen Feld, nicht unter den NOTAMs des Starttags.
+
+In der Startansicht steht dafür die Spalte **`Advance Notice`** mit Kennungen und Vorlauf
+(`A2371/26, P3423/26 (25 h)`). Der Klartext nennt sie und begründet, warum sie keine weitere
+Zone ist. Der JSON-Export führt `advance_notam_ids`, `advance_from` und
+`advance_notice_hours`.
+
+Trägersystem und Nutzlast gelten startweit und erreichen die Vorankündigung mit — in beide
+Richtungen. Wer auf ihrer Zeile das Trägersystem wählt, meint denselben Start.
+
+**Automatisch ausgeblendete Meldungen bleiben ausgeblendet.** Diese Liste ist die Kuration
+des Benutzers, kein Zwischenergebnis.
+
+### Ein Parserfehler, der dabei auffiel
+
+Das D-Item kennt beide Trennzeichen: `0200-0600` und `0200/0600`. Gelesen wurde nur der
+Bindestrich. Gemessen am Bestand vom 18.09.2026: von 100 D-Items mit Tagesfenster nutzen
+**acht** den Schrägstrich, meist in der Form `DLY BTN 1700/0400`. Für diese acht fand der
+Parser kein Fenster — und ohne Fenster greift der Daueranordnungs-Deckel und stuft auf
+`LOW` zurück. Im Bestand vom 18.09. lief keine davon über 720 h, die Fehlwirkung blieb also
+aus; die japanische Vorankündigung `P3423/26` schreibt ihr Fenster aber genau so.
+
+Drei Formen bleiben absichtlich unlesbar: `EVERY DAY,24 HOURS` heißt durchgehend aktiv, dort
+*soll* der Deckel greifen. `DLY BTN 1700/200` ist verstümmelt — `200` könnte `0200` oder
+`2000` meinen, und hier wird nicht geraten. Und volle Datum-Zeit-Paare (`2609170900 TO
+2609171500 …`) sind ein Terminplan, keine tägliche Wiederholung.
+
+## Automatisches Ausblenden
+
+NOTAMs mit Konfidenz `LOW` **und** mindestens einem Ausschlussbegriff landen beim Import
+direkt unter *Excluded*, nicht im Review.
+
+Der Anlass: Auf der echten FAA-FNS-Datei vom 18.09.2026 landeten **275 von 332** NOTAMs im
+Review — als Arbeitsmittel unbrauchbar. Die Regel nimmt **148** davon heraus, der Review
+sinkt auf 127. Die 14 erkannten Starts bleiben unverändert.
+
+**Die Konfidenzstufe ist die Bremse, nicht der Ausschlussbegriff.** Ein echtes
+Start-NOTAM, in dem zufällig `BALLOON` oder `ALT RESERVATION` auftaucht, erreicht über
+Q-Code, SFC-UNL und kurzes Aktivierungsfenster trotzdem `MEDIUM` oder `HIGH` und bleibt
+unangetastet. Der Ausschlussbegriff allein als Auslöser hätte diese Bremse nicht.
+
+Zehn der 148 tragen gleichzeitig eine Startsignatur oder einen Raumfahrt-Begriff. Alle
+wurden einzeln geprüft: Schießübungen (Taiwan, Türkei, Portugal, Indien), Amateurraketen
+in Black Rock (`AEROPAC`, `EXPERIMENTAL ROCKETRY`), ein indischer Luftraumplan und eine
+spanische Militärübung mit `MISSILE LAUNCH`. Kein Orbitalstart darunter.
+
+**Deine Entscheidung gewinnt dauerhaft.** Holst du ein automatisch ausgeblendetes NOTAM
+zurück, wandert sein Schlüssel nach `restored_events` in `notam_workspace.json` — der
+nächste Import blendet es nicht erneut aus. Ohne das wäre der Knopf wirkungslos: Solange
+die Meldung in der Tagesdatei steht, fiele sie beim nächsten Durchlauf sofort wieder heraus.
+
+Unter *Excluded* steht bei jedem Eintrag in der Spalte `Excluded by`, ob die Regel oder du
+entschieden hat, und daneben die Begründung mit den gefundenen Begriffen.
+
+> Die Regel greift bewusst **nicht** in `analyze_notams`, sondern erst in der Oberfläche.
+> So liegt die Entscheidung an einer Stelle — zusammen mit der Liste der von Hand
+> zurückgeholten Fälle. `exclusion_hits()` liefert die Begriffe als Liste, nicht als Satz:
+> das Scoring baut daraus eine Begründung, die Regel prüft nur, ob überhaupt einer da ist.
+> Beides auf denselben Prosatext zu stützen wäre dieselbe Falle wie bei der
+> FIR-Zuordnung.
+
 ## Manuelle Prüfung im Review
 
 Jedes NOTAM im Review lässt sich aufklappen und einzeln entscheiden. Angezeigt werden
@@ -345,6 +725,158 @@ darüber mit aufgelöst werden.
 
 Bestätigungen und Ausblendungen werden wie die Freitext-Eingaben in `notam_workspace.json`
 gespeichert und beim Start wieder eingelesen — sie überleben Seitenneuladen und Serverneustart.
+
+## Oberfläche: Gestaltungsregeln
+
+Die Oberfläche folgt einem festen Regelwerk statt dem Vorgabeaussehen des Baukastens.
+
+### Sprache
+
+Englische Fachbegriffe der Luft- und Raumfahrt statt Übersetzungen: `Launch Site`,
+`Launch Window`, `Confidence`, `Reliability`, `Drop Zone`. Das ist die Sprache, in der die
+NOTAM-Texte selbst geschrieben sind. Code, Kommentare und diese Datei bleiben deutsch.
+
+**Was bewusst deutsch bleibt:** die Spaltennamen der Dataframes (`Startnation`,
+`Weltraumbahnhof`, `Trägersystem` …) und die Werte der Nationen (`Russland`, `Nordkorea`).
+Erstere sind über Filter, Export und Review verdrahtet; letztere müssen die Spalte `Land`
+der FIR-Referenz treffen. Übersetzt wird beides erst bei der Anzeige, über `COLUMN_LABELS`
+beziehungsweise `nation_label()`.
+
+### Wortmarke
+
+```
+NOLA
+NotamLaunchAnalyzer.
+```
+
+Zweizeilig, ohne Wortzwischenräume, Versalbuchstaben trennen die Wörter, Schlusspunkt auf
+der zweiten Zeile. Die Wortteile sind farblich differenziert, damit sie trotz fehlender
+Zwischenräume lesbar bleiben — aber unbunt: Weiß für das Akronym, Silber und Cool Gray für
+die Langform. Darunter folgt mit demselben Durchschuss die Beschreibungszeile; diese
+Wiederholung hält den Kopf zusammen.
+
+Die Marke steht groß und mit viel ruhigem Umraum. Das ist keine Geschmacksfrage: Ruhe um
+eine Wortmarke herum lässt sie hochwertig wirken und ist Teil der Regel.
+
+### Typografie
+
+Zwei Stapel, beide ohne geladene Webschrift — das spart Lizenz und Netzzugriff:
+
+| Rolle | Stapel |
+|---|---|
+| Wortmarke, Überschriften | `"Helvetica Neue", Helvetica, Arial, "Liberation Sans", sans-serif` |
+| Mengensatz | `"Myriad Pro", Myriad, "Segoe UI", Arial, "Liberation Sans", sans-serif` |
+
+Die Grotesk tritt **nur** in Wortmarke und Überschriften auf, groß und mit Fläche, nie im
+Fließtext. Beide Stapel enden bei Arial als Ersatzschrift.
+
+> **Eine Falle dabei:** Streamlits Aufklapp-Pfeile sind Ligatur-Icons — im DOM steht ihr
+> Name als Text (`keyboard_arrow_down`), erst die Icon-Schrift macht daraus ein Zeichen.
+> Ein breiter `font-family`-Selektor über `[class*="st-"]` trifft diese Spans mit und
+> zeigt den Rohtext an. Die Icon-Schrift wird deshalb ausdrücklich wieder gesetzt.
+
+### Farben: unbunte Bühne, bunte Signale
+
+Flächen, Rahmen und Schrift sind neutral. Farbe trägt ausschließlich Information — Status,
+Konfidenz, die Marke manuell bestätigter Meldungen. Dadurch gewinnt jedes farbige Zeichen
+an Gewicht.
+
+| Rolle | Wert | Kontrast gegen `#141414` |
+|---|---|---|
+| Hintergrund | `#141414` | — |
+| Flächen | `#1E1E1E` | — |
+| Rahmen | `#757575` | **4,0:1** |
+| Text | `#F2F2F2` | 16,5:1 |
+| gedämpfter Text | `#ADAFAF` | 8,4:1 |
+
+Der Rahmenton ist bewusst hell: Vorher lag er bei **1,55:1** und damit unter der 3:1-Grenze
+für nicht-textliche Bedienelemente.
+
+### Was nicht vorkommt
+
+Keine Piktogramme. Keine Einblend- oder Hover-Effekte, kein Cursor-Strahl, keine
+Scroll-Animation. Keine farbigen Rahmenkarten, keine Icon-Dreier, kein Badge über der
+Überschrift. Keine Gedankenstriche in sichtbaren Texten — ausgenommen die
+Normalisierungstabelle, die sie aus eingehenden NOTAM-Texten in Bindestriche wandelt. Keine
+geladene Webschrift, keine Serif-Kursiv-Akzente, kein Grain über einem Verlauf.
+
+**Auch kein Milchglas.** Es war gebaut und wurde wieder entfernt. Der Grund ist nicht
+Geschmack: Glas lebt davon, dass etwas dahinterliegt. Über einer fast schwarzen Bühne
+bleibt nur ein hellerer Kasten mit Rahmen. Und das Optionsmenü, die einzige wirklich
+überlagernde Fläche, deckt bei `width="large"` fast das ganze Fenster ab — dahinter ist
+nichts mehr, was durchscheinen könnte. Dazu setzt Streamlit Fläche und Filter auf diesen
+Elementen teilweise selbst; dagegen anzukommen hieß, Spezifität gegen zur Laufzeit erzeugte
+Klassennamen zu bieten. Alle Flächen sind deshalb deckend, und die Gestaltungsregeln
+greifen nirgends in Streamlits eigene Container ein — das einzige `!important` im
+Stylesheet sichert die Icon-Schrift.
+
+Abschnitt 80 der Tests hält diese Regeln fest, damit sie nicht unbemerkt zurückkehren.
+
+## Was die Fremdprüfung vom 25.09.2026 gefunden hat
+
+Der Stand wurde gegen `docs/intent/nola-massstab.md` geprüft — von einem Prüfer mit
+**kaltem Kontext**, der weder diese README noch die Entwicklungsgespräche kennen durfte.
+Der Grund: Wer die Begründung des Autors liest, misst den Code an seiner eigenen
+Beschreibung statt am Maßstab. 639 grüne Tests hatten keinen dieser Fehler gefunden — sie
+prüften, dass der Code tut, was der Autor dachte, nicht was der Maßstab verlangt.
+
+### Behoben
+
+**Stichwörter trafen mitten in fremde Wörter.** `detect_nation_hint` verglich mit
+`begriff in text`, ohne Wortgrenzen. `SMART DRAGON 3` — ein **chinesischer** Träger, der in
+`traegersysteme_updated.csv` auch als solcher steht — wurde über `DRAGON` den USA
+zugeordnet; `SHARJAH` ergab Indien, `CASCADE` China, `NASAL` die USA, `LAS VEGAS` den
+Fremdbetreiber `VEGA`. Und dieser Treffer sticht die Drittstaaten-Regel, weil er vorher
+ausgewertet wird. Jetzt setzt `_hint_pattern()` Wortgrenzen, mit Ausnahme von Präfixen wie
+`CZ-`. Zusätzlich entfernt: `DRAGON` (mehrdeutig, `CREW DRAGON` bleibt) und `SHAR`
+(`SDSC` und `SRIHARIKOTA` decken es ab).
+
+**Daueranordnungen wurden zu Starts.** Ein japanisches NOTAM über Okinawa — *Abfangraketen
+könnten gegen ein aus Nordkorea gestartetes Objekt eingesetzt werden*, gültig 91 Tage —
+erreichte über das Wort `ROCKET` die Stufe `HIGH` und stand als nordkoreanischer Start im
+Archiv. `STANDING_ORDER_HOURS = 720.0` deckelt die Stufe auf `LOW`, wenn eine Meldung
+länger als 30 Tage **ohne** tägliches Fenster gilt. Die Grenze ist gemessen: längste
+belegte Startmeldung ohne Tagesfenster 216 h (NAVAREA), längste überhaupt 403 h (mit
+Fenster), Gegenfall 2192 h.
+
+**Die Gruppierung wies ihre Unsicherheit als Gewissheit aus.** `azimuth_spread_deg` wurde
+nur über Zonen innerhalb 8000 km gerechnet; lag höchstens eine dort, war das Ergebnis
+definitionsgemäß `0.0` statt „unbekannt". Ein Starship-Wiedereintritt mit Azimuten von
+87°, 331° und 180° meldete Streuung `0.0°`. Ausgewiesen wird jetzt die Streuung über alle
+Zonen — dieselbe Zahl, mit der die Zuverlässigkeit ohnehin schon rechnete.
+
+**Zwei Begründungen widersprachen sich selbst:** „all zones lie in the same direction
+(spread 151.6°)" und „each active for only about 91 days. A closure that high for that
+short a time…". Beide Texte sagen jetzt, was zutrifft.
+
+**US-Bezirkszentralen waren unerreichbar.** `RE_ICAO` verlangt vier Buchstaben, die 21
+ARTCC-Zeilen der FIR-Referenz (`ZLA`, `ZOA`, `ZAB` …) haben drei. Jedes US-Inlands-NOTAM
+fiel still auf den Geometrie-Weg. `RE_ARTCC` (`Z` plus zwei Buchstaben) schließt die Lücke,
+ohne jedes dreibuchstabige Freitextwort einzusammeln. Wirkung: der Geometrie-Weg schrumpfte
+von 49 auf 6 Fälle.
+
+**Eine Flugplatzkennung blockierte den Textbeleg.** Ein NOTAM mit Location `KVBG` und Text
+*„SPACE LAUNCH FROM VANDENBERG. FALCON 9 STARLINK"* ging in den Review, weil `KVBG` keine
+FIR der Referenz ist — der Textbeleg wurde gar nicht erst betrachtet. Er zählt jetzt, was
+genau der Regel des Maßstabs entspricht.
+
+**Eine geratene FIR galt als eigener Luftraum.** Ohne genannten ICAO-Code gewann die
+nächstgelegene Referenzzeile bis 1500 km. Die Referenz kennt aber keine FIR-Grenzen, nur
+den Sitz der Bezirkszentrale. Eine Sperrzone über **Nicaragua** landete so bei Miami und
+wurde ein Start von Cape Canaveral. `FIR_OWN_AIRSPACE_KM = 800.0` trennt jetzt zwei Dinge:
+Die FIR wird weiterhin gefunden und angezeigt, belegt aber jenseits von 800 km keine
+Staatszugehörigkeit mehr. Auch diese Grenze ist gemessen — Hainan 213 km, US-Inlandsfälle
+477–541 km, Nicaragua 1460 km.
+
+### Nicht behoben, weil kein Codefehler
+
+Der Prüfer meldete, der Bezugsfall *„Starship als indischer Start"* sei weiterhin
+erreichbar, und zeigte eine Trümmerzone in **indischer** FIR ohne Betreibernennung. Das
+echte `A0096/26` liegt jedoch in `FIMM` (Mauritius) und geht ohne Betreibernennung korrekt
+in den Review — die Drittstaaten-Regel greift. Der konstruierte Fall liegt in Indiens
+eigenem Luftraum, wo der Maßstab Geografie ausdrücklich zulässt, und ist von einem echten
+GSLV-Start nicht unterscheidbar. Eingeordnet als **Vertrag missverstanden**: Wer das enger
+will, muss den Maßstab präzisieren, nicht den Code.
 
 ## Wichtige Einschränkungen
 

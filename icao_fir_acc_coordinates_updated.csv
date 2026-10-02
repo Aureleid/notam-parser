@@ -85,25 +85,25 @@ KZAK,37.6188,-122.375,Oakland Oceanic FIR,USA,USA;Russland;China;Nordkorea
 OIIX,35.6892,51.389,Tehran FIR,Iran,Iran
 OPKR,24.8607,67.0011,Karachi FIR,Pakistan,Iran;Indien
 OPLR,31.5204,74.3587,Lahore FIR,Pakistan,Indien
-FAJA,-30.0000,25.0000,Johannesburg Oceanic FIR,Suedafrika,Russland;Indien
+FAJA,-30.0,25.0,Johannesburg Oceanic FIR,Suedafrika,Russland;Indien
 FIMM,-20.1609,57.5012,Mauritius FIR,Mauritius,Indien;Russland
-NFFF,-17.7500,177.4500,Nadi FIR,Fidschi,Russland;China;Nordkorea
-NTTT,-17.5500,-149.6000,Tahiti FIR,Franz. Polynesien,Russland;China
-NZZC,-41.0000,174.0000,New Zealand FIR,Neuseeland,Russland;China
-NZZO,-45.0000,-175.0000,Auckland Oceanic FIR,Neuseeland,Russland;China
+NFFF,-17.75,177.45,Nadi FIR,Fidschi,Russland;China;Nordkorea
+NTTT,-17.55,-149.6,Tahiti FIR,Franz. Polynesien,Russland;China
+NZZC,-41.0,174.0,New Zealand FIR,Neuseeland,Russland;China
+NZZO,-45.0,-175.0,Auckland Oceanic FIR,Neuseeland,Russland;China
 OBBB,26.0667,50.5577,Bahrain FIR,Bahrain,Iran
 OEJD,21.4858,39.1925,Jeddah FIR,Saudi-Arabien,Iran
 OKAC,29.3759,47.9774,Kuwait FIR,Kuwait,Iran
 OMAE,24.4539,54.3773,Emirates FIR,VAE,Iran
-OOMM,23.5880,58.3829,Muscat FIR,Oman,Iran
+OOMM,23.588,58.3829,Muscat FIR,Oman,Iran
 ORBB,33.3152,44.3661,Baghdad FIR,Irak,Iran
-SAEF,-51.6200,-57.8600,Ezeiza Oceanic FIR,Argentinien,Russland;China
-SCIZ,-27.1500,-109.4300,Isla de Pascua Oceanic FIR,Chile,Russland;China
+SAEF,-51.62,-57.86,Ezeiza Oceanic FIR,Argentinien,Russland;China
+SCIZ,-27.15,-109.43,Isla de Pascua Oceanic FIR,Chile,Russland;China
 UTAA,37.9601,58.3261,Ashgabat FIR,Turkmenistan,Iran;Russland
 VCCF,6.9271,79.8612,Colombo FIR,Sri Lanka,Indien
 VRMF,4.1755,73.5093,Male FIR,Malediven,Indien
-YBBB,-20.0000,148.0000,Brisbane FIR,Australien,Russland;China
-YMMM,-40.0000,140.0000,Melbourne FIR (inkl. Suedpolarmeer),Australien,Russland;China
+YBBB,-20.0,148.0,Brisbane FIR,Australien,Russland;China
+YMMM,-40.0,140.0,Melbourne FIR (inkl. Suedpolarmeer),Australien,Russland;China
 ZAB,35.1408,-106.5681,Albuquerque ARTCC / FIR,USA,USA
 ZTL,33.3797,-84.2969,Atlanta ARTCC / FIR,USA,USA
 ZBW,42.7372,-71.4794,Boston ARTCC / FIR,USA,USA
@@ -128,3 +128,4 @@ KZNY,40.785,-73.0972,New York Oceanic FIR,USA,USA
 KZWY,25.8203,-80.3236,Miami Oceanic FIR,USA,USA
 ZSU,18.4394,-65.9928,San Juan CERAP / FIR,USA (Puerto Rico),USA
 ZUA,13.4839,144.7972,Guam CERAP / FIR,USA (Guam),USA
+MMFR,19.4326,-99.1332,Mexico FIR,Mexiko,USA

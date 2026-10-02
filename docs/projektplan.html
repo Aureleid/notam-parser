@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NOLA Projektplan</title>
+</head>
+<body>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: links der Funktionsbaum (Mindmap als Worktree), rechts die grossen Schritte als Chat. */
+:root{
+  --bg:#eef0f3; --panel:#f8f9fb; --ink:#171b22; --mute:#5d6572; --line:#cfd5de;
+  --s1:#2f6fd6; --s2:#b8680f; --s3:#1e8a5a; --s4:#7a4fc7; --s5:#c43d6b; --s6:#0e8a96; --s7:#8a7a10; --s8:#4b5563;
+  --open:#c2410c; --hl:#fff3c4;
+  --f-sans:"IBM Plex Sans",system-ui,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f1218; --panel:#171b23; --ink:#e6e9ef; --mute:#98a1af; --line:#2c3340;
+  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5;
+  --open:#fb923c; --hl:#3a3410; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f1218; --panel:#171b23; --ink:#e6e9ef; --mute:#98a1af; --line:#2c3340;
+  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5;
+  --open:#fb923c; --hl:#3a3410; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--f-sans);padding-inline:16px;padding-block:20px}
+header{max-width:1280px;margin:0 auto 16px;display:flex;flex-wrap:wrap;gap:8px 24px;align-items:baseline;justify-content:space-between}
+h1{font:600 22px/1.2 var(--f-sans);margin:0;letter-spacing:-.01em}
+.sub{color:var(--mute);font-size:13px}
+.stats{display:flex;gap:16px;font:12px var(--f-mono);color:var(--mute);flex-wrap:wrap}
+.stats b{color:var(--ink);font-weight:500}
+main{max-width:1280px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:16px;align-items:start}
+@media(max-width:860px){main{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px}
+.bar{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.bar h2{font:600 11px var(--f-mono);text-transform:uppercase;letter-spacing:.08em;margin:0;color:var(--mute)}
+button{font:12px var(--f-sans);background:transparent;color:var(--ink);border:1px solid var(--line);border-radius:4px;padding:3px 9px;cursor:pointer}
+button:hover{background:var(--bg)} :focus-visible{outline:2px solid var(--s1);outline-offset:1px}
+#tree{padding:10px 8px 14px 12px;overflow-x:auto}
+ul{list-style:none;margin:0;padding:0}
+ul ul{margin-left:11px;padding-left:14px;border-left:1px solid var(--line)}
+li{margin:0}
+.row{display:flex;align-items:baseline;gap:7px;padding:2px 6px;border-radius:4px;cursor:default;min-width:0}
+.row.has{cursor:pointer}
+.row:hover{background:var(--bg)}
+.tw{flex:none;width:12px;font:11px var(--f-mono);color:var(--mute);text-align:center}
+.dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--c);transform:translateY(0)}
+.t{font-weight:500}
+.d1>.row .t{font-size:15px;font-weight:600}
+.d0>.row .t{font-size:17px;font-weight:600}
+.f{font:11.5px var(--f-mono);color:var(--mute);overflow-wrap:anywhere}
+.badge{font:10.5px var(--f-mono);padding:0 6px;border-radius:9px;border:1px solid var(--c);color:var(--c);white-space:nowrap}
+.badge.open{--c:var(--open)}
+.collapsed>ul{display:none}
+li.dim>.row{opacity:.28}
+li.hit>.row{background:var(--hl)}
+.chat{position:sticky;top:12px;max-height:calc(100vh - 24px);display:flex;flex-direction:column}
+@media(max-width:860px){.chat{position:static;max-height:none}}
+#chat{overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px}
+.msg{border:1px solid var(--line);border-left:4px solid var(--c);border-radius:6px;padding:10px 12px;background:var(--bg);cursor:pointer;scroll-margin:8px}
+.msg.on{box-shadow:0 0 0 2px var(--c)}
+.msg h3{margin:0 0 4px;font:600 11px var(--f-mono);text-transform:uppercase;letter-spacing:.07em;color:var(--c)}
+.msg h4{margin:0 0 6px;font:600 15px/1.3 var(--f-sans);text-wrap:balance}
+.msg p{margin:0 0 6px;color:var(--ink)} .msg p:last-child{margin:0}
+.msg .res{font:12px var(--f-mono);color:var(--mute)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;padding:8px 12px;border-top:1px solid var(--line);font-size:12px;color:var(--mute)}
+.legend span{display:inline-flex;gap:5px;align-items:center}
+.note{max-width:1280px;margin:12px auto 0;color:var(--mute);font-size:12px}
+</style>
+
+<header>
+  <div>
+    <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
+    <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
+  </div>
+  <div class="stats"><span><b>6.692</b> Zeilen app.py</span><span><b>719</b> Tests grün</span><span><b>31</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>51</b> Trägersysteme</span></div>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="bar"><h2>Funktionsbaum</h2><span><button id="exp">Alles aufklappen</button> <button id="col">Zuklappen</button> <button id="clr">Auswahl löschen</button></span></div>
+    <div id="tree"></div>
+  </section>
+  <aside class="panel chat">
+    <div class="bar"><h2>Große Schritte</h2><span class="sub">8 Schritte + offene Punkte</span></div>
+    <div id="chat"></div>
+    <div class="legend" id="legend"></div>
+  </aside>
+</main>
+<p class="note">Die Reihenfolge der Schritte ist aus STATUS.md, README.md und dem Code rekonstruiert, denn das Repository enthält bisher nur einen Commit.</p>
+
+<script>
+var STEPS=[
+{id:1,name:"Erkennung",h:"Aus NOTAM-Text Koordinaten, Zeiten und Startverdacht lesen",
+ p:"Das Fundament: sieben Koordinatenformate, Tagesfenster, NAVAREA-Zeiträume und eine Startsignatur, weil chinesische und russische Start-NOTAMs kein Raumfahrt-Stichwort enthalten.",
+ r:"Ergebnis: jede Meldung bekommt Zonen, Zeitfenster und eine Konfidenz."},
+{id:2,name:"Zuordnung",h:"Nation, FIR und Startplatz zuordnen",
+ p:"Die Spalte Land der FIR-Referenz trennt Zielnationen von Drittstaaten. Das Trägersystem im Text schränkt die Startplatz-Kandidaten ein, bevor die Entfernung entscheidet.",
+ r:"Ergebnis: Andøya wird nicht mehr als russischer Start geführt."},
+{id:3,name:"Gruppierung",h:"Mehrere Sperrzonen zu einem Start zusammenfassen",
+ p:"Ein Start sperrt oft mehrere Dropzonen entlang der Bahn. Zeitcluster, Anker-Regel gegen Selbstbestätigung und Ausreißer-Trennung bilden daraus einen Launch.",
+ r:"Ergebnis: Launch Overview zählt Starts statt einzelne NOTAMs."},
+{id:4,name:"Bahnrechnung",h:"Startazimut, Inklination und Orbitklasse berechnen",
+ p:"Aus den Zonen folgt der Azimut, daraus die Inklination mit Erdrotation. Die Startrichtungs-Prüfung (Sektor 225–325° ausgeschlossen) trennt Starts von Wiedereintritten.",
+ r:"Ergebnis: Orbitbänder, z. B. SSO 93–103°, auf die Streuung der Abschätzung geweitet."},
+{id:5,name:"Oberfläche",h:"Bedienoberfläche mit sechs Reitern und manueller Prüfung",
+ p:"Launch Overview, Flightpath Map, NOTAM Data, Export, Review und Excluded. Klartext-Auswertung je Start, Bestätigen, Ablehnen und Ausblenden, Sprung von der Übersicht zum Volltext.",
+ r:"Ergebnis: tägliche Auswertung ohne Zeilen in Tabellen suchen."},
+{id:6,name:"Referenz & Archiv",h:"Referenzdaten, Trägersystem, Nutzlast, Startarchiv und Speicherung",
+ p:"Optionsmenü zur Pflege von Startplätzen, FIRs und Trägersystemen mit Rückgängig. Trägersystem und Payload gelten für alle Zonen eines Starts. Das Startarchiv wird von der App geschrieben und aktualisiert statt zu verdoppeln.",
+ r:"Ergebnis: Änderungen landen in den CSVs, der Arbeitsstand in notam_workspace.json."},
+{id:7,name:"Vorfilter & Seestarts",h:"Review verkleinern und Seestarts erkennen",
+ p:"LOW plus Ausschlussbegriff geht direkt nach Excluded: 148 von 275 Review-Fällen auf der Echtdatei, ohne einen Start zu verlieren. Bei Seestarts wird der Startpunkt aus der Geometrie abgeleitet.",
+ r:"Ergebnis: kürzerer Review und eigenes Protokoll seestarts_updated.csv."},
+{id:8,name:"Prüfung & Veröffentlichung",h:"Externe Prüfung, Oberfläche und Veröffentlichung",
+ p:"Prüfung gegen docs/intent/nola-massstab.md am 25.09.2026, sechs Befunde behoben. Farbschema aus einer Referenzoberfläche gemessen, App unter notam-space-analyzer.streamlit.app.",
+ r:"Ergebnis: Repository Aureleid/notam-parser, 719 Tests grün."},
+{id:0,name:"Offen",h:"Offene Punkte",
+ p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten, .bak-Kopie der Referenzdateien.",
+ r:"Quelle: STATUS.md, Abschnitt Offene Punkte."}
+];
+
+// t=Titel, f=Funktionen, s=Schritt, o=offen, n=Zusatzmarke, c=Kinder
+var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
+{t:"Eingabe",s:5,c:[
+ {t:"Datei-Import",n:"CSV · XLS · XLSX",f:"read_notam_table, _promote_header, map_notam_columns",c:[{t:"Vorspann-Erkennung",f:"_looks_like_header"}]},
+ {t:"Freitext-Feld",f:"normalize_pasted_text, split_pasted_notams",c:[{t:"Identische Verarbeitung wie Datei",f:"combine_sources"}]},
+ {t:"Beispieldaten",f:"build_demo_notams"}]},
+{t:"Erkennung",s:1,c:[
+ {t:"Koordinaten-Engine",n:"7 Formate",f:"extract_coordinates, _pair_*",c:[
+   {t:"Kompakt, DM mit Strich, DMS gespaced, Symbol, Dezimal",f:"_dms_to_decimal, _valid_latlon"},
+   {t:"Q-Linie und Radius",f:"extract_qline_point, extract_radius_km"},
+   {t:"Zonen aus Text",f:"extract_zones"}]},
+ {t:"Zeit",c:[
+   {t:"Datum und Zeitfenster",f:"parse_notam_datetime"},
+   {t:"D-Item-Tagesfenster",f:"daily_windows, daily_window_hours"},
+   {t:"NAVAREA-Zeiträume",f:"extract_navarea_period"}]},
+ {t:"Auslöser und Startsignatur",c:[
+   {t:"Trigger-Erkennung",f:"detect_triggers"},
+   {t:"Startsignatur",n:"Q-Code + SFC/UNL + kurzes Fenster",f:"has_launch_signature, extract_qcode"},
+   {t:"Start oder Wiedereintritt",f:"classify_event_kind"}]},
+ {t:"Konfidenz-Scoring",n:"HIGH · MEDIUM · LOW",f:"score_confidence, zone_reliability",s2:7,c:[
+   {t:"Ausschlussbegriffe",f:"exclusion_hits"},
+   {t:"Vorfilterung nach Excluded",f:"auto_hide_reason",s:7}]},
+ {t:"Höhenprofil",f:"extract_altitude_profile"}]},
+{t:"Zuordnung",s:2,c:[
+ {t:"FIR und Drittstaaten-Regel",f:"_find_fir, load_firs",c:[{t:"Spalte Land trennt Zielnation und Drittstaat"},{t:"Fernzonen-Behandlung"}]},
+ {t:"Nationen",n:"CN · RU · IN · IR · KP · US",f:"detect_nation_hint, detect_foreign_operator"},
+ {t:"Startplatz",n:"31 Plätze",f:"_find_spaceport, detect_spaceport_hint, _restrict_candidates",c:[
+   {t:"Trägersystem schränkt Kandidaten ein",n:"51 Systeme",f:"load_vehicles, vehicle_nation"},
+   {t:"Entfernung entscheidet danach",f:"surface_distance_km"}]},
+ {t:"Startrichtungs-Prüfung",s:4,f:"initial_bearing_deg"}]},
+{t:"Gruppierung",s:3,c:[
+ {t:"Launches bilden",f:"group_launches, _build_group, LaunchGroup",c:[
+   {t:"Zeitcluster",f:"_cluster_by_time, _same_launch_window"},
+   {t:"Ausreißer trennen",f:"_split_cluster, _angular_spread"},
+   {t:"Startplatz je Gruppe",f:"_select_spaceport_for_zones"},
+   {t:"Doppelte NOTAMs",f:"_drop_duplicate_events"}]},
+ {t:"Vorankündigungen",n:"Code da, laut STATUS offen",o:1,f:"is_advance_announcement, pair_advance_announcements"}]},
+{t:"Bahnrechnung",s:4,c:[
+ {t:"Azimut und Inklination",f:"orbital_azimuth_deg, estimate_inclination_deg"},
+ {t:"Orbitklasse",n:"SSO 93–103°",f:"classify_orbit"},
+ {t:"Geodäsie",f:"haversine_km, great_circle_path, destination_point, polygon_centroid"}]},
+{t:"Seestarts",s:7,c:[
+ {t:"Startpunkt aus Geometrie",f:"derive_launch_point, cluster_zone_points, sea_launch_code"},
+ {t:"Eigenes Protokoll",f:"load_sea_launches, merge_sea_launches, persist_sea_launches",c:[{t:"seestarts_updated.csv",n:"fließt nicht in die Platzsuche zurück"}]}]},
+{t:"Bedienoberfläche",s:5,c:[
+ {t:"Sechs Reiter",f:"main, st.segmented_control",c:[
+   {t:"Launch Overview",f:"groups_to_dataframe, describe_launch"},
+   {t:"Flightpath Map",f:"build_event_map"},
+   {t:"NOTAM Data",f:"events_to_dataframe"},
+   {t:"Export",f:"group_to_export_dict, event_to_export_dict"},
+   {t:"Review"},
+   {t:"Excluded",s:7}]},
+ {t:"Manuelle Prüfung",f:"_confirm_launch, _reject_launch, _hide_event, _unhide_all"},
+ {t:"Sprung zum Volltext",f:"_zur_notam_springen"},
+ {t:"Gestaltung",s:8,c:[{t:"Zweizeilige Wortmarke"},{t:"Unbunte Bühne, bunte Signale"},{t:"Farbschema in .streamlit/config.toml"}]}]},
+{t:"Referenzdaten und Archiv",s:6,c:[
+ {t:"Optionsmenü",f:"_reference_dialog, _spaceport_editor, _fir_editor, _vehicle_editor",c:[{t:"Rückgängig-Stapel",f:"_push_undo, _undo_reference"}]},
+ {t:"Trägersystem zuweisen",f:"_vehicle_picker, apply_vehicle_assignments"},
+ {t:"Payload eintragen",f:"_payload_field, apply_payload_assignments"},
+ {t:"Startarchiv",f:"merge_archive, archive_row, persist_archive",c:[{t:"startarchiv_updated.csv",n:"eine Zeile je Start"}]},
+ {t:"Persistenz",f:"persist_reference, save_workspace, load_workspace",c:[{t:"CSV-Referenzen"},{t:"notam_workspace.json"}]}]},
+{t:"Qualität und Betrieb",s:8,c:[
+ {t:"test_app.py",n:"719 Tests · 2.647 Zeilen"},
+ {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
+ {t:"Veröffentlichung",n:"Streamlit Community Cloud"},
+ {t:"Dokumentation",n:"README · STATUS · docs/intent"}]},
+{t:"Offene Punkte",s:0,o:1,c:[
+ {t:"Demo-Modus, schreibgeschützt",o:1},
+ {t:"Hint-Listen aus Referenz ableiten",o:1,f:"NATION_HINTS, SPACEPORT_HINTS"},
+ {t:"Archivspalten Art und Zuverlässigkeit",o:1},
+ {t:"Zwei Startversuche desselben Starts",o:1},
+ {t:"Automatische .bak-Kopie",o:1}]}
+]};
+
+var COL={0:"var(--open)",1:"var(--s1)",2:"var(--s2)",3:"var(--s3)",4:"var(--s4)",5:"var(--s5)",6:"var(--s6)",7:"var(--s7)",8:"var(--s8)"};
+var sel=null, tree=document.getElementById("tree");
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
+
+function build(n,depth,inh){
+  var step=(n.s!==undefined)?n.s:inh;
+  var li=document.createElement("li");
+  li.className="d"+Math.min(depth,2); li.dataset.step=step;
+  var has=n.c&&n.c.length;
+  var row=document.createElement("div"); row.className="row"+(has?" has":"");
+  row.style.setProperty("--c",COL[step]);
+  var h='<span class="tw">'+(has?"▾":"·")+'</span><span class="dot"></span><span class="t">'+esc(n.t)+'</span>';
+  if(n.n) h+='<span class="badge'+(n.o?" open":"")+'" style="--c:'+COL[step]+'">'+esc(n.n)+'</span>';
+  if(n.o&&!n.n) h+='<span class="badge open">offen</span>';
+  if(n.f) h+='<span class="f">'+esc(n.f)+'</span>';
+  row.innerHTML=h; li.appendChild(row);
+  if(has){
+    var ul=document.createElement("ul");
+    n.c.forEach(function(c){ul.appendChild(build(c,depth+1,step))});
+    li.appendChild(ul);
+    row.addEventListener("click",function(){toggle(li)});
+  } else {
+    row.addEventListener("click",function(){pick(step)});
+  }
+  return li;
+}
+function toggle(li,force){
+  var c=force===undefined?!li.classList.contains("collapsed"):force;
+  li.classList.toggle("collapsed",c);
+  var tw=li.firstChild.firstChild; if(tw.textContent!=="·") tw.textContent=c?"▸":"▾";
+}
+function all(c){tree.querySelectorAll("li").forEach(function(li){if(li.querySelector(":scope>ul")&&li.parentElement!==rootUl)toggle(li,c)})}
+
+var rootLi=build(TREE,0,0), rootUl=document.createElement("ul"); rootUl.appendChild(rootLi); tree.appendChild(rootUl);
+rootLi.firstChild.addEventListener("click",function(){});
+rootLi.firstChild.classList.remove("has");
+// Wurzel bleibt offen, erste Ebene offen, tiefere zugeklappt
+tree.querySelectorAll("li.d2").forEach(function(li){if(li.querySelector(":scope>ul"))toggle(li,true)});
+document.getElementById("exp").onclick=function(){tree.querySelectorAll("li").forEach(function(li){if(li.querySelector(":scope>ul"))toggle(li,false)})};
+document.getElementById("col").onclick=function(){tree.querySelectorAll("li").forEach(function(li){if(li!==rootLi&&li.querySelector(":scope>ul"))toggle(li,true)})};
+document.getElementById("clr").onclick=function(){pick(null)};
+
+var chat=document.getElementById("chat"), leg=document.getElementById("legend");
+STEPS.forEach(function(s){
+  var d=document.createElement("div"); d.className="msg"; d.id="m"+s.id; d.style.setProperty("--c",COL[s.id]);
+  d.innerHTML='<h3>'+(s.id?'Schritt '+s.id+' · ':'')+esc(s.name)+'</h3><h4>'+esc(s.h)+'</h4><p>'+esc(s.p)+'</p><p class="res">'+esc(s.r)+'</p>';
+  d.addEventListener("click",function(){pick(sel===s.id?null:s.id,true)});
+  chat.appendChild(d);
+  var l=document.createElement("span"); l.innerHTML='<i class="dot" style="--c:'+COL[s.id]+';display:inline-block"></i>'+esc(s.name); leg.appendChild(l);
+});
+
+function pick(id,fromChat){
+  sel=id;
+  tree.querySelectorAll("li").forEach(function(li){
+    var m=id!==null&&+li.dataset.step===id;
+    li.classList.toggle("hit",m); li.classList.toggle("dim",id!==null&&!m);
+    if(m){var p=li.parentElement;while(p&&p!==tree){if(p.tagName==="LI")toggle(p,false);p=p.parentElement}}
+  });
+  chat.querySelectorAll(".msg").forEach(function(m){m.classList.toggle("on",id!==null&&m.id==="m"+id)});
+  if(id!==null&&!fromChat){var m=document.getElementById("m"+id);if(m)m.scrollIntoView({block:"nearest",behavior:"smooth"})}
+}
+</script>
+
+</body>
+</html>
