@@ -3031,6 +3031,78 @@ check("das Archiv wird einmal je Durchlauf gelesen, nicht je Zeile",
       quelle_x.count("pad_historie = load_archive(ARCHIVE_CSV)") == 1
       and quelle_x.count("pad_historie, group_keys") == 2)
 
+print("== 89. Archivschluessel: Identitaet statt Momentaufnahme ==")
+# Der Schluessel enthielt den Startplatz. Der aendert sich aber, wenn die
+# Erkennung besser wird - und erzeugte dann eine zweite Zeile statt eines
+# Updates. Im Bestand stehen dadurch drei Zeilen fuer den chinesischen Seestart
+# vom 12.02.2026, F0511/26 in allen drei.
+
+print("-- Der Startplatz gehoert nicht zur Identitaet --")
+_a = {"NOTAM": "F0511/26, A0443/26", "Startdatum": "12.02.2026", "Weltraumbahnhof": "WSLC"}
+_b = dict(_a, Weltraumbahnhof="SEA-21N112E")
+check("Seestart-Ableitung verschiebt den Platz, nicht die Identitaet",
+      app.archive_key(_a) == app.archive_key(_b), app.archive_key(_b))
+check("  ... und erzeugt damit keine zweite Zeile",
+      len(app.merge_archive(pd.DataFrame([_a]), [_b])) == 1)
+_c = dict(_a, Weltraumbahnhof="HAIN")
+check("eine Pad-Wahl verschiebt sie auch nicht",
+      app.archive_key(_a) == app.archive_key(_c))
+check("der Platz der NEUEREN Auswertung gewinnt",
+      app.merge_archive(pd.DataFrame([_a]), [_c])["Weltraumbahnhof"].iloc[0] == "HAIN",
+      app.merge_archive(pd.DataFrame([_a]), [_c])["Weltraumbahnhof"].iloc[0])
+check("Datum und Kennungen tragen die Identitaet",
+      app.archive_key(_a) == "12.02.2026|A0443/26,F0511/26", app.archive_key(_a))
+check("verschiedene Tage bleiben verschieden",
+      app.archive_key(_a) != app.archive_key(dict(_a, Startdatum="11.02.2026")))
+check("verschiedene Kennungen bleiben verschieden",
+      app.archive_key(_a) != app.archive_key(dict(_a, NOTAM="F0494/26")))
+check("die Reihenfolge der Kennungen ist gleichgueltig",
+      app.archive_key(_a) == app.archive_key(dict(_a, NOTAM="A0443/26, F0511/26")))
+
+print("-- Der ganze Weg: Pad setzen verdoppelt nichts mehr --")
+ev_k, st_k = app.analyze_notams(df_w, sp, fir, min_confidence="MEDIUM")
+g_k = [x for x in st_k["groups"] if x.spaceport_code][0]
+zeile1 = app.archive_row(g_k, ev_k)
+app.apply_launch_site_assignments(ev_k, st_k["groups"], sp, {ev_k[0].key: "HAIN"})
+zeile2 = app.archive_row(g_k, ev_k)
+check("vor und nach der Pad-Wahl derselbe Schluessel",
+      app.archive_key(zeile1) == app.archive_key(zeile2))
+zusammen = app.merge_archive(pd.DataFrame([zeile1]), [zeile2])
+check("  ... eine Zeile, nicht zwei", len(zusammen) == 1, len(zusammen))
+check("  ... und sie traegt das gesetzte Pad",
+      zusammen["Weltraumbahnhof"].iloc[0] == "HAIN")
+
+print("-- Gespeicherte Loeschungen bleiben Loeschungen --")
+# Alte Schluessel trugen den Platz als Mittelteil. Ohne Umstellung kaemen von
+# Hand geloeschte Zeilen beim naechsten Durchlauf zurueck.
+check("dreiteilige Altschluessel werden umgestellt",
+      app.migrate_archive_keys(["21.09.2025|WSLC|A1234/25"]) == {"21.09.2025|A1234/25"},
+      app.migrate_archive_keys(["21.09.2025|WSLC|A1234/25"]))
+check("  ... zweiteilige bleiben unberuehrt",
+      app.migrate_archive_keys(["12.02.2026|F0511/26"]) == {"12.02.2026|F0511/26"})
+check("  ... die Umstellung ist wiederholbar",
+      app.migrate_archive_keys(app.migrate_archive_keys(["21.09.2025|WSLC|A1234/25"]))
+      == {"21.09.2025|A1234/25"})
+check("  ... leere Eingabe bricht nicht", app.migrate_archive_keys([]) == set())
+check("beim Laden des Arbeitsstands wird umgestellt",
+      "migrate_archive_keys(" in quelle_x
+      and quelle_x.count("migrate_archive_keys(") >= 2)
+_geloescht = app.migrate_archive_keys(["12.02.2026|WSLC|A0443/26,F0511/26"])
+check("eine geloeschte Zeile kommt auch nach einer Platzaenderung nicht zurueck",
+      len(app.merge_archive(pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)),
+                            [_b], entfernt=_geloescht)) == 0)
+
+print("-- Was offen bleibt, steht im Code --")
+# Ehrlichkeit statt Scheinloesung: die Kennungsmenge waechst, wenn die
+# GRUPPIERUNG besser wird, und dann aendert sich der Schluessel trotzdem.
+check("die verbleibende Haelfte ist benannt",
+      "Kennungs-Ueberschneidung" in app.archive_key.__doc__,
+      app.archive_key.__doc__ is not None)
+_d = {"NOTAM": "F0511/26", "Startdatum": "12.02.2026", "Weltraumbahnhof": "WSLC"}
+check("  ... und sie besteht nachweislich noch",
+      app.archive_key(_d) != app.archive_key(_a),
+      (app.archive_key(_d), app.archive_key(_a)))
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

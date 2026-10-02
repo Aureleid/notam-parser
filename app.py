@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -4607,23 +4607,54 @@ def archive_row(group: LaunchGroup, events: Sequence[LaunchEvent]) -> Dict[str, 
 
 def archive_key(row: Dict[str, Any]) -> str:
     """
-    Erkennungsmerkmal einer Archivzeile: Startdatum, Startplatz und Kennungen.
+    Erkennungsmerkmal einer Archivzeile: Startdatum und NOTAM-Kennungen.
 
-    Damit findet ein spaeterer Import denselben Start wieder und aktualisiert
+    Damit findet ein spaeterer Durchlauf denselben Start wieder und aktualisiert
     ihn, statt ihn ein zweites Mal anzulegen.
+
+    Der Startplatz gehoert ausdruecklich NICHT dazu, obwohl er einmal darin
+    stand. Er ist eine Eigenschaft des Starts, nicht seine Identitaet - und er
+    aendert sich, wenn die Erkennung besser wird:
+
+      - Die Seestart-Ableitung verschob einen Start von WSLC auf SEA-21N112E.
+      - Eine von Hand gesetzte Pad-Wahl verschiebt ihn von WSLC auf HAIN.
+
+    Beides ergab einen neuen Schluessel und damit eine zweite Archivzeile mit
+    identischen NOTAM-Kennungen. Im Bestand stehen dadurch drei Zeilen fuer den
+    chinesischen Seestart vom 12.02.2026 - F0511/26 in allen drei.
+
+    Gemessen am Bestand vom 02.10.2026: 16 Zeilen ergeben mit und ohne
+    Startplatz je 16 Schluessel; keine bestehende Zeile fiel zusammen.
+
+    Was bleibt: wird die GRUPPIERUNG besser, waechst die Kennungsmenge
+    (F0511/26 -> F0511/26, A0443/26 -> drei Kennungen) und der Schluessel
+    aendert sich trotzdem. Das zu loesen heisst, ueber Kennungs-Ueberschneidung
+    zu suchen statt auf Gleichheit zu pruefen - eine Aenderung der
+    Zusammenfuehrungs-Semantik, die eine Entscheidung braucht.
     """
     kennungen = sorted(
         teil.strip().upper()
         for teil in str(row.get("NOTAM", "")).split(",")
         if teil.strip()
     )
-    return "|".join(
-        [
-            str(row.get("Startdatum", "")).strip(),
-            str(row.get("Weltraumbahnhof", "")).strip().upper(),
-            ",".join(kennungen),
-        ]
-    )
+    return "|".join([str(row.get("Startdatum", "")).strip(), ",".join(kennungen)])
+
+
+def migrate_archive_keys(keys: Iterable[str]) -> Set[str]:
+    """
+    Bringt gespeicherte Loeschschluessel auf die heutige Form.
+
+    Bis zum 02.10.2026 enthielt der Schluessel den Startplatz als Mittelteil
+    ("21.09.2025|WSLC|A1234/25"). Ohne diese Umstellung kaemen von Hand
+    geloeschte Archivzeilen beim naechsten Durchlauf zurueck.
+    """
+    umgestellt: Set[str] = set()
+    for schluessel in keys or ():
+        teile = str(schluessel).split("|")
+        if len(teile) == 3:
+            teile = [teile[0], teile[2]]
+        umgestellt.add("|".join(teile))
+    return umgestellt
 
 
 def merge_archive(
@@ -6290,7 +6321,9 @@ def main() -> None:
                 if isinstance(roh, dict)
                 else {}
             )
-        st.session_state["archiv_removed"] = set(gespeichert.get("archiv_removed", []))
+        st.session_state["archiv_removed"] = migrate_archive_keys(
+            gespeichert.get("archiv_removed", [])
+        )
         st.session_state["restored_events"] = set(gespeichert.get("restored_events", []))
         st.session_state["seestarts_removed"] = set(
             gespeichert.get("seestarts_removed", [])

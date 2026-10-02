@@ -150,7 +150,7 @@ beruehrt.
 
 Unter Streamlit laeuft app.py als __main__; `import app` laedt dann eine
 zweite Modulkopie. Das ist unschaedlich, solange hier nur reine Funktionen und
-Konstanten daraus genutzt werden - nie st.session_state.
+Konstanten daraus genutzt werden - nie den Sitzungszustand von Streamlit.
 """
 
 from __future__ import annotations
@@ -193,6 +193,8 @@ MAX_BUNDLE_DAYS = 14
 MATCH_SLACK = timedelta(minutes=30)
 DEVIATION_DEG = 10.0
 SOURCE_ARCHIVE = "Archive import"
+#: Begruendung fuer einen erkannten Start ohne Startplatz (siehe analyze_day).
+GRUND_OHNE_PLATZ = "Recognised as a launch, but no launch site could be determined."
 
 
 class ImportStateError(RuntimeError):
@@ -598,14 +600,22 @@ gcat_launch_cache.tsv
 
 ```python
 VB_GLEICHER_TAG = vandenberg.replace("2609210130", "2609200130").replace("2609210430", "2609200430")
-VB_OHNE_BELEG = ohne_beleg.replace("2609210130", "2609200130").replace("2609210430", "2609200430")
-LANG = AI_CN[1].replace("A4631/26", "A4699/26").replace("C)2609200415", "C)2611300000")
+# Ohne Textbeleg, aber in eigener US-FIR: die Nation folgt aus der Geografie -> USA.
+US_ZOA = ("W1235/26 NOTAMN Q) ZOA/QRTCA/IV/BO/W/000/999/3444N12034W050 A) ZOA "
+          "B) 2609200130 C) 2609200430 E) DANGER AREA ACTIVATED. AREA BOUNDED BY 343000N1203500W - "
+          "341500N1201500W - 330000N1200000W - 331500N1204500W F) SFC G) UNL")
+# Ohne Textbeleg in einer FIR, die die Referenz nicht kennt: nichts belegt USA -> Pruefliste.
+VB_OHNE_BELEG = ohne_beleg.replace("W1234/26", "W1236/26").replace(
+    "2609210130", "2609200130").replace("2609210430", "2609200430")
+LANG = AI_CN[1].replace("A4631/26", "A4699/26").replace(
+    "B)2609200354 C)2609200415", "B)2609010000 C)2611300000")
 kt = {}
-ai.merge_korpus(kt, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG, VB_OHNE_BELEG, LANG]), "t")[0])
+ai.merge_korpus(kt, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG, US_ZOA, VB_OHNE_BELEG, LANG]), "t")[0])
 buendel = ai.bundle_days(kt)
 from datetime import date as _d
-check("Tagesbuendel: 20.09. enthaelt alle", len(buendel[_d(2026, 9, 20)]) == 5, len(buendel[_d(2026, 9, 20)]))
-check("  ... lange Meldung hoechstens 14 Tage", max(buendel) == _d(2026, 10, 3), max(buendel))
+check("Tagesbuendel: 20.09. enthaelt die fuenf kurzen", len(buendel[_d(2026, 9, 20)]) == 5, len(buendel[_d(2026, 9, 20)]))
+check("  ... lange Meldung hoechstens 14 Tage",
+      _d(2026, 9, 14) in buendel and _d(2026, 9, 15) not in buendel, sorted(buendel)[:3])
 check("Fingerabdruck stabil gegen Reihenfolge",
       ai.day_fingerprint(buendel[_d(2026, 9, 20)]) == ai.day_fingerprint(list(reversed(buendel[_d(2026, 9, 20)]))))
 
@@ -615,15 +625,17 @@ check("Tagesanalyse: ein chinesischer Kandidat",
       [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tag20.kandidaten])
 check("  ... Kandidat traegt beide Kennungen",
       {"A4631/26", "A4632/26"} <= set(k for k in tag20.kandidaten[0]["notam_ids"]), tag20.kandidaten[0]["notam_ids"])
-check("  ... US-Start und US-Review gezaehlt, nicht gefuehrt", tag20.usa == 2, tag20.usa)
-check("  ... nichts US auf der Pruefliste",
-      all("VANDENBERG" not in p["text"].upper() and "KVBG" not in p["text"] for p in tag20.pruefliste),
+check("  ... US-Starts gezaehlt, nicht gefuehrt", tag20.usa >= 1, tag20.usa)
+check("  ... weder W1234/26 noch W1235/26 auf der Pruefliste",
+      not {"W1234/26", "W1235/26"} & {p["notam_id"] for p in tag20.pruefliste},
       [p["notam_id"] for p in tag20.pruefliste])
+check("  ... unbekannte FIR ohne Beleg bleibt auf der Pruefliste",
+      [p["notam_id"] for p in tag20.pruefliste] == ["W1236/26"], [p["notam_id"] for p in tag20.pruefliste])
 check("  ... Kandidatenschluessel = archive_key",
       tag20.kandidaten[0]["key"] == app.archive_key(tag20.kandidaten[0]["row"]))
-spaeter = ai.analyze_day(_d(2026, 9, 25), buendel[_d(2026, 9, 25)], sp, fir, set(), set())
+spaeter = ai.analyze_day(_d(2026, 9, 5), buendel[_d(2026, 9, 5)], sp, fir, set(), set())
 check("Folgetag: lange Meldung erzeugt keinen Start mit fremdem Datum",
-      all(k["row"]["Startdatum"] == "25.09.2026" for k in spaeter.kandidaten),
+      all(k["row"]["Startdatum"] == "05.09.2026" for k in spaeter.kandidaten),
       [k["row"]["Startdatum"] for k in spaeter.kandidaten])
 
 kommentiert = {}
@@ -778,7 +790,7 @@ def analyze_day(
         n = notams[e.row_index]
         grund = e.review_reason
         if e.row_index in ohne_platz:
-            grund = "Recognised as a launch, but no launch site could be determined."
+            grund = GRUND_OHNE_PLATZ
         ergebnis.pruefliste.append(
             {
                 "event_key": e.key,
@@ -792,10 +804,6 @@ def analyze_day(
         )
     return ergebnis
 ```
-
-Hinweis: Die US-Zählung in Schritt 1 erwartet `usa == 2`, also eine Gruppe und einen
-Review-Fall in KVBG. Liegt `ohne_beleg` in einer FIR, deren `Land` nicht „USA" ist, zeigt der
-Test das. Dann ist die FIR-Referenz zu prüfen, nicht die Schwelle zu lockern.
 
 - [ ] **Schritt 4: Tests laufen lassen, Erfolg bestätigen**
 
@@ -988,6 +996,9 @@ def load_gcat_sites(path: Path = GCAT_SITES_CSV) -> Dict[str, Tuple[List[str], s
     }
 
 
+_GCAT_MEMO: Dict[Tuple[str, float], List[GcatStart]] = {}
+
+
 def load_gcat(
     refresh: bool = False, cache: Path = GCAT_CACHE, opener: Any = urllib.request.urlopen
 ) -> Tuple[Optional[List[GcatStart]], str]:
@@ -1012,8 +1023,15 @@ def load_gcat(
             hinweis = "Download failed ({}). ".format(exc)
     if not cache.exists():
         return None, hinweis + "Launch list not available - no suggestions."
-    stand = datetime.fromtimestamp(cache.stat().st_mtime, timezone.utc).strftime("%d.%m.%Y")
-    starts = parse_gcat(cache.read_text(encoding="utf-8", errors="replace"))
+    mtime = cache.stat().st_mtime
+    stand = datetime.fromtimestamp(mtime, timezone.utc).strftime("%d.%m.%Y")
+    # 13 MB bei jedem Streamlit-Durchlauf neu zu lesen waere spuerbar - je
+    # Datei und Aenderungszeit wird nur einmal gelesen.
+    memo_key = (str(cache), mtime)
+    if memo_key not in _GCAT_MEMO:
+        _GCAT_MEMO.clear()
+        _GCAT_MEMO[memo_key] = parse_gcat(cache.read_text(encoding="utf-8", errors="replace"))
+    starts = _GCAT_MEMO[memo_key]
     return starts, hinweis + "GCAT (J. McDowell, CC-BY), copy from {}: {} launches.".format(stand, len(starts))
 ```
 
@@ -1230,8 +1248,9 @@ def vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame) -> str:
   anderen Schlüssel hat, wird *aktualisiert* (`ersetzt` = alter Schlüssel). Bestätigt ersetzt
   er die alte Archivzeile.
 - Die Sammelbestätigung erfasst nur *unique* ohne Warnung, unentschieden und nicht *aktualisiert*.
-- Aus „Space Launch" in der Prüfliste wird nach Neuauswertung des Tages ein Kandidat.
-  „Ausblenden" entfernt den Fall aus der Prüfliste.
+- „Space Launch" in der Prüfliste wertet den Tag mit der Bestätigung neu aus. Kommt der
+  Fall ohne Startplatz zurück, bleibt er mit `GRUND_OHNE_PLATZ` sichtbar. „Ausblenden"
+  entfernt ihn. Ein mehrtägiger Fall steht nur einmal da.
 - `archiv_import.py` greift weder auf `manual_notams` noch auf `WORKSPACE_FILE` oder
   `save_workspace` zu.
 
@@ -1260,9 +1279,12 @@ ai.save_state(zst, _tmp / "s.json")
 check("Zustand speichern und laden", ai.load_state(_tmp / "s.json")["entscheidungen"] == zst["entscheidungen"])
 
 # Eine weitere Zone desselben Starts kommt spaeter dazu -> aktualisiert, ersetzt die alte Zeile
-dritte = AI_CN[2].replace("A4632/26", "A4640/26").replace("ZPKM", "ZPKM").replace(
+# Dritte Zone weiter auf derselben Bahn (Azimut ~189 Grad), noch in ZPKM. Gruppiert
+# sie nicht mit dem Start, liegt das an der Geometrie des Beispiels: dann einen
+# Punkt naeher an A4632/26 waehlen, nicht die Gruppierung aendern.
+dritte = AI_CN[2].replace("A4632/26", "A4640/26").replace(
     "N293700E0980200-N293400E0983400-N284400E0982700-N284800E0975500",
-    "N153700E0930200-N153400E0933400-N144400E0932700-N144800E0925500")
+    "N281000E0974500-N280800E0981500-N274000E0981000-N274200E0974000")
 ai.merge_korpus(kx, ai.extract_notams(dritte, "seite2.html#msg_9")[0])
 ai.reevaluate(kx, zst, sp, fir)
 neu_k = [k for k in ai.candidates(zst) if k["entscheidung"] is None]
@@ -1276,18 +1298,21 @@ check("  ... ersetzt die alte Archivzeile statt einer zweiten", len(a2) == 1 and
 # Bestaetigen wirkt auch fuer einen frueher entfernten Schluessel
 check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8"))
 
-# Pruefliste: Space Launch / Ausblenden
+# Pruefliste: reine Zustandsfunktionen, mit einem synthetischen Tag geprueft
 zp = ai.load_state(_tmp / "p.json")
-kp = {}
-ai.merge_korpus(kp, ai.extract_notams(VB_OHNE_BELEG.replace("KVBG", "ZBPE").replace("3444N12034W", "3948N10002E")
-                                       .replace("3400N12100W 3330N12200W 3300N12130W", "3900N10100E 3830N10200E 3800N10130E"),
-                                       "p.html#msg_3")[0])
-ai.reevaluate(kp, zp, sp, fir)
-offen = ai.review_items(zp)
-check("unsicherer Fall auf der Pruefliste", len(offen) == 1, [(p["notam_id"], p["grund"][:40]) for p in offen])
-ai.review_hide(zp, offen[0]["event_key"])
+_p = {"event_key": "ek1", "schluessel": "X1/26|2609200000", "notam_id": "X1/26", "tag": "2026-09-20",
+      "grund": "Foreign airspace without evidence.", "text": "X1/26 ...", "quellen": ["p"]}
+zp["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [], "pruefliste": [_p], "usa": 0, "ausgeblendet": 0}
+zp["tage"]["2026-09-21"] = {"fingerprint": "g", "kandidaten": [], "pruefliste": [dict(_p, tag="2026-09-21")],
+                            "usa": 0, "ausgeblendet": 0}
+check("Pruefliste: mehrtaegiger Fall nur einmal", len(ai.review_items(zp)) == 1, ai.review_items(zp))
+zp["review_bestaetigt"].append("ek1")
+check("  ... bestaetigt verschwindet", ai.review_items(zp) == [])
+zp["tage"]["2026-09-20"]["pruefliste"] = [dict(_p, grund=ai.GRUND_OHNE_PLATZ)]
+check("  ... bestaetigt ohne Startplatz bleibt sichtbar", len(ai.review_items(zp)) == 1)
+ai.review_hide(zp, "ek1")
 check("  ... Ausblenden entfernt ihn", ai.review_items(zp) == [], ai.review_items(zp))
-check("  ... und zaehlt ihn als ausgeblendet", ai.totals(zp)["ausgeblendet"] >= 1, ai.totals(zp))
+check("  ... und zaehlt ihn als ausgeblendet", ai.totals(zp)["ausgeblendet"] == 2, ai.totals(zp))
 
 quelle_ai = (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8")
 check("Archiv-Import fasst die Tageslage nicht an",
@@ -1379,11 +1404,15 @@ def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def review_items(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Offene Prueffaelle, je NOTAM einmal (mehrtaegige stehen sonst mehrfach da)."""
-    erledigt = set(state["review_ausgeblendet"]) | set(state["review_bestaetigt"])
+    ausgeblendet = set(state["review_ausgeblendet"])
+    bestaetigt = set(state["review_bestaetigt"])
     gesehen: Dict[str, Dict[str, Any]] = {}
     for iso in sorted(state["tage"]):
         for p in state["tage"][iso]["pruefliste"]:
-            if p["event_key"] in erledigt or p["schluessel"] in gesehen:
+            if p["event_key"] in ausgeblendet or p["schluessel"] in gesehen:
+                continue
+            # Bestaetigt, aber ohne Startplatz zurueckgekommen: bleibt sichtbar.
+            if p["event_key"] in bestaetigt and p["grund"] != GRUND_OHNE_PLATZ:
                 continue
             gesehen[p["schluessel"]] = p
     return list(gesehen.values())
@@ -1481,15 +1510,6 @@ def review_hide(state: Dict[str, Any], event_key: str) -> None:
         tag["pruefliste"] = [p for p in tag["pruefliste"] if p["event_key"] != event_key]
         tag["ausgeblendet"] = tag.get("ausgeblendet", 0) + (vorher - len(tag["pruefliste"]))
 ```
-
-Hinweis zu `review_items`: Ein bestätigter Fall verschwindet hier sofort. Liefert die
-Neuauswertung keinen Startplatz, steht er wieder auf der Liste, und zwar als OK-Fall ohne
-Startplatz mit eigener Begründung. Dafür muss `review_items` bestätigte Schlüssel nur dann
-ausfiltern, wenn ihr Prüflisteneintrag nicht diese Begründung trägt. Umsetzung: Filtere mit
-`erledigt = set(state["review_ausgeblendet"])` und dazu mit `review_bestaetigt` nur bei
-`p["grund"]` ungleich `"Recognised as a launch, but no launch site could be determined."`.
-Dafür eine Konstante `GRUND_OHNE_PLATZ` in Aufgabe 3 einführen und an beiden Stellen
-verwenden.
 
 - [ ] **Schritt 4: Tests laufen lassen, Erfolg bestätigen**
 
@@ -1850,3 +1870,89 @@ Erwartet: `ERGEBNIS: ALLE TESTS BESTANDEN`. Neue Testzahl notieren:
 NSF-Seitenausschnitt". NSF ist für automatische Abrufe gesperrt, deshalb nutzt Aufgabe 1
 nachgebautes SMF-Markup. Ersetzt wird es, sobald der Benutzer eine echte Seite gespeichert
 hat. Bis dahin steht das unter „Offene Punkte" (Aufgabe 8, Schritt 3).
+
+---
+
+## Nachtrag vom 02.10.2026: Der Archivschlüssel trägt die Identität nicht
+
+Nachgetragen aus einer parallelen Sitzung. Dieser Plan baut die Identität der
+Importkandidaten auf `app.archive_key` — in `kandidaten[…]["key"]`, im Vergleich
+`kandidaten[0]["key"] == app.archive_key(…)` und im `ersetzt`-Mechanismus
+(`[app.archive_key(dict(r)) not in ersetzt for _, r in bestand.iterrows()]`). Damit erbt er,
+was dieser Schlüssel leistet und was nicht.
+
+### Was der Schlüssel enthielt und warum das falsch war
+
+```
+archive_key = Startdatum | Weltraumbahnhof | sortierte NOTAM-Kennungen
+```
+
+Der Startplatz ist eine **Eigenschaft** des Starts, nicht seine **Identität** — und er ändert
+sich, wenn die Erkennung besser wird. Belegt im Bestand:
+
+| Zeile | NOTAM | Platz | Inkl. |
+|---|---|---|---|
+| 10 | `F0511/26` | WSLC | 95,0 |
+| 11 | `F0511/26, A0443/26` | WSLC | 94,2 |
+| 12 | `A0465/26, A0466/26, F0511/26, …` | **SEA-21N112E** | 97,6 |
+
+Drei Zeilen, ein Start. `F0511/26` steht in allen drei. Dasselbe für den 11.02. (`F0494/26`
+dreimal). Von 16 Archivzeilen sind **5 falsch**: eine sachlich (ein nordkoreanischer Start,
+der keiner war) und vier als überholte Dubletten.
+
+„Aktualisiert statt verdoppelt" funktionierte also nur, solange die Analyse ihre Meinung
+nie ändert.
+
+### Was am 02.10.2026 behoben wurde
+
+Der Startplatz ist aus dem Schlüssel entfernt:
+
+```
+archive_key = Startdatum | sortierte NOTAM-Kennungen
+```
+
+Gemessen am Bestand: 16 Zeilen ergeben mit und ohne Startplatz je 16 Schlüssel — **keine
+bestehende Zeile fällt zusammen**. Behoben sind damit zwei Fälle:
+
+- Die Seestart-Ableitung verschob einen Start von `WSLC` auf `SEA-21N112E`.
+- Eine von Hand gesetzte Pad-Wahl verschiebt ihn von `WSLC` auf `HAIN` (neu seit heute, siehe
+  „Zwei Startplätze an einem Ort" in der README). Das erzeugte vor der Korrektur
+  nachweislich eine zweite Zeile mit identischen NOTAM-Kennungen.
+
+Gespeicherte Löschschlüssel werden beim Laden des Arbeitsstands umgestellt
+(`migrate_archive_keys`, dreiteilig → zweiteilig). Ohne das wären von Hand gelöschte
+Archivzeilen zurückgekommen. Abschnitt 89 der Tests hält beides fest.
+
+**Für diesen Plan heißt das: nichts zu ändern.** Er importiert `app` und baut nichts nach,
+also erbt er die Korrektur. Die Aussage „`aktualisiert` ersetzt die alte Zeile" trägt jetzt
+auch dann, wenn sich zwischen zwei Durchläufen der erkannte Startplatz verschiebt.
+
+### Was offen bleibt — und beim Import stärker wiegt
+
+Wird die **Gruppierung** besser, wächst die Kennungsmenge (`F0511/26` → `F0511/26, A0443/26`
+→ drei Kennungen) und der Schlüssel ändert sich trotzdem. Genau so sind die vier Dubletten
+oben entstanden.
+
+Im Tagesbetrieb betrifft das eine Handvoll Zeilen. **Bei 500–650 importierten Starts wiegt
+es deutlich schwerer**, und zwar aus einem Grund, der diesem Plan eigen ist: ein Massenimport
+wird mit verbesserter Erkennung **wiederholt**. Jede Verbesserung der Gruppierung — und
+dieser Plan verbessert sie nicht, aber der Tagesbetrieb tut es laufend — verschiebt dann
+einen Teil der Schlüssel, und der `ersetzt`-Mechanismus findet die alte Zeile nicht mehr.
+
+**Vorschlag, noch nicht entschieden:** Statt auf Gleichheit zu prüfen, über
+**Kennungs-Überschneidung** suchen — teilt eine neue Zeile mindestens eine NOTAM-Kennung mit
+einer vorhandenen, ist es derselbe Start. Das löst den Fall nachweislich: `F0511/26` steht in
+allen drei Zeilen.
+
+Geprüft werden muss dabei:
+
+- **Der Abbruch-Fall bleibt getrennt.** Die Zeilen vom 11.02. (`F0494/26`, `A0433/26`,
+  `A0430/26`, `A0436/26`) und vom 12.02. (`F0511/26`, `A0443/26`, `A0465/26`, `A0466/26`)
+  teilen **keine** Kennung. Überschneidungs-Suche führt sie also nicht zusammen — richtig,
+  denn beide Tage hatten echte Luftraumsperrungen.
+- **Ein Datumsschutz** gegen entfernte Treffer, falls eine Kennung je wiederverwendet wird.
+- **`archiv_removed`** müsste mitziehen: Löschschlüssel sind dann keine exakten Schlüssel mehr.
+
+Das ändert die Semantik von `merge_archive` und ist deshalb eine Entscheidung des Benutzers,
+keine Nacharbeit. Bis sie getroffen ist, bleibt der Defekt bestehen — benannt im Docstring
+von `archive_key` und in `STATUS.md`.

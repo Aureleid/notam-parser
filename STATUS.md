@@ -28,7 +28,7 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 | Bahnrechnung | Inklination mit Erdrotation (`orbital_azimuth_deg`); Orbitbänder auf die Streuung der Abschätzung geweitet (SSO 93–103°) |
 | Vorfilterung | `LOW` + Ausschlussbegriff → direkt unter *Excluded*; auf der Echtdatei 148 von 275 Review-Fällen, ohne einen Start zu verlieren. Zurückholen gewinnt dauerhaft. |
 | Payload | Freitextfeld unter NOTAM Data, gilt für alle Zonen eines Starts; Spalte in Launch Overview und Export |
-| Startarchiv | `startarchiv_updated.csv`, von der App geschrieben: eine Zeile je erkanntem Start, wird aktualisiert statt verdoppelt; eigener Reiter im Optionsmenü |
+| Startarchiv | `startarchiv_updated.csv`, von der App geschrieben: eine Zeile je erkanntem Start, wird aktualisiert statt verdoppelt; eigener Reiter im Optionsmenü. Erkennungsmerkmal ist Startdatum + NOTAM-Kennungen — der Startplatz gehört seit dem 02.10.2026 nicht dazu, weil er sich mit besserer Erkennung ändert. |
 | Persistenz | Referenzänderungen direkt in die CSVs, Arbeitsstand (inkl. Trägersystem-Zuweisungen) in `notam_workspace.json` |
 | Oberfläche | Zweizeilige Wortmarke nach festem Regelwerk, unbunte Bühne mit bunten Signalen, durchgehend deckende Flächen, durchgehend englische Fachsprache, geometrische Symbole statt Piktogramme, Farbschema aus einer Referenzoberfläche gemessen (`.streamlit/config.toml`) |
 | Veröffentlichung | Repository `Aureleid/notam-parser`, Streamlit Community Cloud unter `notam-space-analyzer.streamlit.app` |
@@ -58,6 +58,14 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
   ein Mittelwert aus 151,6° Streuung).
 - **Schieberegler `LOW`** (Befund 9) erlaubt bewusst, den Review um den Preis von
   Zuordnungen zu leeren — Abwägung, keine Behebung.
+- **Der Archivschlüssel hält eine wachsende Kennungsmenge nicht aus.** Wird die
+  Gruppierung besser, kommen NOTAM-Kennungen hinzu und der Schlüssel ändert sich — es
+  entsteht eine neue Zeile statt eines Updates. So sind die vier überholten Dubletten
+  entstanden (`F0511/26` in drei Zeilen, `F0494/26` in drei). Der Startplatz ist seit dem
+  02.10.2026 aus dem Schlüssel entfernt, was die Seestart- und die Pad-Verschiebung behebt;
+  die Kennungsmenge bleibt offen. Lösung wäre eine Suche über Kennungs-Überschneidung —
+  ändert die Semantik von `merge_archive` und braucht eine Entscheidung. Beim geplanten
+  Import von 500–650 Starts wiegt das deutlich schwerer als heute.
 - **Zwei Startversuche desselben Starts** werden als zwei Starts geführt. Der chinesische
   Seestart vom 11./12.02.2026 steht zweimal im Archiv — am 11. offenbar abgebrochen, am 12.
   geflogen. NOLA kann das nicht wissen; beide Tage hatten echte Luftraumsperrungen. Für die

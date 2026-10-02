@@ -389,9 +389,42 @@ Nutzlast. Die Filter der Seitenleiste wirken dabei bewusst **nicht**: ob ein Sta
 gelangt, soll nicht davon abhängen, was man sich gerade anzeigen lässt.
 
 Beim nächsten Import wird derselbe Start **aktualisiert statt doppelt angelegt**;
-Erkennungsmerkmal ist die Kombination aus Startdatum, Startplatz und NOTAM-Kennungen. Die
+Erkennungsmerkmal ist die Kombination aus **Startdatum und NOTAM-Kennungen**. Die
 automatischen Spalten werden dabei überschrieben, die Nutzlast nicht: sie ist das Einzige,
 was kein Automat kennt, und bleibt stehen, wenn der neue Durchlauf nichts dazu weiß.
+
+### Warum der Startplatz nicht zum Erkennungsmerkmal gehört
+
+Er stand einmal darin, und das war ein Konstruktionsfehler. Der Startplatz ist eine
+**Eigenschaft** des Starts, nicht seine **Identität** — und er ändert sich, wenn die
+Erkennung besser wird. Belegt im eigenen Bestand:
+
+| Zeile | NOTAM | Platz | Inklination |
+|---|---|---|---|
+| 10 | `F0511/26` | WSLC | 95,0 |
+| 11 | `F0511/26, A0443/26` | WSLC | 94,2 |
+| 12 | `A0465/26, A0466/26, F0511/26, …` | **SEA-21N112E** | 97,6 |
+
+Drei Zeilen, ein Start, `F0511/26` in allen drei. Dasselbe für den 11.02. mit `F0494/26`.
+Jede Verbesserung — die Seestart-Ableitung, die `AREA1/AREA2`-Trennung — erzeugte einen neuen
+Schlüssel und damit eine neue Zeile statt eines Updates. Von 16 Zeilen sind dadurch **fünf
+falsch**: eine sachlich, vier als überholte Dubletten.
+
+Seit dem 02.10.2026 ist der Platz aus dem Schlüssel entfernt. Gemessen: 16 Zeilen ergeben mit
+und ohne Platz je 16 Schlüssel, **keine bestehende Zeile fällt zusammen**. Damit sind zwei
+Fälle behoben — die Seestart-Ableitung und die manuelle Pad-Wahl, die einen Start von `WSLC`
+auf `HAIN` verschiebt und vorher nachweislich eine zweite Zeile erzeugte.
+
+Gespeicherte Löschschlüssel werden beim Laden umgestellt (`migrate_archive_keys`), sonst
+wären von Hand gelöschte Zeilen zurückgekommen.
+
+**Was offen bleibt:** Wird die *Gruppierung* besser, wächst die Kennungsmenge und der
+Schlüssel ändert sich trotzdem — genau so sind die vier Dubletten entstanden. Das zu lösen
+heißt, über **Kennungs-Überschneidung** zu suchen statt auf Gleichheit zu prüfen: teilt eine
+neue Zeile mindestens eine Kennung mit einer vorhandenen, ist es derselbe Start. Der
+Abbruch-Fall bliebe dabei korrekt getrennt — die Zeilen vom 11. und 12.02. teilen keine
+einzige Kennung. Das ändert aber die Semantik von `merge_archive` und ist deshalb eine
+Entscheidung, keine Nacharbeit.
 
 Im Optionsmenü hat das Archiv einen eigenen Reiter — mit Suche und **Entfernen** je Zeile,
 aber ohne Formular zum Anlegen: Zeilen entstehen aus der Auswertung, die Nutzlast trägt man
