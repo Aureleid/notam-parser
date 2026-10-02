@@ -20,3 +20,10 @@ startarchiv_updated.csv
 
 # Seestart-Protokoll - aus den lokalen NOTAM-Rohdaten abgeleitet, bleibt lokal
 seestarts_updated.csv
+
+# Werkzeugzustand eines Plugins: Pruefsummen und Merkle-Wurzel dieses Checkouts.
+# Maschinenlokal und sofort veraltet - gehoert nicht in ein oeffentliches Repo.
+vault/
+
+# Startkonfiguration mit absoluten Pfaden dieses Rechners. Fuer andere nutzlos.
+.claude/
