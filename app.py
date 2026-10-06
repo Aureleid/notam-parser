@@ -6528,6 +6528,17 @@ def _archive_import_candidate(
                     "Older import row {} remains in the archive. Remove it in the "
                     "Launch Archive tab if it is no longer needed.".format(alt)
                 )
+        elif k["ersetzt"]:
+            # Bestaetigen loescht diese Importzeilen - vorher sichtbar machen
+            ersetzt_werte = {w["key"]: w for w in k.get("ersetzt_werte") or []}
+            for alt in k["ersetzt"]:
+                w = ersetzt_werte.get(alt, {})
+                st.text(
+                    "Confirming will REPLACE (delete) the older import row {} - current "
+                    "vehicle: {} · payload: {}".format(
+                        alt, w.get("Tr\u00e4gersystem") or "-", w.get("Payload") or "-"
+                    )
+                )
         for w in abgleich.warnungen:
             st.warning(_md_plain(w))
         for h in abgleich.hinweise:

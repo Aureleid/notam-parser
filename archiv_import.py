@@ -559,14 +559,75 @@ def drop_subsumed(kandidaten: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     eigenen Buendel des Folgetags bildet der Rest eine zweite, kleinere Gruppe.
     Ebenso koennen mehrtaegige Meldungen an einem Tag ohne ihre Partner liegen.
     Gleiche Mengen bleiben stehen - exakte Doppel entfernt spaeter der Schluessel.
+    Verworfen wird nur, wenn die Obermenge derselbe Start ist (_gleicher_start):
+    eine fremde Nation oder ein anderer Monat mit derselben Kennung zaehlt nicht.
     Die Reihenfolge bleibt erhalten.
     """
     mengen = [frozenset(k["notam_ids"]) for k in kandidaten]
+    starts = [_start_des_kandidaten(k) for k in kandidaten]
     return [
         k
-        for k, m in zip(kandidaten, mengen)
-        if not any(m < andere for andere in mengen)
+        for i, (k, m) in enumerate(zip(kandidaten, mengen))
+        if not any(
+            m < andere and _gleicher_start(starts[i], starts[j])
+            for j, andere in enumerate(mengen)
+        )
     ]
+
+
+#: Ein Start fuer den Vergleich: (NOTAM-Kennungen, Startdatum TT.MM.JJJJ, Nation).
+Start = Tuple[Set[str], str, str]
+
+
+def _start_des_kandidaten(k: Mapping[str, Any]) -> Start:
+    return (
+        {str(i).upper() for i in k.get("notam_ids", [])},
+        str((k.get("row") or {}).get("Startdatum", "")),
+        str(k.get("nation") or ""),
+    )
+
+
+def _start_der_entscheidung(key: str, e: Mapping[str, Any]) -> Start:
+    """Startdatum steht vorn im Schluessel; Nation erst in neueren Entscheidungen."""
+    return (
+        {str(i).upper() for i in e.get("notam_ids", [])},
+        key.split("|")[0],
+        str(e.get("nation") or ""),
+    )
+
+
+def _gleicher_start(a: Start, b: Start) -> bool:
+    """
+    Derselbe Start: mindestens eine gemeinsame NOTAM-Kennung UND Startdaten
+    hoechstens einen Tag auseinander (_nahe_datum) UND gleiche Nation - die nur,
+    wenn beide sie kennen (aeltere Entscheidungen haben keine; dann zaehlt das
+    Datum allein).
+
+    Kennungen allein reichen nicht: China, Russland und Indien vergeben ihre
+    A-Nummern je Jahr neu, A0500/24 kann im Februar ein chinesischer und im
+    November ein russischer Start sein. Verglichen wird der englische Name
+    (app.nation_label), weil Archivzeilen die Nation englisch fuehren.
+    """
+    ids_a, datum_a, nation_a = a
+    ids_b, datum_b, nation_b = b
+    if not ids_a & ids_b or not _nahe_datum(datum_a, datum_b):
+        return False
+    if nation_a and nation_b and app.nation_label(nation_a) != app.nation_label(nation_b):
+        return False
+    return True
+
+
+def _start_index(starts: Iterable[Start]) -> Dict[str, List[Start]]:
+    """Kennung -> Starts mit dieser Kennung, damit nicht jeder mit jedem verglichen wird."""
+    index: Dict[str, List[Start]] = defaultdict(list)
+    for s in starts:
+        for i in s[0]:
+            index[i].append(s)
+    return index
+
+
+def _im_index(index: Mapping[str, List[Start]], start: Start) -> bool:
+    return any(_gleicher_start(start, s) for i in start[0] for s in index.get(i, ()))
 
 
 # --------------------------------------------------------------------------- #
@@ -995,33 +1056,37 @@ def reevaluate(
     if alle or erster_lauf:
         state["erkennungsstand"] = detection_stamp()
     # Wieder erkannt: 'Keep' verfaellt, damit ein spaeterer Verlust erneut gemeldet wird.
-    aktuelle_ids = _aktuelle_ids(state)
-    for e in state["entscheidungen"].values():
-        if e.get("behalten") and set(e.get("notam_ids", [])) & aktuelle_ids:
+    # Wieder erkannt heisst: derselbe Start (_gleicher_start), nicht nur dieselbe Kennung.
+    aktuelle = _aktuelle_starts(state)
+    for key, e in state["entscheidungen"].items():
+        if e.get("behalten") and _im_index(aktuelle, _start_der_entscheidung(key, e)):
             del e["behalten"]
     return neu
 
 
-def _aktuelle_ids(state: Dict[str, Any]) -> Set[str]:
-    """NOTAM-Kennungen aller aktuellen Kandidaten."""
-    return {i for t in state["tage"].values() for k in t["kandidaten"] for i in k["notam_ids"]}
+def _aktuelle_starts(state: Dict[str, Any]) -> Dict[str, List[Start]]:
+    """Alle aktuellen Kandidaten als Start-Index (siehe _start_index)."""
+    return _start_index(
+        _start_des_kandidaten(k) for t in state["tage"].values() for k in t["kandidaten"]
+    )
 
 
 def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    Bestaetigte Starts, von deren NOTAMs keiner mehr in einem Kandidaten steht.
+    Bestaetigte Starts, die kein aktueller Kandidat mehr als denselben Start
+    fuehrt (_gleicher_start - eine fremde Kollision der Kennung verdeckt nichts).
 
     Nach einer Neuauswertung mit geaenderter Erkennung belegt NOLA solche
     Archivzeilen nicht mehr. Geloescht wird nie automatisch - der Benutzer
     entscheidet (keep_orphan / remove_orphan).
     """
-    aktuelle_ids = _aktuelle_ids(state)
+    aktuelle = _aktuelle_starts(state)
     return [
         (key, e)
         for key, e in sorted(state["entscheidungen"].items())
         if _ist_importzeile(e)  # eine ergaenzte Fremdzeile loescht der Import nie
         and not e.get("behalten")
-        and not set(e.get("notam_ids", [])) & aktuelle_ids
+        and not _im_index(aktuelle, _start_der_entscheidung(key, e))
     ]
 
 
@@ -1104,29 +1169,50 @@ def _nahe_datum(a: str, b: str) -> bool:
     return abs((da - db).days) <= 1
 
 
+def _werte_des_vorgaengers(
+    key: str, e: Mapping[str, Any], zeile: Optional[Mapping[str, Any]]
+) -> Dict[str, str]:
+    """Traegersystem und Payload einer Importzeile: aus dem Archiv, sonst aus der Entscheidung."""
+    if zeile is not None:
+        return {
+            "key": key,
+            "Tr\u00e4gersystem": str(zeile["Tr\u00e4gersystem"]),
+            "Payload": str(zeile["Payload"]),
+        }
+    return {
+        "key": key,
+        "Tr\u00e4gersystem": str(e.get("rakete", "")),
+        "Payload": str(e.get("payload", "")),
+    }
+
+
 def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Dict[str, Any]]:
     """
     Alle Kandidaten, je Schluessel einmal, mit Entscheidung und zwei Vermerken:
 
-    - ersetzt: vom Import bestaetigte Vorgaenger mit gemeinsamer Kennung.
-    - im_archiv: andere Archivzeilen (etwa aus dem Tagesbetrieb) mit gemeinsamer
-      Kennung und Startdatum innerhalb eines Tages. Bestaetigen ergaenzt dann nur
+    - ersetzt: vom Import bestaetigte Vorgaenger desselben Starts.
+    - im_archiv: andere Archivzeilen (etwa aus dem Tagesbetrieb) desselben Starts.
+      Bestaetigen ergaenzt dann nur
       deren Traegersystem und Payload, statt denselben Start ein zweites Mal
-      anzulegen. archiv_werte nennt je Zielzeile deren aktuelle Werte.
+      anzulegen. archiv_werte nennt je Zielzeile deren aktuelle Werte,
+      ersetzt_werte ebenso je Vorgaenger.
+
+    Derselbe Start heisst ueberall: gemeinsame Kennung, Startdatum innerhalb
+    eines Tages und gleiche Nation (_gleicher_start).
     """
     entscheidungen = state["entscheidungen"]
-    bestaetigte_ids = {
-        key: set(e.get("notam_ids", []))
+    bestaetigte = {
+        key: _start_der_entscheidung(key, e)
         for key, e in entscheidungen.items()
         if _ist_importzeile(e)
     }
+    alle_zeilen = [(app.archive_key(dict(r)), r) for _, r in _archiv_lesen(archiv).iterrows()]
     archivzeilen = [
-        (key, _kennungen(r["NOTAM"]), r)
-        for key, r in (
-            (app.archive_key(dict(r)), r) for _, r in _archiv_lesen(archiv).iterrows()
-        )
-        if key not in bestaetigte_ids  # eigene Zeilen laufen ueber ersetzt
+        (key, (_kennungen(r["NOTAM"]), str(r["Startdatum"]), str(r["Nation"])), r)
+        for key, r in alle_zeilen
+        if key not in bestaetigte  # eigene Zeilen laufen ueber ersetzt
     ]
+    eigene_zeilen = {key: r for key, r in alle_zeilen if key in bestaetigte}
     gesehen: Dict[str, Dict[str, Any]] = {}
     alle = [k for iso in sorted(state["tage"]) for k in state["tage"][iso]["kandidaten"]]
     # Bruchstuecke (Nachlauf ueber Mitternacht, mehrtaegige Meldungen) verwerfen,
@@ -1141,17 +1227,23 @@ def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Di
         # vorhandene fremde Archivzeilen desselben Starts; leer = keine
         eintrag["im_archiv"] = []
         eintrag["archiv_werte"] = []
+        # aktuelle Werte jedes Vorgaengers (Archivzeile, sonst Entscheidung)
+        eintrag["ersetzt_werte"] = []
         if eintrag["entscheidung"] is None:
+            eigener = _start_des_kandidaten(k)
             eintrag["ersetzt"] = sorted(
                 alt_key
-                for alt_key, ids in bestaetigte_ids.items()
-                if alt_key != k["key"] and ids & set(k["notam_ids"])
+                for alt_key, start in bestaetigte.items()
+                if alt_key != k["key"] and _gleicher_start(start, eigener)
             )
-            eigene = {i.upper() for i in k["notam_ids"]}
+            eintrag["ersetzt_werte"] = [
+                _werte_des_vorgaengers(alt_key, entscheidungen[alt_key], eigene_zeilen.get(alt_key))
+                for alt_key in eintrag["ersetzt"]
+            ]
             ziele = {
                 key: r
-                for key, ids, r in archivzeilen
-                if ids & eigene and _nahe_datum(r["Startdatum"], k["row"]["Startdatum"])
+                for key, start, r in archivzeilen
+                if _gleicher_start(start, eigener)
             }
             eintrag["im_archiv"] = sorted(ziele)
             eintrag["archiv_werte"] = [
@@ -1263,6 +1355,8 @@ def confirm_many(
             "gcat": treffer.tag if treffer else "",
             "notam_ids": list(kand["notam_ids"]),
             "quellen": list(kand["quellen"]),
+            # Nation fuer _gleicher_start (aeltere Entscheidungen haben keine)
+            "nation": kand.get("nation", ""),
         }
         if kand.get("im_archiv"):
             neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])

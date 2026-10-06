@@ -4688,6 +4688,122 @@ if _fns:
 else:
     check("Tageslage-Gegenprobe (FNS-Datei fehlt - uebersprungen)", True)
 
+print("== Archiv-Import Schlusspruefung (nola-3dq) ==")
+_tmp_s = _P(tempfile.mkdtemp())
+
+
+def _s_row(datum, notam, nation, rakete="", payload=""):
+    return {"NOTAM": notam, "Startdatum": datum, "Startzeit": "10:00", "Nation": nation,
+            "Weltraumbahnhof": "JSLC", "Trägersystem": rakete, "Payload": payload, "Orbit": "SSO",
+            "Inklination": "", "Azimuth": "", "Dropzones": ""}
+
+
+def _s_kand(datum, ids, nation):
+    row = _s_row(datum, ", ".join(ids), app.nation_label(nation))
+    return {"key": app.archive_key(row), "row": row, "tag": "x", "nation": nation, "seestart": False,
+            "fenster": [None, None], "notam_ids": list(ids), "quellen": ["q"],
+            "inklination": None, "azimut": None}
+
+
+def _s_zustand(kandidaten):
+    return {"tage": {"2024-01-01": {"fingerprint": "f", "kandidaten": kandidaten, "pruefliste": [],
+                                    "usa": 0, "ausgeblendet": 0}},
+            "entscheidungen": {}, "review_bestaetigt": [], "review_ausgeblendet": [],
+            "erkennungsstand": ""}
+
+
+def _s_archiv(name, zeilen):
+    pfad = _tmp_s / (name + ".csv")
+    app.persist_archive(pfad, app.merge_archive(None, zeilen))
+    return pfad
+
+
+# Kritisch 1: Kennungen allein sind nicht eindeutig (China Feb. / Russland Nov., A0500/24)
+_cn_row = _s_row("03.02.2024", "A0500/24", "China", "CZ-2D", "Feb payload")
+_cn_key = app.archive_key(_cn_row)
+_ru = _s_kand("10.11.2024", ["A0500/24", "A0501/24"], "Russland")
+_zs = _s_zustand([_ru])
+_cn_dec = {"status": "confirmed", "rakete": "CZ-2D", "payload": "Feb payload",
+           "gcat": "", "notam_ids": ["A0500/24"], "quellen": ["alt"]}  # alte Entscheidung ohne Nation
+_zs["entscheidungen"][_cn_key] = dict(_cn_dec)
+_as = _s_archiv("kollision", [_cn_row])
+_ks = ai.candidates(_zs, _as)
+check("Kollision: russischer Kandidat ersetzt die chinesische Februarzeile nicht",
+      len(_ks) == 1 and _ks[0]["ersetzt"] == [] and _ks[0]["im_archiv"] == [],
+      [(k["key"], k["ersetzt"], k["im_archiv"]) for k in _ks])
+_r, _e = _versuch(lambda: ai.confirm_many(_zs, [(_ks[0], "Soyuz-2.1a", "Nov payload", None)], _as))
+_a = app.load_archive(_as)
+check("  ... Bestaetigen legt eine Zeile an, die chinesische bleibt unberuehrt",
+      _e is None and len(_a) == 2
+      and _a[_a["NOTAM"] == "A0500/24"].iloc[0].to_dict() == app.merge_archive(None, [_cn_row]).iloc[0].to_dict()
+      and _zs["entscheidungen"][_cn_key]["status"] == "confirmed",
+      (repr(_e), _a.to_dict("records"), _zs["entscheidungen"].get(_cn_key)))
+check("  ... bestaetigte Entscheidung haelt die Nation",
+      _zs["entscheidungen"].get(_ru["key"], {}).get("nation") == "Russland",
+      _zs["entscheidungen"].get(_ru["key"]))
+# Gleicher Tag, andere Nation (Entscheidung mit Nation): ebenfalls kein Ersatz
+_zs2 = _s_zustand([_s_kand("03.02.2024", ["A0500/24", "A0501/24"], "Russland")])
+_zs2["entscheidungen"][_cn_key] = dict(_cn_dec, nation="China")
+_ks2 = ai.candidates(_zs2, _as)
+check("Kollision am selben Tag, andere Nation: kein Ersatz", _ks2[0]["ersetzt"] == [], _ks2[0]["ersetzt"])
+# im_archiv: Tageszeile gleicher Tag, andere Nation -> keine Ergaenzung
+_ai_tag = _s_archiv("kollision_tag", [_s_row("10.11.2024", "A0500/24", "China")])
+_ks3 = ai.candidates(_s_zustand([_ru]), _ai_tag)
+check("im_archiv: andere Nation am selben Tag zaehlt nicht", _ks3[0]["im_archiv"] == [], _ks3[0]["im_archiv"])
+_ai_tag2 = _s_archiv("kollision_tag2", [_s_row("10.11.2024", "A0500/24", "Russia")])
+check("  ... gleiche Nation (englisch im Archiv) zaehlt",
+      ai.candidates(_s_zustand([_ru]), _ai_tag2)[0]["im_archiv"] == ["10.11.2024|A0500/24"])
+# Echter Fall 'aktualisiert': gleicher Tag, gleiche Nation, weitere Zone
+_upd = _s_kand("03.02.2024", ["A0500/24", "A0502/24"], "China")
+_zs4 = _s_zustand([_upd])
+_zs4["entscheidungen"][_cn_key] = dict(_cn_dec, nation="China")
+_as4 = _s_archiv("aktualisiert", [_cn_row])
+_ks4 = ai.candidates(_zs4, _as4)
+check("aktualisiert (gleicher Tag, gleiche Nation): Ersatzvermerk", _ks4[0]["ersetzt"] == [_cn_key],
+      _ks4[0]["ersetzt"])
+ai.confirm_many(_zs4, [(_ks4[0], "CZ-2D", "Feb payload", None)], _as4)
+_a4 = app.load_archive(_as4)
+check("  ... aktuelle Werte des Vorgaengers im Kandidaten (ersetzt_werte)",
+      _ks4[0].get("ersetzt_werte") == [{"key": _cn_key, "Trägersystem": "CZ-2D", "Payload": "Feb payload"}],
+      _ks4[0].get("ersetzt_werte"))
+ai.confirm_many(_zs4, [(_ks4[0], "CZ-2D", "Feb payload", None)], _as4)
+_a4 = app.load_archive(_as4)
+check("  ... ersetzt die alte Zeile", [app.archive_key(dict(r)) for _, r in _a4.iterrows()] == [_upd["key"]],
+      _a4["NOTAM"].tolist())
+# Reiter: jede zu ersetzende Importzeile als reiner Text, mit ihren Werten
+_stub = _StStub()
+_r, _e = _versuch(_tab_lauf, _stub, candidates=lambda z: [dict(
+    _kand("k_eins", "2020-05-02"), ersetzt=["alt|A1/20"],
+    ersetzt_werte=[{"key": "alt|A1/20", "Trägersystem": "CZ-2D", "Payload": _BOESE}])])
+_ers = [c for c in _stub.aufrufe("text") if "alt|A1/20" in c[1][0] and "REPLACE" in c[1][0]
+        and "CZ-2D" in c[1][0] and _BOESE in c[1][0]]
+check("Reiter: zu ersetzende Importzeile mit Traeger und Payload als st.text genannt",
+      _e is None and len(_ers) == 1, (repr(_e), _stub.aufrufe("text")))
+_roh = [c for c in _stub.calls if c[0] in _md_elemente and _BOESE in repr(c[1]) + repr(c[2])]
+check("  ... nie roh in Markdown-Elementen", not _roh, _roh[:3])
+# drop_subsumed: Teilmenge eines fremden Starts bleibt stehen
+_cn_gross = _s_kand("05.03.2024", ["A0700/24", "A0701/24"], "China")
+_ru_klein = _s_kand("20.08.2024", ["A0700/24"], "Russland")
+check("drop_subsumed: russischer Kandidat bleibt neben chinesischer Obermenge",
+      [k["key"] for k in ai.drop_subsumed([_cn_gross, _ru_klein])] == [_cn_gross["key"], _ru_klein["key"]])
+_cn_klein = _s_kand("05.03.2024", ["A0700/24"], "China")
+check("  ... Bruchstueck desselben Starts faellt weiter",
+      [k["key"] for k in ai.drop_subsumed([_cn_gross, _cn_klein])] == [_cn_gross["key"]])
+# Waisen und 'Keep': eine fremde Kollision verdeckt nichts
+_zo = _s_zustand([_ru])
+_zo["entscheidungen"][_cn_key] = dict(_cn_dec)
+check("Waise: chinesischer Start nicht durch russische Kennung verdeckt",
+      [k for k, _ in ai.orphans(_zo)] == [_cn_key], ai.orphans(_zo))
+_zo["entscheidungen"][_cn_key]["behalten"] = True
+ai.reevaluate({}, _zo, sp, fir)
+check("  ... 'Keep' verfaellt nicht durch eine fremde Kollision",
+      _zo["entscheidungen"][_cn_key].get("behalten") is True, _zo["entscheidungen"][_cn_key])
+_zo["tage"]["2024-01-01"]["kandidaten"].append(_s_kand("03.02.2024", ["A0500/24"], "China"))
+ai.reevaluate({}, _zo, sp, fir)
+check("  ... aber durch den wieder erkannten eigenen Start",
+      "behalten" not in _zo["entscheidungen"][_cn_key] and ai.orphans(_zo) == [],
+      _zo["entscheidungen"][_cn_key])
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
