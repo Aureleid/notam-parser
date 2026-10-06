@@ -3168,7 +3168,35 @@ check("  ... Quellen zusammengefuehrt",
       korpus["A4631/26|2609200354"].quellen == ["test.txt", "seite2.txt"],
       korpus["A4631/26|2609200354"].quellen)
 ai.save_korpus(korpus, _tmp / "k.json")
-check("Korpus: speichern und laden", set(ai.load_korpus(_tmp / "k.json")) == set(korpus))
+_gel = ai.load_korpus(_tmp / "k.json")
+check("Korpus: speichern und laden", set(_gel) == set(korpus))
+check("  ... Quellen und Text ueberleben", all(
+    _gel[k].quellen == korpus[k].quellen and _gel[k].text == korpus[k].text for k in korpus))
+for _nm, _inhalt in (("kaputt_a.json", '{"notams":[{"x":1}]}'), ("kaputt_b.json", '{"notams":5}')):
+    (_tmp / _nm).write_text(_inhalt, encoding="utf-8")
+    try:
+        ai.load_korpus(_tmp / _nm)
+        check("Korpus mit kaputter Struktur bricht ab: " + _inhalt, False)
+    except ai.ImportStateError as _e:
+        check("Korpus mit kaputter Struktur bricht ab: " + _inhalt,
+              _nm in str(_e) and (_tmp / _nm).read_text(encoding="utf-8") == _inhalt, str(_e))
+    except Exception as _e:
+        check("Korpus mit kaputter Struktur bricht ab: " + _inhalt, False, repr(_e))
+_alt_replace = os.replace
+def _boom(*a, **k):
+    raise OSError("boom")
+(_tmp / "atom.json").write_text("alt", encoding="utf-8")
+os.replace = _boom
+try:
+    ai.write_json_atomic(_tmp / "atom.json", {"a": 1})
+    _fehl = False
+except OSError:
+    _fehl = True
+finally:
+    os.replace = _alt_replace
+check("write_json_atomic: Fehler vor dem Umbenennen laesst Original, raeumt Temp-Datei auf",
+      _fehl and (_tmp / "atom.json").read_text(encoding="utf-8") == "alt"
+      and not [f for f in os.listdir(_tmp) if f.startswith("atom") and f != "atom.json"], os.listdir(_tmp))
 (_tmp / "kaputt.json").write_text("{ halb", encoding="utf-8")
 try:
     ai.read_json(_tmp / "kaputt.json")
@@ -3179,17 +3207,28 @@ check("fehlende JSON ergibt leeren Stand", ai.read_json(_tmp / "fehlt.json") == 
 
 k2 = {}
 bericht = ai.ingest(k2, [("thread_p1.html", SMF.encode("utf-8")), ("kaputt.bin", b"\xff" * 10)], AI_CN[0])
-check("Ingest: drei NOTAMs, eine Dublette", (bericht.notams_neu, bericht.dubletten) == (3, 0),
+check("Ingest: drei NOTAMs, Zitat nicht als Dublette gezaehlt", (bericht.notams_neu, bericht.dubletten) == (3, 0),
       (bericht.notams_neu, bericht.dubletten))
 check("  ... Dateien gezaehlt", bericht.dateien == 2, bericht.dateien)
-bericht_gross = ai.ingest({}, [("a.txt", b"x" * 10)] * 1, "")
-check("  ... kleiner Stapel ohne Fehler", bericht_gross.fehler == [], bericht_gross.fehler)
+bericht_klein = ai.ingest({}, [("a.txt", b"x" * 10)], "")
+check("  ... kleiner Stapel ohne Fehler", bericht_klein.fehler == [], bericht_klein.fehler)
 _alt_max = ai.MAX_BATCH_BYTES
 ai.MAX_BATCH_BYTES = 15
-bericht_zu_gross = ai.ingest({}, [("a.txt", b"x" * 10), ("b.txt", b"x" * 10)], "")
-ai.MAX_BATCH_BYTES = _alt_max
+try:
+    bericht_zu_gross = ai.ingest({}, [("a.txt", b"x" * 10), ("b.txt", b"x" * 10)], "")
+finally:
+    ai.MAX_BATCH_BYTES = _alt_max
 check("Stapel ueber der Grenze ganz abgelehnt",
       bericht_zu_gross.dateien == 0 and bericht_zu_gross.fehler, bericht_zu_gross.fehler)
+_alt_file = ai.MAX_FILE_BYTES
+ai.MAX_FILE_BYTES = len(AI_CN[1].encode("utf-8")) + 10
+try:
+    _b = ai.ingest({}, [("big.txt", b"x" * (ai.MAX_FILE_BYTES + 1)), ("ok.txt", AI_CN[1].encode("utf-8"))], "")
+finally:
+    ai.MAX_FILE_BYTES = _alt_file
+check("Ingest: zu grosse Datei meldet Fehler, der Rest laeuft weiter",
+      _b.dateien == 1 and len(_b.fehler) == 1 and _b.notams_neu > 0, (_b.dateien, _b.fehler, _b.notams_neu))
+check("  ... Dateiname steht nur einmal in der Meldung", _b.fehler[0].count("big.txt") == 1, _b.fehler)
 gi = (_P(app.APP_DIR) / ".gitignore").read_text(encoding="utf-8")
 check(".gitignore: lokale Importdateien",
       all(n in gi for n in ("archiv_korpus.json", "archiv_import.json", "gcat_launch_cache.tsv")))

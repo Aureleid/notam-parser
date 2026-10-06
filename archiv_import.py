@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -275,17 +276,34 @@ def read_json(path: Path) -> Dict[str, Any]:
 
 def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     """Schreibt erst eine temporaere Datei und benennt sie dann um."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    # eindeutiger Name im selben Ordner, damit os.replace atomar bleibt
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, ensure_ascii=False, indent=1))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
     data = read_json(path)
     korpus: Dict[str, KorpusNotam] = {}
-    for e in data.get("notams", []):
-        n = KorpusNotam(e["notam_id"], e["b"], e["text"], list(e.get("quellen", [])))
-        korpus[n.schluessel] = n
+    try:
+        for e in data.get("notams", []):
+            n = KorpusNotam(e["notam_id"], e["b"], e["text"], list(e.get("quellen", [])))
+            korpus[n.schluessel] = n
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise ImportStateError(
+            "{} has an unexpected structure ({!r}). It is left untouched - please check it.".format(
+                path.name, exc)
+        ) from exc
     return korpus
 
 
@@ -335,7 +353,8 @@ def ingest(
             paare.extend(texts_from_upload(name, data))
             bericht.dateien += 1
         except Exception as exc:  # jede Datei einzeln - der Stapel laeuft weiter
-            bericht.fehler.append("{}: {}".format(name, exc))
+            msg = str(exc)  # texts_from_upload nennt den Dateinamen schon selbst
+            bericht.fehler.append(msg if msg.startswith(name) else "{}: {}".format(name, msg))
     if eingefuegt.strip():
         paare.append(("pasted {}".format(datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%MZ")), eingefuegt))
     for quelle, text in paare:
