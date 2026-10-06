@@ -3491,13 +3491,15 @@ check("kaputte Alias-CSV: ImportStateError mit Datei und Spalte",
 
 # Aufgabe 6: Importzustand, Wiederaufnahme, Bestaetigen, Sammelbestaetigung
 zst = ai.load_state(_tmp / "s.json")
+archiv_t = _tmp / "archiv.csv"
+_kein_archiv = _tmp / "kein_archiv.csv"  # nie geschrieben: Kandidaten ohne Archivbezug
 kx = {}
 ai.merge_korpus(kx, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG]), "seite1.html#msg_1")[0])
 check("Neuauswertung: zwei Tage (20.09. und Nachlauf im 19.09.)", ai.reevaluate(kx, zst, sp, fir) == 2)
 _stand_json = _json.dumps(zst, sort_keys=True, default=str)
 check("  ... zweiter Lauf wertet nichts neu aus", ai.reevaluate(kx, zst, sp, fir) == 0)
 check("  ... und aendert den Zustand nicht", _json.dumps(zst, sort_keys=True, default=str) == _stand_json)
-kl = ai.candidates(zst)
+kl = ai.candidates(zst, archiv_t)
 check("Kandidatenliste: ein Start", len(kl) == 1 and kl[0]["entscheidung"] is None, kl)
 check("  ... US gezaehlt", ai.totals(zst)["usa"] == 1, ai.totals(zst))
 sammel = ai.bulk_candidates(kl, gs, sites, veh)
@@ -3505,13 +3507,12 @@ check("Sammelbestaetigung waehlt den eindeutigen", [(k["key"], r, p) for k, r, p
       == [(kl[0]["key"], "CZ-2D", "Yaogan 45")], [(r, p) for _, r, p, _ in sammel])
 check("  ... nicht mit Warnung", ai.bulk_candidates([dict(kl[0], inklination=60.0)], gs, sites, veh) == [])
 check("  ... nicht mehrdeutig", ai.bulk_candidates(kl, [_treffer0, _zweit], sites, veh) == [])
-archiv_t = _tmp / "archiv.csv"
 check("Bestaetigen schreibt eine Zeile", ai.confirm_many(zst, sammel, archiv_t) == 1)
 a1 = app.load_archive(archiv_t)
 check("  ... mit Rakete und Payload", (a1.iloc[0]["Trägersystem"], a1.iloc[0]["Payload"]) == ("CZ-2D", "Yaogan 45"),
       a1.iloc[0].to_dict())
 check("  ... Quelle im Nebenbestand", zst["entscheidungen"][kl[0]["key"]]["quellen"] == ["seite1.html#msg_1"])
-check("  ... danach nicht mehr in der Sammelauswahl", ai.bulk_candidates(ai.candidates(zst), gs, sites, veh) == [])
+check("  ... danach nicht mehr in der Sammelauswahl", ai.bulk_candidates(ai.candidates(zst, archiv_t), gs, sites, veh) == [])
 ai.save_state(zst, _tmp / "s.json")
 check("Zustand speichern und laden", ai.load_state(_tmp / "s.json")["entscheidungen"] == zst["entscheidungen"])
 check("leere Auswahl schreibt nichts", ai.confirm_many(zst, [], _tmp / "nie.csv") == 0 and not (_tmp / "nie.csv").exists())
@@ -3538,7 +3539,7 @@ dritte = AI_CN[2].replace("A4632/26", "A4640/26").replace(
     "N281000E0974500-N280800E0981500-N274000E0981000-N274200E0974000")
 ai.merge_korpus(kx, ai.extract_notams(dritte, "seite2.html#msg_9")[0])
 ai.reevaluate(kx, zst, sp, fir)
-neu_k = [k for k in ai.candidates(zst) if k["entscheidung"] is None]
+neu_k = [k for k in ai.candidates(zst, archiv_t) if k["entscheidung"] is None]
 check("weitere Zone: Kandidat 'aktualisiert'",
       len(neu_k) == 1 and neu_k[0]["ersetzt"] == [kl[0]["key"]], [(k["key"], k["ersetzt"]) for k in neu_k])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(neu_k, gs, sites, veh) == [])
@@ -3555,7 +3556,7 @@ check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DI
 # Fixrunde 1: Bestaetigung erst nach geprueftem Schreiben, Ersatz mehrerer Vorgaenger
 zf = ai.load_state(_tmp / "f.json")
 ai.reevaluate(kx, zf, sp, fir)
-kfl = ai.candidates(zf)
+kfl = ai.candidates(zf, _kein_archiv)
 kf = kfl[0]
 check("Sammelbestaetigung: GCAT-Rakete ohne Kuerzel -> einzeln bestaetigen",
       ai.bulk_candidates(kfl, [dataclasses.replace(_treffer0, rakete="Unbekannte Rakete XQ")], sites, veh) == [],
@@ -3574,7 +3575,7 @@ except Exception as exc:
 check("Bestaetigen: Archiv nicht geschrieben -> ImportStateError mit Dateiname",
       _fehler is not None and _ord.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
 check("  ... Zustand unveraendert", zf["entscheidungen"] == _vorher, zf["entscheidungen"])
-check("  ... kein Kandidat entschieden", all(k["entscheidung"] is None for k in ai.candidates(zf)))
+check("  ... kein Kandidat entschieden", all(k["entscheidung"] is None for k in ai.candidates(zf, _kein_archiv)))
 _entfernt_args = []
 _merge_orig = app.merge_archive
 def _merge_spion(bestand, neue, entfernt=None):
@@ -3634,7 +3635,7 @@ zz["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [_roh], "prueflist
 for _k, _r in ((_k1, _r1), (_k2, _r2)):
     zz["entscheidungen"][_k] = {"status": "confirmed", "rakete": "CZ-2D", "payload": "", "gcat": "",
                                 "notam_ids": [_r["NOTAM"]], "quellen": ["alt"]}
-_kz = ai.candidates(zz)
+_kz = ai.candidates(zz, archiv_z)
 check("zwei Vorgaenger: beide im Ersatzvermerk",
       len(_kz) == 1 and _kz[0]["ersetzt"] == sorted([_k1, _k2]), [k["ersetzt"] for k in _kz])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kz, gs, sites, veh) == [])
@@ -3649,11 +3650,11 @@ check("  ... beide als ersetzt vermerkt",
 # Verwerfen
 zr = ai.load_state(_tmp / "r.json")
 ai.reevaluate(kx, zr, sp, fir)
-_kr = ai.candidates(zr)[0]["key"]
+_kr = ai.candidates(zr, _kein_archiv)[0]["key"]
 ai.reject(zr, _kr)
 check("Verwerfen: Entscheidung gesetzt, nicht in der Sammelauswahl",
-      ai.candidates(zr)[0]["entscheidung"] == {"status": "discarded"}
-      and ai.bulk_candidates(ai.candidates(zr), gs, sites, veh) == [])
+      ai.candidates(zr, _kein_archiv)[0]["entscheidung"] == {"status": "discarded"}
+      and ai.bulk_candidates(ai.candidates(zr, _kein_archiv), gs, sites, veh) == [])
 
 MITTERNACHT = [AI_CN[1].replace("B)2609200354 C)2609200415", "B)2609192350 C)2609200011"),
                AI_CN[2].replace("B)2609200356 C)2609200435", "B)2609200002 C)2609200041")]
@@ -3662,17 +3663,17 @@ ai.merge_korpus(km, ai.extract_notams("\n\n".join(MITTERNACHT), "m")[0])
 zm = ai.load_state(_tmp / "m.json")
 ai.reevaluate(km, zm, sp, fir)
 check("Start ueber Mitternacht: ein Kandidat mit beiden Zonen",
-      [k["notam_ids"] for k in ai.candidates(zm)] == [["A4631/26", "A4632/26"]],
-      [k["notam_ids"] for k in ai.candidates(zm)])
+      [k["notam_ids"] for k in ai.candidates(zm, _kein_archiv)] == [["A4631/26", "A4632/26"]],
+      [k["notam_ids"] for k in ai.candidates(zm, _kein_archiv)])
 check("  ... mit dem Datum des ersten Tages",
-      ai.candidates(zm)[0]["row"]["Startdatum"] == "19.09.2026")
+      ai.candidates(zm, _kein_archiv)[0]["row"]["Startdatum"] == "19.09.2026")
 # Bruchstueck aus einem anderen Tag wird ueber drop_subsumed verworfen
-_kmn = ai.candidates(zm)[0]
+_kmn = ai.candidates(zm, _kein_archiv)[0]
 zm2 = {"tage": {"2026-09-19": {"kandidaten": [dict(_kmn, notam_ids=["A1/26", "A2/26"], key="v1")]},
                 "2026-09-20": {"kandidaten": [dict(_kmn, notam_ids=["A2/26"], key="v2")]}},
        "entscheidungen": {}}
-check("candidates: Bruchstueck verworfen", [k["key"] for k in ai.candidates(zm2)] == ["v1"],
-      [k["key"] for k in ai.candidates(zm2)])
+check("candidates: Bruchstueck verworfen", [k["key"] for k in ai.candidates(zm2, _kein_archiv)] == ["v1"],
+      [k["key"] for k in ai.candidates(zm2, _kein_archiv)])
 
 # Erkennungsstand und nicht mehr erkannte Starts
 check("Erkennungsstand nach dem ersten Lauf gesetzt", not ai.is_stale(zst), zst.get("erkennungsstand"))
@@ -4008,6 +4009,189 @@ except _RerunException:
 except Exception as exc:  # noqa: BLE001
     _durch = repr(exc)
 check("st.rerun im Reiter wird durchgereicht", _durch == "rerun", _durch)
+
+# --- Dubletten mit Zeilen des Tagesbetriebs (nola-3dq.12) ---
+# Genau der 20.09.-Fall: der Tagesbetrieb hat den Start schon mit drei Zonen archiviert
+_TAG_ROW = {"NOTAM": "A4631/26, A4632/26, F3573/26", "Startdatum": "20.09.2026", "Startzeit": "03:54",
+            "Nation": "China", "Weltraumbahnhof": "JSLC", "Trägersystem": "", "Payload": "",
+            "Orbit": "SSO", "Inklination": "97.0", "Azimuth": "189.3",
+            "Dropzones": "39.8083 100.0417; 29.1788 98.2425; -13.7000 92.0333"}
+_TAG_KEY = app.archive_key(_TAG_ROW)
+_kd = {}
+ai.merge_korpus(_kd, ai.extract_notams("\n\n".join(AI_CN[1:3]), "seite_d.html#msg_1")[0])
+
+
+def _dub_zustand(name, zeilen):
+    """Frischer Zustand aus AI_CN[1]/AI_CN[2] und ein Temp-Archiv mit den gegebenen Zeilen."""
+    pfad = _tmp / ("dub_" + name + ".csv")
+    app.persist_archive(pfad, app.merge_archive(None, zeilen))
+    z = ai.load_state(_tmp / ("dub_" + name + ".json"))
+    ai.reevaluate(_kd, z, sp, fir)
+    return z, pfad
+
+
+def _ohne(row, *spalten):
+    return {s: v for s, v in dict(row).items() if s not in spalten}
+
+
+zd, archiv_d = _dub_zustand("tag", [_TAG_ROW])
+_kd_l = [k for k in ai.candidates(zd, archiv_d) if k["entscheidung"] is None]
+check("20.09.: Kandidat aus A4631/A4632 ist schon archiviert",
+      len(_kd_l) == 1 and _kd_l[0]["im_archiv"] == [_TAG_KEY] and _kd_l[0]["ersetzt"] == [],
+      [(k["key"], k.get("im_archiv"), k["ersetzt"]) for k in _kd_l])
+check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kd_l, gs, sites, veh) == [])
+_vorher_d = app.load_archive(archiv_d)
+ai.confirm_many(zd, [(_kd_l[0], "CZ-2D", "Pengcheng", None)], archiv_d)
+_nach_d = app.load_archive(archiv_d)
+check("  ... Bestaetigen legt keine zweite Zeile an", len(_nach_d) == 1, _nach_d["NOTAM"].tolist())
+check("  ... Traegersystem und Payload eingetragen",
+      (_nach_d.iloc[0]["Trägersystem"], _nach_d.iloc[0]["Payload"]) == ("CZ-2D", "Pengcheng"),
+      _nach_d.iloc[0].to_dict())
+check("  ... NOTAM, Zonen, Bahnwerte und Datum unveraendert",
+      _ohne(_nach_d.iloc[0], "Trägersystem", "Payload") == _ohne(_vorher_d.iloc[0], "Trägersystem", "Payload")
+      and _nach_d.iloc[0]["NOTAM"] == "A4631/26, A4632/26, F3573/26",
+      (_nach_d.iloc[0].to_dict(), _vorher_d.iloc[0].to_dict()))
+_ed = zd["entscheidungen"].get(_kd_l[0]["key"], {})
+check("  ... Entscheidung 'confirmed' mit ergaenzter Zeile",
+      _ed.get("status") == "confirmed" and _ed.get("ergaenzt") == [_TAG_KEY]
+      and _ed.get("rakete") == "CZ-2D" and _ed.get("payload") == "Pengcheng", _ed)
+check("  ... Kandidat nicht mehr offen",
+      [k for k in ai.candidates(zd, archiv_d) if k["entscheidung"] is None] == [])
+check("  ... ergaenzte Zeile ist keine Waise des Imports", ai.orphans(dict(zd, tage={})) == [],
+      ai.orphans(dict(zd, tage={})))
+
+# Spaeter waechst der Kandidat (neue Zone): wieder 'already archived', kein Ersatz der fremden Zeile
+_kd2 = dict(_kd)
+ai.merge_korpus(_kd2, ai.extract_notams(dritte, "seite_d.html#msg_9")[0])
+ai.reevaluate(_kd2, zd, sp, fir)
+_kd_w = [k for k in ai.candidates(zd, archiv_d) if k["entscheidung"] is None]
+check("gewachsener Kandidat: wieder an der Zeile des Tagesbetriebs, kein Ersatzvermerk",
+      len(_kd_w) == 1 and _kd_w[0]["im_archiv"] == [_TAG_KEY] and _kd_w[0]["ersetzt"] == [],
+      [(k["key"], k.get("im_archiv"), k["ersetzt"]) for k in _kd_w])
+
+# Ohne Ueberschneidung: unveraendert eine neue Zeile
+_fremd = dict(_TAG_ROW, NOTAM="B0001/26", Startdatum="01.03.2026")
+zn, archiv_n = _dub_zustand("frei", [_fremd])
+_kn = ai.candidates(zn, archiv_n)
+check("ohne Ueberschneidung: im_archiv leer", len(_kn) == 1 and _kn[0]["im_archiv"] == [],
+      [k.get("im_archiv") for k in _kn])
+check("  ... in der Sammelauswahl", len(ai.bulk_candidates(_kn, gs, sites, veh)) == 1)
+ai.confirm_many(zn, [(_kn[0], "CZ-2D", "Pengcheng", None)], archiv_n)
+_an = app.load_archive(archiv_n)
+check("  ... Bestaetigen legt eine neue Zeile an",
+      sorted(app.archive_key(dict(r)) for _, r in _an.iterrows()) == sorted([app.archive_key(_fremd), _kn[0]["key"]]),
+      _an["NOTAM"].tolist())
+check("  ... die vorhandene Zeile bleibt unberuehrt",
+      _an[_an["NOTAM"] == "B0001/26"].iloc[0]["Trägersystem"] == "", _an.to_dict("records"))
+# Vom Import selbst geschriebene Zeile: Ersatzvermerk, nie 'already archived'
+zn["tage"]["2026-09-20"]["kandidaten"] = [dict(_kn[0], key="20.09.2026|A4631/26,A4632/26,A4640/26",
+                                               notam_ids=_kn[0]["notam_ids"] + ["A4640/26"])]
+_kn2 = ai.candidates(zn, archiv_n)
+check("importbestaetigte Zeile erscheint nicht in im_archiv",
+      len(_kn2) == 1 and _kn2[0]["im_archiv"] == [] and _kn2[0]["ersetzt"] == [_kn[0]["key"]],
+      [(k.get("im_archiv"), k["ersetzt"]) for k in _kn2])
+
+# Gemischter Aufruf: eine Ergaenzung und ein neuer Start, ein Schreibvorgang
+zg, archiv_g = _dub_zustand("gemischt", [_TAG_ROW])
+_kg = ai.candidates(zg, archiv_g)[0]
+_neu_row = dict(_kg["row"], NOTAM="C0001/26", Startdatum="21.09.2026")
+_kg_neu = dict(_kg, key=app.archive_key(_neu_row), row=_neu_row, notam_ids=["C0001/26"],
+               im_archiv=[], ersetzt=[])
+_schreib = []
+_persist_orig = app.persist_archive
+app.persist_archive = lambda path, df: (_schreib.append(path), _persist_orig(path, df))
+try:
+    _zahl = ai.confirm_many(zg, [(_kg, "CZ-2D", "Pengcheng", None), (_kg_neu, "CZ-4C", "Yaogan 50", None)], archiv_g)
+finally:
+    app.persist_archive = _persist_orig
+_ag = app.load_archive(archiv_g)
+check("gemischt: ein Schreibvorgang", _schreib == [archiv_g], _schreib)
+check("  ... zwei Zeilen: ergaenzte und neue",
+      len(_ag) == 2 and sorted(app.archive_key(dict(r)) for _, r in _ag.iterrows()) == sorted([_TAG_KEY, _kg_neu["key"]]),
+      _ag["NOTAM"].tolist())
+_ag_t = _ag[_ag["NOTAM"] == _TAG_ROW["NOTAM"]].iloc[0]
+check("  ... Tageszeile nur um Rakete/Payload ergaenzt",
+      (_ag_t["Trägersystem"], _ag_t["Payload"], _ag_t["Dropzones"]) == ("CZ-2D", "Pengcheng", _TAG_ROW["Dropzones"]),
+      _ag_t.to_dict())
+check("  ... beide entschieden", _zahl == 2 and zg["entscheidungen"][_kg["key"]].get("ergaenzt") == [_TAG_KEY]
+      and zg["entscheidungen"][_kg_neu["key"]]["status"] == "confirmed"
+      and "ergaenzt" not in zg["entscheidungen"][_kg_neu["key"]], (_zahl, zg["entscheidungen"]))
+
+# Leere Payload loescht keinen vorhandenen Eintrag
+zp2, archiv_p2 = _dub_zustand("payload", [dict(_TAG_ROW, Payload="Pengcheng")])
+ai.confirm_many(zp2, [(ai.candidates(zp2, archiv_p2)[0], "CZ-2D", "", None)], archiv_p2)
+_ap2 = app.load_archive(archiv_p2)
+check("Ergaenzen mit leerer Payload behaelt die vorhandene",
+      len(_ap2) == 1 and (_ap2.iloc[0]["Trägersystem"], _ap2.iloc[0]["Payload"]) == ("CZ-2D", "Pengcheng"),
+      _ap2.to_dict("records"))
+
+# Schreiben fehlgeschlagen: ImportStateError, Zustand und Archiv unveraendert
+zv, archiv_v = _dub_zustand("fehl", [_TAG_ROW])
+_kv = ai.candidates(zv, archiv_v)[0]
+_vorher_v = _copy.deepcopy(zv["entscheidungen"])
+_inhalt_v = archiv_v.read_bytes()
+app.persist_archive = lambda path, df: None
+try:
+    ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
+    _fehler = None
+except ai.ImportStateError as exc:
+    _fehler = str(exc)
+except Exception as exc:
+    _fehler = "wrong type: {!r}".format(exc)
+finally:
+    app.persist_archive = _persist_orig
+check("Ergaenzen nicht geschrieben -> ImportStateError mit Dateiname",
+      _fehler is not None and archiv_v.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
+check("  ... Zustand und Archiv unveraendert",
+      zv["entscheidungen"] == _vorher_v and archiv_v.read_bytes() == _inhalt_v, zv["entscheidungen"])
+# Zeile inzwischen verschwunden: nichts schreiben, nichts vermerken
+archiv_v.write_text("", encoding="utf-8")
+try:
+    ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
+    _fehler = None
+except ai.ImportStateError as exc:
+    _fehler = str(exc)
+except Exception as exc:
+    _fehler = "wrong type: {!r}".format(exc)
+check("Ergaenzen: Zeile nicht mehr im Archiv -> ImportStateError, nichts geschrieben",
+      _fehler is not None and not _fehler.startswith("wrong type") and zv["entscheidungen"] == _vorher_v
+      and archiv_v.read_text(encoding="utf-8") == "", _fehler)
+
+# Aktualisiert UND schon im Tagesbetrieb: keine Dublette, kein Datenverlust
+_imp_row = dict(_TAG_ROW, NOTAM="A4631/26", Trägersystem="CZ-2D", Payload="alt")
+_imp_key = app.archive_key(_imp_row)
+zb, archiv_b = _dub_zustand("beides", [_TAG_ROW, _imp_row])
+zb["entscheidungen"][_imp_key] = {"status": "confirmed", "rakete": "CZ-2D", "payload": "alt", "gcat": "",
+                                  "notam_ids": ["A4631/26"], "quellen": ["alt"]}
+_kb = ai.candidates(zb, archiv_b)
+check("aktualisiert und schon archiviert: beide Vermerke",
+      len(_kb) == 1 and _kb[0]["ersetzt"] == [_imp_key] and _kb[0]["im_archiv"] == [_TAG_KEY],
+      [(k["ersetzt"], k.get("im_archiv")) for k in _kb])
+check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kb, gs, sites, veh) == [])
+ai.confirm_many(zb, [(_kb[0], "CZ-2D", "Pengcheng", None)], archiv_b)
+_ab = app.load_archive(archiv_b)
+check("  ... keine neue Zeile, keine geloescht",
+      sorted(app.archive_key(dict(r)) for _, r in _ab.iterrows()) == sorted([_TAG_KEY, _imp_key]),
+      _ab["NOTAM"].tolist())
+check("  ... Tageszeile ergaenzt, Importzeile unberuehrt",
+      _ab[_ab["NOTAM"] == _TAG_ROW["NOTAM"]].iloc[0]["Payload"] == "Pengcheng"
+      and _ab[_ab["NOTAM"] == "A4631/26"].iloc[0]["Payload"] == "alt"
+      and zb["entscheidungen"][_imp_key]["status"] == "confirmed", _ab.to_dict("records"))
+
+# Reiter: Status 'already archived' und die ergaenzte Zeile als reiner Text
+_ziel = "20.09.2026|" + _BOESE
+_stub = _StStub()
+_r, _e = _versuch(_tab_lauf, _stub,
+                  candidates=lambda z: [dict(_kand("k_eins", "2020-05-02"), im_archiv=[_ziel])])
+_kopf = [c for c in _stub.aufrufe("expander") if "already archived" in repr(c[1])]
+_texte = [c for c in _stub.aufrufe("text") if _ziel in c[1][0]]
+check("Reiter: Status 'already archived'", _e is None and len(_kopf) == 1, (repr(_e), _stub.aufrufe("expander")))
+check("  ... ergaenzte Zeile als st.text genannt", len(_texte) == 1, _stub.aufrufe("text"))
+_roh = [c for c in _stub.calls if c[0] in _md_elemente and _BOESE in repr(c[1]) + repr(c[2])]
+check("  ... nie roh in Markdown-Elementen", not _roh, _roh[:3])
+_r, _e = _versuch(_tab_lauf, _StStub(), candidates=lambda z: [dict(_kand("k_eins", "2020-05-02"))])
+check("Reiter: Kandidat ohne im_archiv-Feld rendert weiter", _e is None, repr(_e))
+
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

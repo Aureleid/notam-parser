@@ -6398,15 +6398,26 @@ def _archive_import_candidate(
 ) -> None:
     """Ein Kandidat mit Vorschlag, Auswahl und den beiden Entscheidungen."""
     row = k["row"]
+    # im_archiv: vorhandene Archivzeilen (etwa Tagesbetrieb) desselben Starts
+    im_archiv = k.get("im_archiv") or []
+    if im_archiv:
+        status = "already archived"
+    elif k["ersetzt"]:  # Liste der Vorgaenger-Schluessel, leer = keiner
+        status = "updated"
+    else:
+        status = abgleich.status
     kopf = "{} {} · {} · {} · {} · {}".format(
         row["Startdatum"], row["Startzeit"], nation_label(k["nation"]),
-        row["Weltraumbahnhof"] or "sea", row["Orbit"],
-        # ersetzt ist eine Liste der Vorgaenger-Schluessel, leer = keiner
-        "updated" if k["ersetzt"] else abgleich.status,
+        row["Weltraumbahnhof"] or "sea", row["Orbit"], status,
     )
     with st.expander(_md_plain(kopf)):
         # Quellen und Hinweise stammen aus Forum/Upload/GCAT: nur als Text
         st.text("NOTAM: {} · Source: {}".format(row["NOTAM"], ", ".join(k["quellen"])))
+        if im_archiv:
+            st.text(
+                "Already in the archive. Confirming adds only vehicle and payload to: "
+                + "; ".join(im_archiv)
+            )
         for w in abgleich.warnungen:
             st.warning(_md_plain(w))
         for h in abgleich.hinweise:

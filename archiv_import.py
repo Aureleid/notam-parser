@@ -1021,7 +1021,7 @@ def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     return [
         (key, e)
         for key, e in sorted(state["entscheidungen"].items())
-        if e.get("status") == "confirmed"
+        if _ist_importzeile(e)  # eine ergaenzte Fremdzeile loescht der Import nie
         and not e.get("behalten")
         and not set(e.get("notam_ids", [])) & aktuelle_ids
     ]
@@ -1033,13 +1033,25 @@ def keep_orphan(state: Dict[str, Any], key: str) -> None:
     state["entscheidungen"][key]["behalten"] = True
 
 
-def _archiv_pruefen(archiv: Path, vorhanden: Set[str], fehlend: Set[str]) -> None:
+def _archiv_pruefen(
+    archiv: Path,
+    vorhanden: Set[str],
+    fehlend: Set[str],
+    werte: Optional[Mapping[str, Mapping[str, str]]] = None,
+) -> None:
     """
     Liest das Archiv nach dem Schreiben zurueck. app.persist_archive schluckt
     Schreibfehler; erst dieser Abgleich zeigt, ob die Aenderung angekommen ist.
+    `werte`: je Schluessel Spalten, die jede Zeile dieses Schluessels tragen muss.
     """
-    keys = {app.archive_key(dict(r)) for _, r in app.load_archive(archiv).iterrows()}
-    if not vorhanden <= keys or fehlend & keys:
+    zeilen = [(app.archive_key(dict(r)), r) for _, r in app.load_archive(archiv).iterrows()]
+    keys = {key for key, _ in zeilen}
+    falsch = any(
+        r[spalte] != wert
+        for key, r in zeilen
+        for spalte, wert in (werte or {}).get(key, {}).items()
+    )
+    if not vorhanden <= keys or fehlend & keys or falsch:
         raise ImportStateError(
             "{} could not be written. Nothing was recorded - please check the file "
             "and try again.".format(archiv.name)
@@ -1058,14 +1070,38 @@ def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CS
     state["entscheidungen"][key] = {"status": "removed"}
 
 
-def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Alle Kandidaten, je Schluessel einmal, mit Entscheidung und Ersatzvermerk."""
+def _ist_importzeile(e: Dict[str, Any]) -> bool:
+    """Bestaetigt UND vom Import selbst geschrieben (nicht nur eine fremde Zeile ergaenzt)."""
+    return e.get("status") == "confirmed" and not e.get("ergaenzt")
+
+
+def _kennungen(notam: str) -> Set[str]:
+    """NOTAM-Kennungen einer Archivzeile, wie archive_key sie liest."""
+    return {t.strip().upper() for t in str(notam).split(",") if t.strip()}
+
+
+def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Dict[str, Any]]:
+    """
+    Alle Kandidaten, je Schluessel einmal, mit Entscheidung und zwei Vermerken:
+
+    - ersetzt: vom Import bestaetigte Vorgaenger mit gemeinsamer Kennung.
+    - im_archiv: andere Archivzeilen (etwa aus dem Tagesbetrieb) mit gemeinsamer
+      Kennung. Bestaetigen ergaenzt dann nur deren Traegersystem und Payload,
+      statt denselben Start ein zweites Mal anzulegen.
+    """
     entscheidungen = state["entscheidungen"]
     bestaetigte_ids = {
         key: set(e.get("notam_ids", []))
         for key, e in entscheidungen.items()
-        if e.get("status") == "confirmed"
+        if _ist_importzeile(e)
     }
+    archivzeilen = [
+        (key, _kennungen(r["NOTAM"]))
+        for key, r in (
+            (app.archive_key(dict(r)), r) for _, r in app.load_archive(archiv).iterrows()
+        )
+        if key not in bestaetigte_ids  # eigene Zeilen laufen ueber ersetzt
+    ]
     gesehen: Dict[str, Dict[str, Any]] = {}
     alle = [k for iso in sorted(state["tage"]) for k in state["tage"][iso]["kandidaten"]]
     # Bruchstuecke (Nachlauf ueber Mitternacht, mehrtaegige Meldungen) verwerfen,
@@ -1077,12 +1113,16 @@ def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         eintrag["entscheidung"] = entscheidungen.get(k["key"])
         # alle bestaetigten Vorgaenger mit gemeinsamer Kennung; leer = keiner
         eintrag["ersetzt"] = []
+        # vorhandene fremde Archivzeilen mit gemeinsamer Kennung; leer = keine
+        eintrag["im_archiv"] = []
         if eintrag["entscheidung"] is None:
             eintrag["ersetzt"] = sorted(
                 alt_key
                 for alt_key, ids in bestaetigte_ids.items()
                 if alt_key != k["key"] and ids & set(k["notam_ids"])
             )
+            eigene = {i.upper() for i in k["notam_ids"]}
+            eintrag["im_archiv"] = sorted({key for key, ids in archivzeilen if ids & eigene})
         gesehen[k["key"]] = eintrag
     return list(gesehen.values())
 
@@ -1121,20 +1161,45 @@ def confirm_many(
     Bestaetigen ist eine ausdrueckliche Handlung: ein frueher im Optionsmenue
     entfernter Schluessel wird deshalb nicht gefiltert (entfernt=set()).
     Ein 'aktualisierter' Kandidat ersetzt die Zeilen aller seiner Vorgaenger.
+    Ein Kandidat mit im_archiv legt keine Zeile an: er traegt nur Traegersystem
+    und Payload in die vorhandene(n) Zeile(n) ein (leere Werte ueberschreiben
+    nichts). Seinen Ersatzvermerk wendet er nicht an - keine neue Zeile heisst
+    auch keine geloeschte, die Importzeile des Vorgaengers bleibt stehen.
     Der Zustand aendert sich erst, wenn das zurueckgelesene Archiv die
     Aenderung enthaelt; sonst ImportStateError und nichts ist vermerkt.
+    Rueckgabe: Zahl der bestaetigten Kandidaten.
     """
     if not auswahl:
         return 0
     bestand = app.load_archive(archiv)
-    ersetzt = {alt for k, _, _, _ in auswahl for alt in (k.get("ersetzt") or [])}
+    ergaenzen = [a for a in auswahl if a[0].get("im_archiv")]
+    anlegen = [a for a in auswahl if not a[0].get("im_archiv")]
+    # Ergaenzen: nur Traegersystem und Payload der vorhandenen Zeile(n)
+    schluessel = [app.archive_key(dict(r)) for _, r in bestand.iterrows()]
+    werte: Dict[str, Dict[str, str]] = {}
+    for kand, rakete, payload, _ in ergaenzen:
+        for ziel in kand["im_archiv"]:
+            if ziel not in schluessel:
+                raise ImportStateError(
+                    "The archive row {} is no longer in {}. Nothing was written - "
+                    "please reload the tab.".format(ziel, archiv.name)
+                )
+            for spalte, wert in (("Tr\u00e4gersystem", rakete), ("Payload", payload)):
+                if wert:
+                    werte.setdefault(ziel, {})[spalte] = wert
+    if werte:
+        bestand = bestand.copy()
+        for pos, key in enumerate(schluessel):
+            for spalte, wert in werte.get(key, {}).items():
+                bestand.iat[pos, bestand.columns.get_loc(spalte)] = wert
+    ersetzt = {alt for k, _, _, _ in anlegen for alt in (k.get("ersetzt") or [])}
     if ersetzt and not bestand.empty:
         bestand = bestand[
             [app.archive_key(dict(r)) not in ersetzt for _, r in bestand.iterrows()]
         ].reset_index(drop=True)
     zeilen = []
     neu: Dict[str, Dict[str, Any]] = {}
-    for kand, rakete, payload, treffer in auswahl:
+    for kand, rakete, payload, treffer in anlegen:
         row = dict(kand["row"])
         row["Trägersystem"] = rakete
         row["Payload"] = payload
@@ -1152,11 +1217,13 @@ def confirm_many(
             "notam_ids": list(kand["notam_ids"]),
             "quellen": list(kand["quellen"]),
         }
+        if kand.get("im_archiv"):
+            neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])
     app.persist_archive(archiv, app.merge_archive(bestand, zeilen, entfernt=set()))
     geschrieben = {app.archive_key(r) for r in zeilen}
-    _archiv_pruefen(archiv, geschrieben, ersetzt - geschrieben)
+    _archiv_pruefen(archiv, geschrieben | set(werte), ersetzt - geschrieben, werte)
     state["entscheidungen"].update(neu)
-    return len(zeilen)
+    return len(auswahl)
 
 
 def reject(state: Dict[str, Any], key: str) -> None:
@@ -1171,14 +1238,15 @@ def bulk_candidates(
     abgleiche: Optional[Mapping[str, Abgleich]] = None,
 ) -> List[Tuple[Dict[str, Any], str, str, GcatStart]]:
     """
-    Nur unentschiedene, eindeutige Kandidaten ohne Warnung, ohne Ersatzvermerk und mit Traeger-Kuerzel.
+    Nur unentschiedene, eindeutige Kandidaten ohne Warnung, ohne Ersatz- oder
+    Archivvermerk und mit Traeger-Kuerzel.
 
     abgleiche: schon berechnete Abgleiche je Kandidatenschluessel (spart den
     zweiten Abgleich im Reiter); fehlt einer, wird er hier berechnet.
     """
     auswahl = []
     for k in kandidaten:
-        if k["entscheidung"] is not None or k["ersetzt"]:
+        if k["entscheidung"] is not None or k["ersetzt"] or k.get("im_archiv"):
             continue
         abgleich = (abgleiche or {}).get(k["key"]) or match_candidate(k, gcat, sites)
         if abgleich.status != STATUS_EINDEUTIG or abgleich.warnungen:
