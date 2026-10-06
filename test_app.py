@@ -3157,6 +3157,43 @@ try:
 except ValueError:
     check("Datei ueber 5 MB abgelehnt", True)
 
+import tempfile
+from pathlib import Path as _P
+_tmp = _P(tempfile.mkdtemp())
+korpus = {}
+neu, dup = ai.merge_korpus(korpus, gef)
+neu2, dup2 = ai.merge_korpus(korpus, ai.extract_notams(AI_CN[1], "seite2.txt")[0])
+check("Korpus: drei neu, dann eine Dublette", (neu, dup, neu2, dup2) == (3, 0, 0, 1), (neu, dup, neu2, dup2))
+check("  ... Quellen zusammengefuehrt",
+      korpus["A4631/26|2609200354"].quellen == ["test.txt", "seite2.txt"],
+      korpus["A4631/26|2609200354"].quellen)
+ai.save_korpus(korpus, _tmp / "k.json")
+check("Korpus: speichern und laden", set(ai.load_korpus(_tmp / "k.json")) == set(korpus))
+(_tmp / "kaputt.json").write_text("{ halb", encoding="utf-8")
+try:
+    ai.read_json(_tmp / "kaputt.json")
+    check("unlesbare JSON bricht ab", False)
+except ai.ImportStateError:
+    check("unlesbare JSON bricht ab", (_tmp / "kaputt.json").read_text(encoding="utf-8") == "{ halb")
+check("fehlende JSON ergibt leeren Stand", ai.read_json(_tmp / "fehlt.json") == {})
+
+k2 = {}
+bericht = ai.ingest(k2, [("thread_p1.html", SMF.encode("utf-8")), ("kaputt.bin", b"\xff" * 10)], AI_CN[0])
+check("Ingest: drei NOTAMs, eine Dublette", (bericht.notams_neu, bericht.dubletten) == (3, 0),
+      (bericht.notams_neu, bericht.dubletten))
+check("  ... Dateien gezaehlt", bericht.dateien == 2, bericht.dateien)
+bericht_gross = ai.ingest({}, [("a.txt", b"x" * 10)] * 1, "")
+check("  ... kleiner Stapel ohne Fehler", bericht_gross.fehler == [], bericht_gross.fehler)
+_alt_max = ai.MAX_BATCH_BYTES
+ai.MAX_BATCH_BYTES = 15
+bericht_zu_gross = ai.ingest({}, [("a.txt", b"x" * 10), ("b.txt", b"x" * 10)], "")
+ai.MAX_BATCH_BYTES = _alt_max
+check("Stapel ueber der Grenze ganz abgelehnt",
+      bericht_zu_gross.dateien == 0 and bericht_zu_gross.fehler, bericht_zu_gross.fehler)
+gi = (_P(app.APP_DIR) / ".gitignore").read_text(encoding="utf-8")
+check(".gitignore: lokale Importdateien",
+      all(n in gi for n in ("archiv_korpus.json", "archiv_import.json", "gcat_launch_cache.tsv")))
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

@@ -235,3 +235,113 @@ def texts_from_upload(name: str, data: bytes) -> List[Tuple[str, str]]:
     if parser.beitraege:
         return [("{}#{}".format(name, pid), t) for pid, t in parser.beitraege]
     return [(name, "".join(parser.ganz))]
+
+
+# --------------------------------------------------------------------------- #
+# Rohkorpus und Zustandsdateien
+# --------------------------------------------------------------------------- #
+def merge_korpus(
+    korpus: Dict[str, KorpusNotam], neue: Iterable[KorpusNotam]
+) -> Tuple[int, int]:
+    """Fuegt NOTAMs hinzu; Dubletten (Kennung + B) sammeln nur ihre Quelle."""
+    neu = dup = 0
+    for n in neue:
+        alt = korpus.get(n.schluessel)
+        if alt is None:
+            korpus[n.schluessel] = KorpusNotam(n.notam_id, n.b, n.text, list(n.quellen))
+            neu += 1
+            continue
+        dup += 1
+        for q in n.quellen:
+            if q not in alt.quellen:
+                alt.quellen.append(q)
+    return neu, dup
+
+
+def read_json(path: Path) -> Dict[str, Any]:
+    """Liest eine Zustandsdatei; fehlt sie, ist der Stand leer."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ImportStateError(
+            "{} is unreadable ({}). It is left untouched - please check it.".format(path.name, exc)
+        ) from exc
+    if not isinstance(data, dict):
+        raise ImportStateError("{} has an unexpected format.".format(path.name))
+    return data
+
+
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Schreibt erst eine temporaere Datei und benennt sie dann um."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
+    data = read_json(path)
+    korpus: Dict[str, KorpusNotam] = {}
+    for e in data.get("notams", []):
+        n = KorpusNotam(e["notam_id"], e["b"], e["text"], list(e.get("quellen", [])))
+        korpus[n.schluessel] = n
+    return korpus
+
+
+def save_korpus(korpus: Dict[str, KorpusNotam], path: Path = KORPUS_JSON) -> None:
+    write_json_atomic(
+        path,
+        {
+            "version": 1,
+            "notams": [
+                {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen}
+                for n in sorted(korpus.values(), key=lambda n: n.schluessel)
+            ],
+        },
+    )
+
+
+@dataclass
+class ImportReport:
+    """Was ein Stapel gebracht hat - auch das, was nicht verwertbar war."""
+
+    dateien: int = 0
+    notams_neu: int = 0
+    dubletten: int = 0
+    unbrauchbar: int = 0
+    fehler: List[str] = field(default_factory=list)
+    tage_ausgewertet: int = 0
+    usa_ausgenommen: int = 0
+    ausgeblendet: int = 0
+
+
+def ingest(
+    korpus: Dict[str, KorpusNotam],
+    dateien: Sequence[Tuple[str, bytes]],
+    eingefuegt: str = "",
+) -> ImportReport:
+    """Liest einen Stapel in den Korpus. Eine fehlerhafte Datei haelt den Rest nicht auf."""
+    bericht = ImportReport()
+    gesamt = sum(len(d) for _, d in dateien) + len(eingefuegt.encode("utf-8"))
+    if gesamt > MAX_BATCH_BYTES:
+        bericht.fehler.append(
+            "Batch refused: larger than {} MB.".format(MAX_BATCH_BYTES // (1024 * 1024))
+        )
+        return bericht
+    paare: List[Tuple[str, str]] = []
+    for name, data in dateien:
+        try:
+            paare.extend(texts_from_upload(name, data))
+            bericht.dateien += 1
+        except Exception as exc:  # jede Datei einzeln - der Stapel laeuft weiter
+            bericht.fehler.append("{}: {}".format(name, exc))
+    if eingefuegt.strip():
+        paare.append(("pasted {}".format(datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%MZ")), eingefuegt))
+    for quelle, text in paare:
+        notams, unbrauchbar = extract_notams(text, quelle)
+        bericht.unbrauchbar += unbrauchbar
+        neu, dup = merge_korpus(korpus, notams)
+        bericht.notams_neu += neu
+        bericht.dubletten += dup
+    return bericht

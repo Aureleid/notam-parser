@@ -34,3 +34,9 @@ vault/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Archiv-Import - aus Forenseiten abgeleitet, bleibt wie das Archiv lokal
+archiv_korpus.json
+archiv_import.json
+gcat_launch_cache.tsv
+*.json.tmp
