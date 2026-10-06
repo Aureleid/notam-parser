@@ -1324,7 +1324,8 @@ def vehicle_code_for(
     review_bestaetigt, review_ausgeblendet`, und `save_state(state: Dict, path: Path = IMPORT_JSON) -> None`
   - `reevaluate(korpus, state, spaceports, firs, erzwingen: Iterable[str] = ()) -> int`
     (Anzahl neu ausgewerteter Tage)
-  - `candidates(state) -> List[Dict]` (entdoppelt, mit `entscheidung` und `ersetzt`)
+  - `candidates(state) -> List[Dict]` (entdoppelt, Bruchstücke über `drop_subsumed` aus
+    Aufgabe 3 verworfen, mit `entscheidung` und `ersetzt`)
   - `review_items(state) -> List[Dict]` (entdoppelt nach `schluessel`)
   - `confirm_many(state, auswahl: Sequence[Tuple[Dict, str, str, Optional[GcatStart]]], archiv: Path = app.ARCHIVE_CSV) -> int`
   - `reject(state, key: str) -> None`
@@ -1584,19 +1585,21 @@ def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         if e.get("status") == "confirmed"
     }
     gesehen: Dict[str, Dict[str, Any]] = {}
-    for iso in sorted(state["tage"]):
-        for k in state["tage"][iso]["kandidaten"]:
-            if k["key"] in gesehen:
-                continue
-            eintrag = dict(k)
-            eintrag["entscheidung"] = entscheidungen.get(k["key"])
-            eintrag["ersetzt"] = None
-            if eintrag["entscheidung"] is None:
-                for alt_key, ids in bestaetigte_ids.items():
-                    if alt_key != k["key"] and ids & set(k["notam_ids"]):
-                        eintrag["ersetzt"] = alt_key
-                        break
-            gesehen[k["key"]] = eintrag
+    alle = [k for iso in sorted(state["tage"]) for k in state["tage"][iso]["kandidaten"]]
+    # Bruchstuecke (Nachlauf ueber Mitternacht, mehrtaegige Meldungen) verwerfen,
+    # siehe drop_subsumed aus Aufgabe 3.
+    for k in drop_subsumed(alle):
+        if k["key"] in gesehen:
+            continue
+        eintrag = dict(k)
+        eintrag["entscheidung"] = entscheidungen.get(k["key"])
+        eintrag["ersetzt"] = None
+        if eintrag["entscheidung"] is None:
+            for alt_key, ids in bestaetigte_ids.items():
+                if alt_key != k["key"] and ids & set(k["notam_ids"]):
+                    eintrag["ersetzt"] = alt_key
+                    break
+        gesehen[k["key"]] = eintrag
     return list(gesehen.values())
 
 
