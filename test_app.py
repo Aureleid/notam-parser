@@ -3103,6 +3103,45 @@ check("  ... und sie besteht nachweislich noch",
       app.archive_key(_d) != app.archive_key(_a),
       (app.archive_key(_d), app.archive_key(_a)))
 
+print("== Archiv-Import ==")
+import archiv_import as ai
+
+AI_CN = CN  # A0611/26, A4631/26, A4632/26 aus Abschnitt 22
+blk = ai.cut_block(AI_CN[1] + "\nprobably Starship from Boca Chica, see post above")
+check("Kommentar unter G) gehoert nicht zum Block", "STARSHIP" not in blk.upper(), blk[-60:])
+check("  ... der Block endet mit G)UNL", blk.rstrip().endswith("G)UNL"), blk[-20:])
+nur_e = "Z1111/26 NOTAMN\nB) 2609200354 C) 2609200415\nE) DANGER AREA 3948N10002E\n\nnice launch!"
+check("nur E): Ende an der Leerzeile", "nice" not in ai.cut_block(nur_e))
+
+forum = "Hier die NOTAMs fuer morgen:\n\n" + "\n\n".join(AI_CN) + "\n\n" \
+        "B9999/26 hat keinen Inhalt\n"
+gef, unbr = ai.extract_notams(forum, "test.txt")
+check("drei NOTAMs aus Forentext", [n.notam_id for n in gef] == ["A0611/26", "A4631/26", "A4632/26"],
+      [n.notam_id for n in gef])
+check("  ... B-Rohwert gemerkt", gef[1].b == "2609200354", gef[1].b)
+check("  ... Quelle gemerkt", gef[0].quellen == ["test.txt"], gef[0].quellen)
+check("  ... Block ohne E)/Q) als nicht verwertbar gezaehlt", unbr == 1, unbr)
+check("Schluessel = Kennung|B", gef[1].schluessel == "A4631/26|2609200354", gef[1].schluessel)
+
+SMF = """<html><head><script>var x = "A7777/26 Q) X E) Y";</script></head><body>
+<div class="post_wrapper"><div class="inner" data-msgid="101" id="msg_101">
+Two NOTAMs:<br>""" + AI_CN[1].replace("\n", "<br>\n") + """<br>""" + AI_CN[2].replace("\n", "<br>\n") + """
+</div></div>
+<div class="post_wrapper"><div class="inner" id="msg_102">
+<blockquote class="bbc_standard_quote">""" + AI_CN[1].replace("\n", "<br>\n") + """</blockquote>
+Looks like CZ-2D from Jiuquan.</div></div></body></html>"""
+teile = ai.texts_from_upload("thread_p1.html", SMF.encode("utf-8"))
+check("HTML: je Beitrag ein Text", [q for q, _ in teile] == ["thread_p1.html#msg_101", "thread_p1.html#msg_102"],
+      [q for q, _ in teile])
+check("HTML: Zitat verworfen", "A4631/26" not in teile[1][1], teile[1][1][:80])
+check("HTML: Skript verworfen", all("A7777/26" not in t for _, t in teile))
+check("HTML: Zeilenumbrueche aus <br>", "\nE)" in teile[0][1] or "\nE) " in teile[0][1])
+try:
+    ai.texts_from_upload("gross.txt", b"x" * (ai.MAX_FILE_BYTES + 1))
+    check("Datei ueber 5 MB abgelehnt", False)
+except ValueError:
+    check("Datei ueber 5 MB abgelehnt", True)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
