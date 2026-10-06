@@ -703,3 +703,147 @@ def load_gcat(
         _GCAT_MEMO[memo_key] = parse_gcat(cache.read_text(encoding="utf-8", errors="replace"))
     starts = _GCAT_MEMO[memo_key]
     return starts, hinweis + "GCAT (J. McDowell, CC-BY), copy from {}: {} launches.".format(stand, len(starts))
+
+
+# --------------------------------------------------------------------------- #
+# Abgleich mit GCAT
+# --------------------------------------------------------------------------- #
+STATUS_EINDEUTIG = "unique"
+STATUS_MEHRDEUTIG = "ambiguous"
+STATUS_KEIN_FLUG = "no flight in GCAT"
+STATUS_SEESTART = "sea launch"
+STATUS_KEIN_ABGLEICH = "no comparison"
+
+
+@dataclass
+class Abgleich:
+    status: str
+    treffer: List[GcatStart] = field(default_factory=list)
+    warnungen: List[str] = field(default_factory=list)
+    hinweise: List[str] = field(default_factory=list)
+
+
+def _winkel(a: float, b: float) -> float:
+    d = abs(a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
+def match_candidate(
+    kand: Dict[str, Any],
+    gcat: Optional[List[GcatStart]],
+    sites: Dict[str, Tuple[List[str], str]],
+) -> Abgleich:
+    """
+    Paart einen Kandidaten mit GCAT-Starts. Liefert nur Vorschlaege: was
+    uebernommen wird, entscheidet der Benutzer. NOLAs eigene Werte bleiben.
+    """
+    if gcat is None:
+        return Abgleich(STATUS_KEIN_ABGLEICH)
+    von = datetime.fromisoformat(kand["fenster"][0])
+    bis = datetime.fromisoformat(kand["fenster"][1] or kand["fenster"][0])
+    platz = kand["row"].get("Weltraumbahnhof", "")
+    treffer: List[GcatStart] = []
+    unzugeordnet: List[GcatStart] = []
+    for s in gcat:
+        im_fenster = (
+            von.date() <= s.zeit.date() <= bis.date()
+            if s.nur_datum
+            else von - MATCH_SLACK <= s.zeit <= bis + MATCH_SLACK
+        )
+        if not im_fenster:
+            continue
+        zuordnung = sites.get(s.site)
+        if zuordnung is None:
+            unzugeordnet.append(s)
+            continue
+        kuerzel, land = zuordnung
+        if kand["seestart"]:
+            if land == kand["nation"]:
+                treffer.append(s)
+        elif platz in kuerzel:
+            treffer.append(s)
+
+    abgleich = Abgleich(STATUS_KEIN_FLUG, treffer)
+    if not treffer:
+        if unzugeordnet:
+            abgleich.hinweise.append(
+                "GCAT launches in this window at sites without a row in {}: {}".format(
+                    GCAT_SITES_CSV.name,
+                    ", ".join("{} ({})".format(s.site, s.rakete) for s in unzugeordnet),
+                )
+            )
+        return abgleich
+    if kand["seestart"]:
+        abgleich.status = STATUS_SEESTART
+    elif len(treffer) == 1 and not treffer[0].nur_datum:
+        abgleich.status = STATUS_EINDEUTIG
+    else:
+        abgleich.status = STATUS_MEHRDEUTIG
+    if len(treffer) == 1:
+        s = treffer[0]
+        land = sites[s.site][1]
+        if land != kand["nation"]:
+            abgleich.warnungen.append("GCAT site belongs to {}, NOLA says {}.".format(land, kand["nation"]))
+        if kand.get("inklination") is not None and s.inklination is not None:
+            if abs(kand["inklination"] - s.inklination) > DEVIATION_DEG:
+                abgleich.warnungen.append(
+                    "Inclination {:.1f}° vs. GCAT {:.1f}°.".format(kand["inklination"], s.inklination))
+        if kand.get("azimut") is not None and s.azimut is not None:
+            if _winkel(kand["azimut"], s.azimut) > DEVIATION_DEG:
+                abgleich.warnungen.append(
+                    "Azimuth {:.1f}° vs. GCAT {:.1f}°.".format(kand["azimut"], s.azimut))
+    return abgleich
+
+
+def _norm_name(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+_ALIAS_MEMO: Dict[Tuple[str, float], Dict[str, str]] = {}
+
+
+def load_gcat_vehicle_aliases(path: Path = GCAT_VEHICLES_CSV) -> Dict[str, str]:
+    """
+    GCAT-Schreibweise -> Kuerzel (nur fuer den Import). Fehlt die Datei, ist sie leer.
+
+    Je Datei und Aenderungszeit nur einmal gelesen: vehicle_code_for ruft das
+    je Kandidat auf. Das Ergebnis ist geteilt und darf nicht veraendert werden.
+    """
+    if not path.exists():
+        return {}
+    key = (str(path), path.stat().st_mtime)
+    if key not in _ALIAS_MEMO:
+        _ALIAS_MEMO.clear()
+        df = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+        _ALIAS_MEMO[key] = {
+            _norm_name(r["GCAT"]): r["Abkürzung"].strip()
+            for _, r in df.iterrows()
+            if r["GCAT"].strip() and r["Abkürzung"].strip()
+        }
+    return _ALIAS_MEMO[key]
+
+
+def vehicle_code_for(
+    gcat_rakete: str, vehicles: pd.DataFrame, aliases: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    GCAT-Raketenname -> Kuerzel aus traegersysteme_updated.csv.
+
+    Die Oberstufe hinter '/' zaehlt nicht. Erst die Schreibweisen aus
+    gcat_traegersysteme.csv, dann Name, Alternativname und Kuerzel der
+    Referenz. Ohne Entsprechung - auch wenn ein Alias auf ein Kuerzel zeigt,
+    das nicht (mehr) in der Referenz steht - bleibt es leer: ein unbekannter
+    Wert wuerde das Dropdown des Tagesbetriebs unterlaufen.
+    """
+    basis = _norm_name(gcat_rakete.split("/")[0])
+    if not basis or vehicles is None or vehicles.empty:
+        return ""
+    codes = [str(c) for c in vehicles["Abkürzung"]]
+    alias = (aliases if aliases is not None else load_gcat_vehicle_aliases()).get(basis)
+    if alias:
+        return alias if alias in codes else ""
+    for _, v in vehicles.iterrows():
+        namen = {_norm_name(v["Name"]), _norm_name(v["Alternativname englisch"]), _norm_name(v["Abkürzung"])}
+        if basis in namen:
+            return str(v["Abkürzung"])
+    return ""

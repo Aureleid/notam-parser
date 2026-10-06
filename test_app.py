@@ -3409,6 +3409,43 @@ check("GCAT: uebergrosse Antwort wird abgelehnt",
       cache_g.read_bytes() == vorher and "Download failed" in sm, sm)
 check("GCAT: Statustexte", "Download failed" in status2 and "GCAT (J. McDowell, CC-BY)" in status, (status, status2))
 
+kand = dict(tag20.kandidaten[0])
+abg = ai.match_candidate(kand, gs, sites)
+check("Abgleich: eindeutig", abg.status == ai.STATUS_EINDEUTIG, (abg.status, abg.warnungen, abg.hinweise))
+check("  ... Treffer ist der chinesische Start", abg.treffer[0].tag == "2026-201")
+check("  ... keine Warnung bei passender Bahn", abg.warnungen == [], abg.warnungen)
+schief = dict(kand, inklination=60.0)
+check("Abweichung ueber 10 Grad wird gewarnt", ai.match_candidate(schief, gs, sites).warnungen != [])
+check("ohne Startliste: kein Abgleich", ai.match_candidate(kand, None, sites).status == ai.STATUS_KEIN_ABGLEICH)
+leer_tag = dict(kand, fenster=["2026-09-21T03:00:00+00:00", "2026-09-21T03:30:00+00:00"])
+abg0 = ai.match_candidate(leer_tag, gs, sites)
+check("kein Treffer: kein Flug", abg0.status == ai.STATUS_KEIN_FLUG, abg0.status)
+nur_tag = dict(kand, fenster=["2025-03-01T10:00:00+00:00", "2025-03-01T10:20:00+00:00"])
+check("nur Tagesdatum: nie eindeutig", ai.match_candidate(nur_tag, gs, sites).status == ai.STATUS_MEHRDEUTIG)
+see = dict(kand, seestart=True, row=dict(kand["row"], Weltraumbahnhof=""),
+           fenster=["2023-12-05T19:00:00+00:00", "2023-12-05T19:40:00+00:00"])
+abg_see = ai.match_candidate(see, gs, sites)
+check("Seestart: Treffer ueber Land, aber nie eindeutig",
+      abg_see.status == ai.STATUS_SEESTART and len(abg_see.treffer) == 1, abg_see.status)
+fremd = dict(kand, row=dict(kand["row"], Weltraumbahnhof="XSLC"))
+abg_f = ai.match_candidate(fremd, gs, sites)
+check("Hinweis nennt nicht zugeordnete GCAT-Plaetze im Fenster",
+      any("VSFBS" in h for h in abg_f.hinweise), abg_f.hinweise)
+veh = app.load_vehicles(str(app.VEHICLE_CSV))
+check("Rakete: Chang Zheng 2D/YZ-3 -> CZ-2D", ai.vehicle_code_for("Chang Zheng 2D/YZ-3", veh) == "CZ-2D")
+check("Rakete: Soyuz-2-1A -> Soyuz-2.1a", ai.vehicle_code_for("Soyuz-2-1A", veh) == "Soyuz-2.1a")
+_alias = {ai._norm_name("PSLV-XL"): "PSLV", ai._norm_name("Cheonlima-1"): "Chollima-1",
+          ai._norm_name("Geist-1"): "GEIST"}
+check("Schreibweise: PSLV-XL -> PSLV", ai.vehicle_code_for("PSLV-XL", veh, _alias) == "PSLV")
+check("Schreibweise: Cheonlima-1 -> Chollima-1", ai.vehicle_code_for("Cheonlima-1", veh, _alias) == "Chollima-1")
+check("Alias auf unbekanntes Kuerzel bleibt leer", ai.vehicle_code_for("Geist-1", veh, _alias) == "")
+check("Rakete ohne Entsprechung bleibt leer", ai.vehicle_code_for("NK Kerolox LV", veh, {}) == "")
+_dateialias = ai.load_gcat_vehicle_aliases()
+check("Referenz gcat_traegersysteme.csv: vier Schreibweisen",
+      _dateialias.get(ai._norm_name("Zoljanah")) == "Zuljanah" and len(_dateialias) == 4, _dateialias)
+check("Schreibweisen werden je Datei und Aenderungszeit nur einmal gelesen",
+      ai.load_gcat_vehicle_aliases() is _dateialias)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
