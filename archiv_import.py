@@ -22,6 +22,7 @@ import json
 import os
 import re
 import tempfile
+import types
 import urllib.parse
 import urllib.request
 from collections import defaultdict
@@ -29,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -799,32 +800,59 @@ def _norm_name(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
-_ALIAS_MEMO: Dict[Tuple[str, float], Dict[str, str]] = {}
+_ALIAS_MEMO: Dict[Tuple[str, float], Mapping[str, str]] = {}
 
 
-def load_gcat_vehicle_aliases(path: Path = GCAT_VEHICLES_CSV) -> Dict[str, str]:
+def load_gcat_vehicle_aliases(path: Path = GCAT_VEHICLES_CSV) -> Mapping[str, str]:
     """
     GCAT-Schreibweise -> Kuerzel (nur fuer den Import). Fehlt die Datei, ist sie leer.
 
     Je Datei und Aenderungszeit nur einmal gelesen: vehicle_code_for ruft das
-    je Kandidat auf. Das Ergebnis ist geteilt und darf nicht veraendert werden.
+    je Kandidat auf. Das Ergebnis ist geteilt und deshalb schreibgeschuetzt.
     """
     if not path.exists():
-        return {}
+        return types.MappingProxyType({})
     key = (str(path), path.stat().st_mtime)
     if key not in _ALIAS_MEMO:
-        _ALIAS_MEMO.clear()
         df = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
-        _ALIAS_MEMO[key] = {
+        fehlend = [c for c in ("GCAT", "Abkürzung") if c not in df.columns]
+        if fehlend:
+            raise ImportStateError(
+                "{} is missing the column {}. It is left untouched - please check it.".format(
+                    path.name, ", ".join(fehlend))
+            )
+        _ALIAS_MEMO.clear()
+        _ALIAS_MEMO[key] = types.MappingProxyType({
             _norm_name(r["GCAT"]): r["Abkürzung"].strip()
             for _, r in df.iterrows()
             if r["GCAT"].strip() and r["Abkürzung"].strip()
-        }
+        })
     return _ALIAS_MEMO[key]
 
 
+_VEHICLE_NAME_MEMO: Dict[Tuple[Tuple[str, ...], ...], Dict[str, str]] = {}
+
+
+def _vehicle_name_lookup(vehicles: pd.DataFrame) -> Dict[str, str]:
+    """
+    Normalisierter Name/Alternativname/Kuerzel -> Kuerzel; bei Doppelungen
+    gewinnt die erste Zeile der Referenz. Je Inhalt der drei Spalten nur
+    einmal gebaut (Schluessel: die Spalteninhalte selbst, ~50 Zeilen).
+    """
+    spalten = ("Name", "Alternativname englisch", "Abkürzung")
+    key = tuple(tuple(str(x) for x in vehicles[c]) for c in spalten)
+    if key not in _VEHICLE_NAME_MEMO:
+        _VEHICLE_NAME_MEMO.clear()
+        lookup: Dict[str, str] = {}
+        for name, alt, code in zip(*key):
+            for n in (_norm_name(name), _norm_name(alt), _norm_name(code)):
+                lookup.setdefault(n, code)
+        _VEHICLE_NAME_MEMO[key] = lookup
+    return _VEHICLE_NAME_MEMO[key]
+
+
 def vehicle_code_for(
-    gcat_rakete: str, vehicles: pd.DataFrame, aliases: Optional[Dict[str, str]] = None
+    gcat_rakete: str, vehicles: pd.DataFrame, aliases: Optional[Mapping[str, str]] = None
 ) -> str:
     """
     GCAT-Raketenname -> Kuerzel aus traegersysteme_updated.csv.
@@ -842,8 +870,4 @@ def vehicle_code_for(
     alias = (aliases if aliases is not None else load_gcat_vehicle_aliases()).get(basis)
     if alias:
         return alias if alias in codes else ""
-    for _, v in vehicles.iterrows():
-        namen = {_norm_name(v["Name"]), _norm_name(v["Alternativname englisch"]), _norm_name(v["Abkürzung"])}
-        if basis in namen:
-            return str(v["Abkürzung"])
-    return ""
+    return _vehicle_name_lookup(vehicles).get(basis, "")

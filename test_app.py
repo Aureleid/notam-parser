@@ -3446,6 +3446,49 @@ check("Referenz gcat_traegersysteme.csv: vier Schreibweisen",
 check("Schreibweisen werden je Datei und Aenderungszeit nur einmal gelesen",
       ai.load_gcat_vehicle_aliases() is _dateialias)
 
+# Fix-Runde 1: Warnpfade, Mehrdeutigkeit, schreibgeschuetzter Alias-Speicher, kaputte Alias-CSV
+import dataclasses
+from datetime import timedelta
+_treffer0 = ai.match_candidate(kand, gs, sites).treffer[0]
+_land0 = sites[_treffer0.site][1]
+abg_nat = ai.match_candidate(dict(kand, nation="Russland"), gs, sites)
+check("Warnung: Land weicht vom GCAT-Platz ab",
+      any(_land0 in w and "Russland" in w for w in abg_nat.warnungen), abg_nat.warnungen)
+_g_az = dataclasses.replace(_treffer0, azimut=5.0, inklination=None)
+_k_az = dict(kand, inklination=None)
+check("Azimut 355 vs 5 (10 Grad, Umlauf): keine Warnung",
+      ai.match_candidate(dict(_k_az, azimut=355.0), [_g_az], sites).warnungen == [])
+_w_az = ai.match_candidate(dict(_k_az, azimut=350.0), [_g_az], sites).warnungen
+check("Azimut 350 vs 5 (15 Grad, Umlauf): Warnung", len(_w_az) == 1 and "Azimuth" in _w_az[0], _w_az)
+_zweit = dataclasses.replace(_treffer0, tag="2026-999", zeit=_treffer0.zeit + timedelta(minutes=5))
+abg_zwei = ai.match_candidate(kand, [_treffer0, _zweit], sites)
+check("zwei Zeit-Treffer am Platz: mehrdeutig mit beiden",
+      abg_zwei.status == ai.STATUS_MEHRDEUTIG and len(abg_zwei.treffer) == 2
+      and {t.tag for t in abg_zwei.treffer} == {"2026-201", "2026-999"}, (abg_zwei.status, abg_zwei.treffer))
+_dateialias2 = ai.load_gcat_vehicle_aliases()
+try:
+    _dateialias2["x"] = "y"
+    _mut = "no error"
+except TypeError:
+    _mut = "TypeError"
+check("Alias-Speicher ist schreibgeschuetzt", _mut == "TypeError", _mut)
+check("Alias-Speicher: Explizites Dict funktioniert weiter",
+      ai.vehicle_code_for("PSLV-XL", veh, {ai._norm_name("PSLV-XL"): "PSLV"}) == "PSLV")
+check("Rakete: bekannte Namen unveraendert (Name, Alternativname, Kuerzel)",
+      [ai.vehicle_code_for(n, veh, {}) for n in ("Chang Zheng 2D/YZ-3", "Soyuz-2-1A", "CZ-2D", "NK Kerolox LV")]
+      == ["CZ-2D", "Soyuz-2.1a", "CZ-2D", ""])
+_bad_alias = _tmp / "alias_kaputt.csv"
+_bad_alias.write_text("GCAT,Name\nFoo,Bar\n", encoding="utf-8")
+try:
+    ai.load_gcat_vehicle_aliases(_bad_alias)
+    _fehler = None
+except ai.ImportStateError as exc:
+    _fehler = str(exc)
+except Exception as exc:
+    _fehler = "wrong type: {!r}".format(exc)
+check("kaputte Alias-CSV: ImportStateError mit Datei und Spalte",
+      _fehler is not None and "alias_kaputt.csv" in _fehler and "Abkürzung" in _fehler, _fehler)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
