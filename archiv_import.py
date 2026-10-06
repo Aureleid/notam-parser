@@ -750,10 +750,13 @@ def load_gcat(
                 daten = antwort.read(MAX_GCAT_BYTES + 1)
             if len(daten) > MAX_GCAT_BYTES:
                 raise ValueError("launch list larger than expected")
-            # Nur Abrufe von GCAT_URL: Weiterleitung auf anderen Host ablehnen
-            endurl = getattr(antwort, "geturl", lambda: GCAT_URL)()
-            if urllib.parse.urlparse(endurl).hostname != urllib.parse.urlparse(GCAT_URL).hostname:
+            # Nur Abrufe von GCAT_URL: Weiterleitung auf anderen Host oder
+            # ohne https ablehnen
+            endurl = urllib.parse.urlparse(getattr(antwort, "geturl", lambda: GCAT_URL)())
+            if endurl.hostname != urllib.parse.urlparse(GCAT_URL).hostname:
                 raise ValueError("redirected to another host")
+            if endurl.scheme != "https":
+                raise ValueError("redirected away from https")
             # Muell (z.B. Captive-Portal-Seite) darf den guten Cache nicht ersetzen
             text = daten.decode("utf-8", errors="replace")
             if not text.startswith("#Launch_Tag") or not parse_gcat(text):
@@ -998,10 +1001,14 @@ def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
 
 def detection_stamp(
     paths: Sequence[Path] = (
-        app.APP_DIR / "app.py", app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV
+        app.APP_DIR / "app.py", app.APP_DIR / "archiv_import.py",
+        app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV,
     ),
 ) -> str:
-    """Erkennungsstand: aendert sich mit der Pipeline oder einer ihrer Referenzen."""
+    """
+    Erkennungsstand: aendert sich mit der Pipeline, mit diesem Modul
+    (Buendelung, Kandidatenbildung) oder einer ihrer Referenzen.
+    """
     h = hashlib.sha256()
     for path in paths:
         h.update(path.name.encode("utf-8"))
@@ -1222,6 +1229,10 @@ def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Di
             continue
         eintrag = dict(k)
         eintrag["entscheidung"] = entscheidungen.get(k["key"])
+        # Als Waise entfernt, jetzt wieder erkannt: wieder offen anbieten.
+        # Entfernt wurde er, weil NOLA ihn nicht mehr belegte - das gilt nicht mehr.
+        if (eintrag["entscheidung"] or {}).get("status") == "removed":
+            eintrag["entscheidung"] = None
         # alle bestaetigten Vorgaenger mit gemeinsamer Kennung; leer = keiner
         eintrag["ersetzt"] = []
         # vorhandene fremde Archivzeilen desselben Starts; leer = keine
@@ -1291,7 +1302,9 @@ def confirm_many(
 
     Bestaetigen ist eine ausdrueckliche Handlung: ein frueher im Optionsmenue
     entfernter Schluessel wird deshalb nicht gefiltert (entfernt=set()).
-    Ein 'aktualisierter' Kandidat ersetzt die Zeilen aller seiner Vorgaenger.
+    Ein 'aktualisierter' Kandidat ersetzt die Zeilen aller seiner Vorgaenger;
+    deren Entscheidung wird 'replaced' und behaelt rakete, payload, notam_ids
+    und nation.
     Ein Kandidat mit im_archiv legt keine Zeile an: er traegt nur Traegersystem
     und Payload in die vorhandene(n) Zeile(n) ein (leere Werte ueberschreiben
     nichts). Seinen Ersatzvermerk wendet er nicht an - keine neue Zeile heisst
@@ -1313,9 +1326,9 @@ def confirm_many(
     schluessel = [app.archive_key(dict(r)) for _, r in bestand.iterrows()]
     werte: Dict[str, Dict[str, str]] = {}
     # Werte vor dem Ergaenzen, fuer die Entscheidung (nachvollziehbar, umkehrbar)
-    alt: Dict[str, Dict[str, str]] = {}
+    vorher_werte: Dict[str, Dict[str, str]] = {}
     for key, (_, r) in zip(schluessel, bestand.iterrows()):
-        alt.setdefault(key, {s: str(r[s]) for s in ("Tr\u00e4gersystem", "Payload")})
+        vorher_werte.setdefault(key, {s: str(r[s]) for s in ("Tr\u00e4gersystem", "Payload")})
     for kand, rakete, payload, _ in ergaenzen:
         for ziel in kand["im_archiv"]:
             if ziel not in schluessel:
@@ -1331,7 +1344,7 @@ def confirm_many(
         for pos, key in enumerate(schluessel):
             for spalte, wert in werte.get(key, {}).items():
                 bestand.iat[pos, bestand.columns.get_loc(spalte)] = wert
-    ersetzt = {alt for k, _, _, _ in anlegen for alt in (k.get("ersetzt") or [])}
+    ersetzt = {v for k, _, _, _ in anlegen for v in (k.get("ersetzt") or [])}
     if ersetzt and not bestand.empty:
         bestand = bestand[
             [app.archive_key(dict(r)) not in ersetzt for _, r in bestand.iterrows()]
@@ -1343,8 +1356,13 @@ def confirm_many(
         row["Trägersystem"] = rakete
         row["Payload"] = payload
         zeilen.append(row)
-        for alt in kand.get("ersetzt") or []:
-            neu[alt] = {"status": "replaced", "durch": kand["key"]}
+        for vorgaenger in kand.get("ersetzt") or []:
+            # Werte des Vorgaengers bleiben nachvollziehbar
+            frueher = state["entscheidungen"].get(vorgaenger, {})
+            neu[vorgaenger] = {"status": "replaced", "durch": kand["key"]}
+            neu[vorgaenger].update(
+                {f: frueher[f] for f in ("rakete", "payload", "notam_ids", "nation") if f in frueher}
+            )
     # Bestaetigte zuletzt: ein Schluessel der Auswahl bleibt bestaetigt, auch wenn
     # ein anderer Kandidat ihn als Vorgaenger fuehrt.
     for kand, rakete, payload, treffer in auswahl:
@@ -1360,7 +1378,7 @@ def confirm_many(
         }
         if kand.get("im_archiv"):
             neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])
-            neu[kand["key"]]["vorher"] = {z: dict(alt[z]) for z in kand["im_archiv"]}
+            neu[kand["key"]]["vorher"] = {z: dict(vorher_werte[z]) for z in kand["im_archiv"]}
     app.persist_archive(archiv, app.merge_archive(bestand, zeilen, entfernt=set()))
     geschrieben = {app.archive_key(r) for r in zeilen}
     _archiv_pruefen(archiv, geschrieben | set(werte), ersetzt - geschrieben, werte)

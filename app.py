@@ -4976,10 +4976,23 @@ def load_archive(path: Path) -> pd.DataFrame:
 
 
 def _write_bytes_atomic(path: Path, daten: bytes) -> None:
-    """Schreibt erst eine temporaere Datei und benennt sie dann um."""
+    """
+    Schreibt erst eine temporaere Datei und benennt sie dann um.
+
+    mkstemp legt die Datei mit 0600 an. Die Rechte einer vorhandenen Datei
+    bleiben deshalb erhalten; eine neue bekommt, was die umask vorgibt
+    (wie bei einem gewoehnlichen open).
+    """
     # eindeutiger Name im selben Ordner, damit os.replace atomar bleibt
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
+        try:
+            modus = os.stat(path).st_mode & 0o7777
+        except FileNotFoundError:
+            umask = os.umask(0)
+            os.umask(umask)
+            modus = 0o666 & ~umask
+        os.chmod(tmp_name, modus)
         with os.fdopen(fd, "wb") as fh:
             fh.write(daten)
             fh.flush()
@@ -6406,7 +6419,7 @@ def _archive_import_tab(
             korpus = ai.load_korpus()
             zustand = ai.load_state()
         except (ai.ImportStateError, OSError) as exc:
-            st.error(str(exc))
+            st.error(_md_plain(exc))
             return
         st.caption(
             "Historic launches of China, Russia, India, Iran and North Korea. "
@@ -6435,7 +6448,7 @@ def _archive_import_tab(
                 ai.save_korpus(korpus)
                 ai.save_state(zustand)
             except (ai.ImportStateError, OSError) as exc:
-                st.error(str(exc))
+                st.error(_md_plain(exc))
             else:
                 st.session_state["archiv_import_bericht"] = bericht
         # Bericht nur einmal zeigen - beim naechsten Durchlauf ist er weg
@@ -6466,7 +6479,7 @@ def _archive_import_tab(
                 try:
                     ai.save_state(zustand)
                 except (ai.ImportStateError, OSError) as exc:
-                    st.error(str(exc))
+                    st.error(_md_plain(exc))
                 else:
                     st.rerun(scope="app")
 
@@ -6485,7 +6498,7 @@ def _archive_import_tab(
                         ai.keep_orphan(zustand, key)
                         ai.save_state(zustand)
                     except (ai.ImportStateError, OSError) as exc:
-                        st.error(str(exc))
+                        st.error(_md_plain(exc))
                     else:
                         st.rerun(scope="app")
                 if c.button("Remove from archive", key="ai_rm_" + key):
@@ -6493,7 +6506,7 @@ def _archive_import_tab(
                         ai.remove_orphan(zustand, key)
                         ai.save_state(zustand)
                     except (ai.ImportStateError, OSError) as exc:
-                        st.error(str(exc))
+                        st.error(_md_plain(exc))
                     else:
                         st.rerun(scope="app")
 
@@ -6519,7 +6532,7 @@ def _archive_import_tab(
                 ai.confirm_many(zustand, sammel)
                 ai.save_state(zustand)
             except (ai.ImportStateError, OSError) as exc:
-                st.error(str(exc))
+                st.error(_md_plain(exc))
             else:
                 st.rerun(scope="app")
 
@@ -6541,7 +6554,7 @@ def _archive_import_tab(
                     try:
                         ai.save_state(zustand)
                     except (ai.ImportStateError, OSError) as exc:
-                        st.error(str(exc))
+                        st.error(_md_plain(exc))
                     else:
                         st.rerun(scope="app")
                 if b.button("Hide", key="ai_hide_" + p["event_key"]):
@@ -6549,13 +6562,13 @@ def _archive_import_tab(
                     try:
                         ai.save_state(zustand)
                     except (ai.ImportStateError, OSError) as exc:
-                        st.error(str(exc))
+                        st.error(_md_plain(exc))
                     else:
                         st.rerun(scope="app")
     except (RerunException, StopException):
         raise
     except Exception as exc:  # noqa: BLE001 - Meldung statt kaputtem Optionsdialog
-        st.error("Archive import failed: {}".format(exc))
+        st.error(_md_plain("Archive import failed: {}".format(exc)))
 
 
 def _archive_import_candidate(
@@ -6582,13 +6595,14 @@ def _archive_import_candidate(
     with st.expander(_md_plain(kopf)):
         # Quellen und Hinweise stammen aus Forum/Upload/GCAT: nur als Text
         st.text("NOTAM: {} · Source: {}".format(row["NOTAM"], ", ".join(k["quellen"])))
-        # Werte der Zielzeile(n) gehen vor dem GCAT-Vorschlag; bei widerspruechlichen
-        # Werten mehrerer Zielzeilen wird nichts vorbelegt
+        # Werte der Zielzeile(n) - bei 'updated' der Vorgaenger - gehen vor dem
+        # GCAT-Vorschlag; bei widerspruechlichen Werten wird nichts vorbelegt
         archiv_werte = k.get("archiv_werte") or []
+        vorbelegung = archiv_werte if im_archiv else (k.get("ersetzt_werte") or [])
         # je Spalte: der eine vorhandene Wert, "" = keiner, None = widerspruechlich
         vorhanden: Dict[str, Optional[str]] = {}
         for spalte in ("Tr\u00e4gersystem", "Payload"):
-            gefuellt = sorted({w[spalte] for w in archiv_werte if w.get(spalte)})
+            gefuellt = sorted({w[spalte] for w in vorbelegung if w.get(spalte)})
             vorhanden[spalte] = None if len(gefuellt) > 1 else (gefuellt or [""])[0]
         if im_archiv:
             st.text(
@@ -6671,7 +6685,7 @@ def _archive_import_candidate(
                 ai.confirm_many(zustand, [(k, wert, payload.strip(), treffer)])
                 ai.save_state(zustand)
             except (ai.ImportStateError, OSError) as exc:
-                st.error(str(exc))
+                st.error(_md_plain(exc))
             else:
                 st.rerun(scope="app")
         if b.button("Discard", key="ai_no_" + k["key"]):
@@ -6679,7 +6693,7 @@ def _archive_import_candidate(
             try:
                 ai.save_state(zustand)
             except (ai.ImportStateError, OSError) as exc:
-                st.error(str(exc))
+                st.error(_md_plain(exc))
             else:
                 st.rerun(scope="app")
 

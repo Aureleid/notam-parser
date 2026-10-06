@@ -3672,8 +3672,11 @@ ai.confirm_many(zst, [(neu_k[0], "CZ-2D", "Yaogan 45", None)], archiv_t)
 a2 = app.load_archive(archiv_t)
 check("  ... ersetzt die alte Archivzeile statt einer zweiten", len(a2) == 1 and "A4640/26" in a2.iloc[0]["NOTAM"],
       a2["NOTAM"].tolist())
+# Schlusspruefung (Wichtig 2): die ersetzte Entscheidung behaelt zusaetzlich ihre Werte
 check("  ... alter Schluessel als ersetzt vermerkt",
-      zst["entscheidungen"][kl[0]["key"]] == {"status": "replaced", "durch": neu_k[0]["key"]})
+      {f: zst["entscheidungen"][kl[0]["key"]].get(f) for f in ("status", "durch", "rakete", "payload")}
+      == {"status": "replaced", "durch": neu_k[0]["key"], "rakete": "CZ-2D", "payload": "Yaogan 45"},
+      zst["entscheidungen"][kl[0]["key"]])
 
 # Bestaetigen wirkt auch fuer einen frueher entfernten Schluessel
 check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8"))
@@ -3769,7 +3772,8 @@ _az = app.load_archive(archiv_z)
 check("  ... beide Zeilen durch eine ersetzt",
       [app.archive_key(dict(r)) for _, r in _az.iterrows()] == [_roh["key"]], _az["NOTAM"].tolist())
 check("  ... beide als ersetzt vermerkt",
-      all(zz["entscheidungen"][_k] == {"status": "replaced", "durch": _roh["key"]} for _k in (_k1, _k2)),
+      all({f: zz["entscheidungen"][_k].get(f) for f in ("status", "durch", "rakete")}
+          == {"status": "replaced", "durch": _roh["key"], "rakete": "CZ-2D"} for _k in (_k1, _k2)),
       zz["entscheidungen"])
 
 # Verwerfen
@@ -3954,7 +3958,7 @@ try:
 finally:
     app.st, _ai7.load_state, _ai7.save_state, _ai7.save_korpus, _ai7.load_korpus = _orig
 check("ImportStateError beim Laden: angezeigt, nichts geschrieben",
-      _ausnahme is None and _meldungen == ["archiv_import.json is unreadable (test)."]
+      _ausnahme is None and _meldungen == [app._md_plain("archiv_import.json is unreadable (test).")]
       and not _geschrieben, (_ausnahme, _meldungen, _geschrieben))
 
 # --- Aufgabe 7, Nachbesserung 1 ---
@@ -4660,7 +4664,7 @@ for _p_k, _soll_ok in ((_kaputt_u, False), (_fremd, False), (_tmp_u / "einzel_ne
     else:
         check("Einzelkandidat ({}): st.error, nichts gespeichert, Datei byte-gleich".format(_p_k.name),
               _e is None and not _gesp and not any(n == "rerun" for n, _ in _auf)
-              and any(n == "error" and _p_k.name in t for n, t in _auf)
+              and any(n == "error" and app._md_plain(_p_k.name) in t for n, t in _auf)
               and _p_k.read_bytes() == _bytes_vor and not _zst_e["entscheidungen"],
               (repr(_e), _auf))
 _shutil_u.rmtree(_tmp_u, ignore_errors=True)
@@ -4686,7 +4690,8 @@ if _fns:
           (_bg.notams_neu, sorted(_zg["tage"])))
     _shutil_u.rmtree(_tmp_g, ignore_errors=True)
 else:
-    check("Tageslage-Gegenprobe (FNS-Datei fehlt - uebersprungen)", True)
+    # Kein Beleg: als SKIP ausgeben, nicht als PASS zaehlen
+    print("  SKIP  Tageslage-Gegenprobe (uebersprungen: keine FNS-Datei)")
 
 print("== Archiv-Import Schlusspruefung (nola-3dq) ==")
 _tmp_s = _P(tempfile.mkdtemp())
@@ -4876,6 +4881,127 @@ try:
           (repr(_e), _r))
 finally:
     app.st, app.ARCHIVE_CSV, app._persist_workspace, app._write_bytes_atomic = _orig_r
+
+# Wichtig 2: ein 'aktualisierter' Kandidat uebernimmt die Werte seines Vorgaengers
+_alt_k = _s_kand("03.02.2024", ["A0500/24"], "China")
+_zw = _s_zustand([_alt_k])
+_aw = _s_archiv("vorgaenger", [])
+ai.confirm_many(_zw, [(ai.candidates(_zw, _aw)[0], "CZ-2D", "P", None)], _aw)
+_zw["tage"]["2024-01-01"]["kandidaten"] = [_s_kand("03.02.2024", ["A0500/24", "A0502/24"], "China")]
+_kw = ai.candidates(_zw, _aw)
+_stub = _StStub()
+_r, _e = _versuch(_tab_lauf, _stub, candidates=lambda z: [dict(k, key="k_eins") for k in _kw])
+_sb = [c for c in _stub.aufrufe("selectbox") if c[1][0] == "Launch vehicle"]
+_ti = [c for c in _stub.aufrufe("text_input") if c[1][0] == "Payload"]
+check("aktualisiert: Traeger und Payload des Vorgaengers vorbelegt (vor GCAT CZ-4C/Sat B)",
+      _e is None and len(_sb) == 1 and _sb[0][1][1][_sb[0][2]["index"]] == "CZ-2D"
+      and len(_ti) == 1 and _ti[0][2]["value"] == "P",
+      (repr(_e), [c[2] for c in _sb], [c[2] for c in _ti]))
+_stub = _StStub()
+_versuch(_tab_lauf, _stub, candidates=lambda z: [dict(
+    _kand("k_eins", "2020-05-02"), ersetzt=["v1", "v2"],
+    ersetzt_werte=[{"key": "v1", "Trägersystem": "CZ-2D", "Payload": "P1"},
+                   {"key": "v2", "Trägersystem": "CZ-2C", "Payload": "P2"}])])
+_sb = [c for c in _stub.aufrufe("selectbox") if c[1][0] == "Launch vehicle"]
+_ti = [c for c in _stub.aufrufe("text_input") if c[1][0] == "Payload"]
+_alle = " ".join(c[1][0] for c in _stub.aufrufe("text"))
+check("  ... widerspruechliche Vorgaenger -> keine Vorbelegung, alle Werte gezeigt",
+      len(_sb) == 1 and _sb[0][1][1][_sb[0][2]["index"]] == app.VEHICLE_NONE and _ti[0][2]["value"] == ""
+      and all(s in _alle for s in ("v1", "v2", "CZ-2D", "CZ-2C", "P1", "P2")),
+      ([c[2] for c in _sb], [c[2] for c in _ti], _alle))
+ai.confirm_many(_zw, [(_kw[0], "CZ-2D", "P", None)], _aw)
+_ew = _zw["entscheidungen"][_alt_k["key"]]
+check("  ... ersetzte Entscheidung haelt Traeger, Payload, Kennungen und Nation",
+      _ew.get("status") == "replaced" and _ew.get("durch") == _kw[0]["key"] and _ew.get("rakete") == "CZ-2D"
+      and _ew.get("payload") == "P" and _ew.get("notam_ids") == ["A0500/24"] and _ew.get("nation") == "China",
+      _ew)
+
+# Klein 1: gemischte Auswahl - neuer Start mit Ersatzvermerk und Ergaenzung einer Tageszeile
+_m_alt = _s_row("03.02.2024", "A0500/24", "China", "CZ-2D", "P")
+_m_tag = _s_row("04.02.2024", "A0600/24", "China")
+_am = _s_archiv("gemischt_ersetzt", [_m_alt, _m_tag])
+_zm = _s_zustand([_s_kand("03.02.2024", ["A0500/24", "A0502/24"], "China"),
+                  _s_kand("04.02.2024", ["A0600/24"], "China")])
+_zm["entscheidungen"][app.archive_key(_m_alt)] = dict(_cn_dec, nation="China", payload="P")
+_km = {k["key"]: k for k in ai.candidates(_zm, _am)}
+_ku, _kt = _km["03.02.2024|A0500/24,A0502/24"], _km["04.02.2024|A0600/24"]
+check("gemischt: Vermerke wie erwartet",
+      _ku["ersetzt"] == [app.archive_key(_m_alt)] and _kt["im_archiv"] == ["04.02.2024|A0600/24"],
+      (_ku["ersetzt"], _kt["im_archiv"]))
+_r, _e = _versuch(lambda: ai.confirm_many(_zm, [(_ku, "CZ-2D", "P", None), (_kt, "CZ-4C", "Q", None)], _am))
+_amd = app.load_archive(_am)
+check("  ... ein Aufruf: Vorgaenger ersetzt, Tageszeile ergaenzt, beide entschieden",
+      _e is None and _r == 2
+      and sorted(app.archive_key(dict(r)) for _, r in _amd.iterrows()) == sorted([_ku["key"], _kt["im_archiv"][0]])
+      and _amd[_amd["NOTAM"] == "A0600/24"].iloc[0]["Trägersystem"] == "CZ-4C"
+      and _zm["entscheidungen"][_kt["key"]].get("vorher") == {"04.02.2024|A0600/24": {"Trägersystem": "", "Payload": ""}}
+      and _zm["entscheidungen"][app.archive_key(_m_alt)]["status"] == "replaced",
+      (repr(_e), _amd.to_dict("records")))
+
+# Klein 2: Weiterleitung nur auf https
+class _AntwortHttp(_Antwort):
+    def geturl(self): return ai.GCAT_URL.replace("https://", "http://")
+
+
+_cache_h = _tmp_s / "gcat_http.tsv"
+_lh, _sh = ai.load_gcat(refresh=True, cache=_cache_h,
+                        opener=lambda req, timeout=0: _AntwortHttp(GCAT_TXT.encode("utf-8")))
+check("GCAT: Weiterleitung auf http (gleicher Host) wird abgelehnt",
+      _lh is None and not _cache_h.exists() and "Download failed" in _sh, _sh)
+
+# Klein 3: Erkennungsstand umfasst archiv_import.py
+_stamp_def = ai.detection_stamp.__defaults__[0]
+check("Erkennungsstand: archiv_import.py gehoert dazu",
+      "archiv_import.py" in [p.name for p in _stamp_def], [p.name for p in _stamp_def])
+_kopien = []
+for _p in _stamp_def:
+    _z = _tmp_s / ("stamp_" + _p.name)
+    if _p.exists():
+        _shutil_u.copyfile(_p, _z)
+    _kopien.append(_z)
+_st_a = ai.detection_stamp(_kopien)
+_ai_kopie = next((k for k in _kopien if k.name == "stamp_archiv_import.py"), None)
+if _ai_kopie is not None:
+    _ai_kopie.write_bytes(_ai_kopie.read_bytes() + b"\n# geaendert\n")
+check("  ... eine Aenderung daran aendert den Stand",
+      _ai_kopie is not None and ai.detection_stamp(_kopien) != _st_a)
+
+# Klein 5: atomares Schreiben behaelt die Rechte einer vorhandenen Datei
+_mode_p = _tmp_s / "rechte.csv"
+_mode_p.write_bytes(b"alt")
+os.chmod(_mode_p, 0o644)
+app._write_bytes_atomic(_mode_p, b"neu")
+check("_write_bytes_atomic: 0644 bleibt 0644", (os.stat(_mode_p).st_mode & 0o777) == 0o644,
+      oct(os.stat(_mode_p).st_mode & 0o777))
+_umask = os.umask(0)
+os.umask(_umask)
+_neu_p = _tmp_s / "neu_rechte.csv"
+app._write_bytes_atomic(_neu_p, b"neu")
+check("  ... neue Datei nach umask", (os.stat(_neu_p).st_mode & 0o777) == (0o666 & ~_umask),
+      oct(os.stat(_neu_p).st_mode & 0o777))
+
+# Klein 6: entfernte Waise wird wieder angeboten, sobald sie wieder erkannt wird
+_zr = _s_zustand([_s_kand("03.02.2024", ["A0500/24"], "China")])
+_zr["entscheidungen"]["03.02.2024|A0500/24"] = {"status": "removed"}
+_kr = ai.candidates(_zr, _s_archiv("entfernt", []))
+check("entfernt und wieder erkannt: wieder offener Kandidat",
+      len(_kr) == 1 and _kr[0]["entscheidung"] is None, [k["entscheidung"] for k in _kr])
+
+# Klein 7: Fehlertexte im Reiter nie roh als Markdown
+def _boese_zustand(*a, **k):
+    raise ai.ImportStateError(_BOESE)
+
+
+for _name7, _ers7 in (("load_state", {"load_state": _boese_zustand}),
+                      ("unerwartet", {"candidates": lambda z: (_ for _ in ()).throw(RuntimeError(_BOESE))})):
+    _stub = _StStub()
+    _r, _e = _versuch(_tab_lauf, _stub, **_ers7)
+    _err = _stub.aufrufe("error")
+    check("Reiter ({}): Fehlermeldung entschaerft (st.error ohne Rohtext)".format(_name7),
+          _e is None and len(_err) == 1 and _BOESE not in repr(_err), (repr(_e), _err))
+_quelle_tab = _inspect.getsource(app._archive_import_tab) + _inspect.getsource(app._archive_import_candidate)
+check("Reiter: jedes st.error im Import ueber _md_plain",
+      "st.error(str(exc))" not in _quelle_tab and 'st.error("Archive import failed: {}".format(exc))' not in _quelle_tab)
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
