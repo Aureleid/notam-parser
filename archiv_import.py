@@ -665,15 +665,25 @@ _GCAT_MEMO: Dict[Tuple[str, float], List[GcatStart]] = {}
 
 
 def load_gcat(
-    refresh: bool = False, cache: Path = GCAT_CACHE, opener: Any = urllib.request.urlopen
+    refresh: bool = False,
+    cache: Path = GCAT_CACHE,
+    opener: Any = urllib.request.urlopen,
+    auto_download: bool = True,
 ) -> Tuple[Optional[List[GcatStart]], str]:
     """
     Startliste aus dem Cache; mit refresh vorher neu abrufen.
 
     Abgerufen wird nur GCAT_URL. Scheitert der Abruf, bleibt ein vorhandener
     Cache in Gebrauch; ohne Cache gibt es keinen Abgleich (None).
+    Mit auto_download=False wird ohne Cache nur auf refresh hin geladen - der
+    Reiter laeuft bei jedem Streamlit-Durchlauf und darf nicht blockieren.
     """
     hinweis = ""
+    if not cache.exists() and not refresh and not auto_download:
+        return None, (
+            "No launch list yet - press 'Refresh launch list' to download it "
+            "(about 13 MB). Until then there are no suggestions."
+        )
     if refresh or not cache.exists():
         try:
             anfrage = urllib.request.Request(GCAT_URL, headers={"User-Agent": "NOLA archive import"})
@@ -1158,13 +1168,19 @@ def bulk_candidates(
     gcat: Optional[List[GcatStart]],
     sites: Dict[str, Tuple[List[str], str]],
     vehicles: pd.DataFrame,
+    abgleiche: Optional[Mapping[str, Abgleich]] = None,
 ) -> List[Tuple[Dict[str, Any], str, str, GcatStart]]:
-    """Nur unentschiedene, eindeutige Kandidaten ohne Warnung, ohne Ersatzvermerk und mit Traeger-Kuerzel."""
+    """
+    Nur unentschiedene, eindeutige Kandidaten ohne Warnung, ohne Ersatzvermerk und mit Traeger-Kuerzel.
+
+    abgleiche: schon berechnete Abgleiche je Kandidatenschluessel (spart den
+    zweiten Abgleich im Reiter); fehlt einer, wird er hier berechnet.
+    """
     auswahl = []
     for k in kandidaten:
         if k["entscheidung"] is not None or k["ersetzt"]:
             continue
-        abgleich = match_candidate(k, gcat, sites)
+        abgleich = (abgleiche or {}).get(k["key"]) or match_candidate(k, gcat, sites)
         if abgleich.status != STATUS_EINDEUTIG or abgleich.warnungen:
             continue
         s = abgleich.treffer[0]

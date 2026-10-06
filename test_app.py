@@ -3831,6 +3831,184 @@ check("ImportStateError beim Laden: angezeigt, nichts geschrieben",
       _ausnahme is None and _meldungen == ["archiv_import.json is unreadable (test)."]
       and not _geschrieben, (_ausnahme, _meldungen, _geschrieben))
 
+# --- Aufgabe 7, Nachbesserung 1 ---
+def _versuch(fn, *a, **k):
+    try:
+        return fn(*a, **k), None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+# Sperre: Host UND Gegenstelle muessen lokal sein, /mount/src nie
+_lokal_dir = _P("/Users/x/NOTAM Parser")
+for _args, _soll, _name in (
+    ((_lokal_dir, "localhost:8501", True), True, "lokaler Host + Loopback-Gegenstelle"),
+    ((_lokal_dir, "localhost:8501", False), False, "lokaler Host + LAN-Gegenstelle (Host gefaelscht)"),
+    ((_lokal_dir, "notam-space-analyzer.streamlit.app", True), False, "Cloud-Host + Loopback-Gegenstelle"),
+    ((_P("/mount/src/notam-parser"), "localhost:8501", True), False, "/mount/src"),
+):
+    _r, _e = _versuch(lambda a=_args: app.import_gate(*a))
+    check("Sperre: {} -> {}".format(_name, _soll), _e is None and _r is _soll, (_r, _e))
+
+for _host, _soll in (("::1", True), ("::1:8501", False), ("localhost.", False),
+                     ("localhost.:8501", False), ("127.0.0.1.nip.io:8501", False),
+                     ("127.0.0.1.nip.io", False)):
+    check("Host {!r} -> lokal {}".format(_host, _soll), app.is_local_request(_host) == _soll)
+check("Reiter: auch kein 'from archiv_import import' auf Modulebene",
+      "\nfrom archiv_import import" not in quelle_app and "\nimport archiv_import" not in quelle_app)
+
+# GCAT: beim Oeffnen kein Download, nur auf Knopfdruck
+aufgerufen.clear()
+_kein_cache = _tmp / "gcat_nie.tsv"
+_r, _e = _versuch(ai.load_gcat, refresh=False, cache=_kein_cache, opener=_opener_ok, auto_download=False)
+check("GCAT ohne Cache, ohne Knopf: kein Download, kein Abgleich",
+      _e is None and _r[0] is None and not aufgerufen and not _kein_cache.exists()
+      and "Refresh launch list" in _r[1], (_r, _e, aufgerufen))
+_r, _e = _versuch(ai.load_gcat, refresh=True, cache=_kein_cache, opener=_opener_ok, auto_download=False)
+check("  ... mit Knopf wird geladen",
+      _e is None and _r[0] is not None and len(_r[0]) == 4 and aufgerufen == [ai.GCAT_URL], (_r, _e, aufgerufen))
+
+# Markdown aus Forum/Upload/GCAT wird entschaerft
+_r, _e = _versuch(lambda: app._md_plain("**a** [b](http://x) _c_ `d`\n# e"))
+check("Markdown-Entschaerfung", _e is None and _r == r"\*\*a\*\* \[b\]\(http\:\/\/x\) \_c\_ \`d\` \# e", (_r, _e))
+
+from streamlit.runtime.scriptrunner import RerunException as _RerunException
+
+
+class _StStub:
+    """Minimaler Ersatz fuer st: zeichnet Aufrufe auf, Knoepfe nach Schluessel."""
+
+    def __init__(self, knoepfe=(), rerun_exc=None):
+        self.calls, self.session_state = [], {}
+        self._knoepfe, self._rerun_exc = set(knoepfe), rerun_exc
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+
+        def f(*a, **k):
+            self.calls.append((name, a, k))
+            if name == "rerun" and self._rerun_exc is not None:
+                raise self._rerun_exc
+            if name == "columns":
+                return [self] * (a[0] if isinstance(a[0], int) else len(a[0]))
+            if name in ("button", "form_submit_button"):
+                return k.get("key") in self._knoepfe
+            if name in ("radio", "selectbox"):
+                idx = k.get("index", 0)
+                return None if idx is None else a[1][idx]
+            if name == "text_input":
+                return k.get("value", "")
+            if name in ("file_uploader", "text_area"):
+                return None
+            return self
+        return f
+
+    def aufrufe(self, name):
+        return [c for c in self.calls if c[0] == name]
+
+
+_BOESE = "[evil](http://evil.example) **x**"
+_g1 = ai.GcatStart("2020-001", datetime(2020, 5, 1, 3, 0), False, "CZ-2D", _BOESE, "JQ", None, None)
+_g2 = ai.GcatStart("2020-002", datetime(2020, 5, 1, 4, 0), False, "CZ-4C", "Sat B", "JQ", None, None)
+
+
+def _kand(key, tag):
+    return {"key": key, "tag": tag, "nation": "China", "entscheidung": None, "ersetzt": [],
+            "quellen": [_BOESE], "fenster": [tag + "T00:00:00", None],
+            "row": {"Startdatum": tag, "Startzeit": "03:00", "Weltraumbahnhof": "JSLC",
+                    "Orbit": "LEO", "NOTAM": "A1234/20"}}
+
+
+_kands = [_kand("k_mehr", "2020-05-01"), _kand("k_eins", "2020-05-02")]
+_abgl = {"k_mehr": ai.Abgleich(ai.STATUS_MEHRDEUTIG, [_g1, _g2], [_BOESE], [_BOESE]),
+         "k_eins": ai.Abgleich(ai.STATUS_EINDEUTIG, [_g2])}
+_matchzahl, _gcat_kw = [], []
+
+
+def _tab_lauf(stub, **ersatz):
+    """Rendert den Reiter mit Stub-st und ersetzten ai-Funktionen."""
+    def _match(k, gcat, sites):
+        _matchzahl.append(k["key"])
+        return _abgl[k["key"]]
+
+    def _gcat(**kw):
+        _gcat_kw.append(kw)
+        return [_g1, _g2], "GCAT " + _BOESE
+
+    basis = dict(
+        load_korpus=lambda *a, **k: {}, load_state=lambda *a, **k: {"tage": {}},
+        save_state=lambda *a, **k: None, save_korpus=lambda *a, **k: None,
+        is_stale=lambda z: False, orphans=lambda z: [], keep_orphan=lambda z, key: None,
+        load_gcat=_gcat, load_gcat_sites=lambda *a, **k: {},
+        candidates=lambda z: [dict(k) for k in _kands], match_candidate=_match,
+        review_items=lambda z: [{"tag": "2020-05-03", "notam_id": "A1/20", "grund": _BOESE,
+                                 "text": "TEXT", "quellen": [_BOESE], "event_key": "ev1"}],
+        totals=lambda z: {"usa": 0, "ausgeblendet": 0},
+    )
+    basis.update(ersatz)
+    alt_st, alt_ai = app.st, {n: getattr(ai, n) for n in basis}
+    try:
+        app.st = stub
+        for n, v in basis.items():
+            setattr(ai, n, v)
+        app._archive_import_tab(sp, fir, app.load_vehicles(str(app.VEHICLE_CSV)))
+    finally:
+        app.st = alt_st
+        for n, v in alt_ai.items():
+            setattr(ai, n, v)
+
+
+_matchzahl.clear()
+_stub = _StStub()
+_stub.session_state["archiv_import_bericht"] = _types.SimpleNamespace(
+    dateien=1, notams_neu=0, dubletten=0, unbrauchbar=0, tage_ausgewertet=0, fehler=[_BOESE])
+_r, _e = _versuch(_tab_lauf, _stub)
+check("Reiter rendert mit Stub ohne Ausnahme", _e is None, repr(_e))
+check("GCAT im Reiter ohne automatischen Download",
+      bool(_gcat_kw) and all(kw.get("auto_download") is False for kw in _gcat_kw), _gcat_kw)
+check("Abgleich je Kandidat nur einmal pro Durchlauf",
+      sorted(_matchzahl) == ["k_eins", "k_mehr"], _matchzahl)
+check("Importbericht nur einmal gezeigt",
+      "archiv_import_bericht" not in _stub.session_state and len(_stub.aufrufe("info")) == 1,
+      (list(_stub.session_state), len(_stub.aufrufe("info"))))
+_md_elemente = ("caption", "warning", "info", "error", "markdown", "write", "subheader",
+                "expander", "radio", "success", "button")
+_roh = [c for c in _stub.calls if c[0] in _md_elemente and _BOESE in repr(c[1]) + repr(c[2])]
+check("Forum-/GCAT-Texte nie roh in Markdown-Elementen", not _roh, _roh[:3])
+_radios = {c[2].get("key"): c for c in _stub.aufrufe("radio")}
+_rm = _radios.get("ai_gcat_k_mehr")
+check("mehrdeutig: 'none of these' vorgewaehlt",
+      _rm is not None and _rm[2].get("index") == len(_rm[1][1]) - 1, _rm)
+_re = _radios.get("ai_gcat_k_eins")
+check("eindeutig: Treffer vorgewaehlt", _re is not None and _re[2].get("index", 0) == 0, _re)
+
+# Unerwarteter Fehler im Reiter: eine Meldung, der Dialog bleibt bedienbar
+def _boom(z):
+    raise RuntimeError("boom")
+
+
+_stub = _StStub()
+_r, _e = _versuch(_tab_lauf, _stub, candidates=_boom)
+_fehler = _stub.aufrufe("error")
+check("unerwarteter Fehler: eine Meldung, keine Ausnahme",
+      _e is None and len(_fehler) == 1 and "Archive import failed" in _fehler[0][1][0]
+      and "boom" in _fehler[0][1][0], (repr(_e), _fehler))
+
+# st.rerun darf nicht verschluckt werden
+_stub = _StStub(knoepfe={"ai_keep_w1"}, rerun_exc=_RerunException(None))
+_durch = None
+try:
+    _tab_lauf(_stub, orphans=lambda z: [("w1", {"rakete": "CZ-2D", "payload": "x"})])
+except _RerunException:
+    _durch = "rerun"
+except Exception as exc:  # noqa: BLE001
+    _durch = repr(exc)
+check("st.rerun im Reiter wird durchgereicht", _durch == "rerun", _durch)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
