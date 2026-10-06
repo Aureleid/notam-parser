@@ -3182,6 +3182,20 @@ for _nm, _inhalt in (("kaputt_a.json", '{"notams":[{"x":1}]}'), ("kaputt_b.json"
               _nm in str(_e) and (_tmp / _nm).read_text(encoding="utf-8") == _inhalt, str(_e))
     except Exception as _e:
         check("Korpus mit kaputter Struktur bricht ab: " + _inhalt, False, repr(_e))
+for _nm, _inhalt in (
+    ("kaputt_c.json", '{"notams":[{"notam_id":1,"b":null,"text":3}]}'),
+    ("kaputt_d.json", '{"notams":[{"notam_id":"A1/26","b":"x","text":"t","quellen":["a",5]}]}'),
+    ("kaputt_e.json", '{"notams":[{"notam_id":"A1/26","b":"x","text":"t","quellen":"abc"}]}'),
+):
+    (_tmp / _nm).write_text(_inhalt, encoding="utf-8")
+    try:
+        ai.load_korpus(_tmp / _nm)
+        check("Korpus mit falschem Werttyp bricht ab: " + _inhalt, False)
+    except ai.ImportStateError as _e:
+        check("Korpus mit falschem Werttyp bricht ab: " + _inhalt,
+              _nm in str(_e) and (_tmp / _nm).read_text(encoding="utf-8") == _inhalt, str(_e))
+    except Exception as _e:
+        check("Korpus mit falschem Werttyp bricht ab: " + _inhalt, False, repr(_e))
 _alt_replace = os.replace
 def _boom(*a, **k):
     raise OSError("boom")
@@ -3293,6 +3307,23 @@ check("Ausgeblendetes Mitglied faellt aus Kandidat und Zeile",
       and "A4632/26" not in tag20_ohne.kandidaten[0]["row"]["NOTAM"]
       and "A4631/26" in tag20_ohne.kandidaten[0]["notam_ids"],
       [(k["notam_ids"], k["row"]["NOTAM"]) for k in tag20_ohne.kandidaten])
+
+# Fruehestes Mitglied ausgeblendet: Startzeit und Fenster nur aus den uebrigen.
+_frueh = AI_CN[2].replace("B)2609200356", "B)2609200340")
+_kf = {}
+ai.merge_korpus(_kf, ai.extract_notams("\n\n".join([AI_CN[1], _frueh]), "t")[0])
+_bf = ai.bundle_days(_kf)[_d(2026, 9, 20)]
+_f_voll = ai.analyze_day(_d(2026, 9, 20), _bf, sp, fir, set(), set())
+_f_weg = ai.analyze_day(_d(2026, 9, 20), _bf, sp, fir, set(), {app.event_key(_frueh)})
+check("Fruehes Mitglied sichtbar: Start 03:40",
+      len(_f_voll.kandidaten) == 1 and _f_voll.kandidaten[0]["row"]["Startzeit"] == "03:40"
+      and "03:40" in _f_voll.kandidaten[0]["fenster"][0],
+      [(k["row"]["Startzeit"], k["fenster"]) for k in _f_voll.kandidaten])
+check("Fruehestes Mitglied ausgeblendet: Startzeit 03:54, Fenster ab 03:54",
+      len(_f_weg.kandidaten) == 1 and _f_weg.kandidaten[0]["row"]["Startzeit"] == "03:54"
+      and "03:54" in _f_weg.kandidaten[0]["fenster"][0]
+      and _f_weg.kandidaten[0]["key"] != _f_voll.kandidaten[0]["key"],
+      [(k["row"]["Startzeit"], k["fenster"]) for k in _f_weg.kandidaten])
 
 # Start ueber Mitternacht: der Nachlauf liefert den vollstaendigen Start im
 # Vortag, das eigene Buendel des 21.09. ein Bruchstueck. drop_subsumed raeumt auf.

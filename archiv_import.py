@@ -26,7 +26,7 @@ import types
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -304,7 +304,12 @@ def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
     korpus: Dict[str, KorpusNotam] = {}
     try:
         for e in data.get("notams", []):
-            n = KorpusNotam(e["notam_id"], e["b"], e["text"], list(e.get("quellen", [])))
+            quellen = e.get("quellen", [])
+            felder = [e["notam_id"], e["b"], e["text"]]
+            if not all(isinstance(v, str) for v in felder) or not isinstance(quellen, list) \
+                    or not all(isinstance(q, str) for q in quellen):
+                raise TypeError("wrong value type in a NOTAM entry")
+            n = KorpusNotam(felder[0], felder[1], felder[2], list(quellen))
             korpus[n.schluessel] = n
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ImportStateError(
@@ -503,6 +508,14 @@ def analyze_day(
         if g.nation not in IMPORT_NATIONS:
             continue
         # Ausgeblendete Mitglieder gehoeren weder in die Zeile noch in den Schluessel.
+        # Start und Fenster nur aus den uebrigen Mitgliedern (Kopie, app-Objekt bleibt unberuehrt).
+        rest = [e for e in ok if e.valid_from is not None]
+        if weg & set(g.row_indices) and rest:
+            g = replace(
+                g,
+                window_from=min(e.valid_from for e in rest),
+                window_to=max(e.valid_to or e.valid_from for e in rest),
+            )
         row = app.archive_row(g, [e for e in events if e.row_index not in weg])
         belegt |= set(g.row_indices) | set(g.advance_row_indices)
         if row["Startdatum"] != tag_text:
