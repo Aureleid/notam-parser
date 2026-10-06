@@ -3518,7 +3518,10 @@ check("leere Auswahl schreibt nichts", ai.confirm_many(zst, [], _tmp / "nie.csv"
 
 # Kaputte Zustandsdatei (gueltiges JSON, falsche Typen): Abbruch, Datei bleibt unberuehrt
 for _nm, _inhalt in (("st_a.json", '{"tage": []}'), ("st_b.json", '{"entscheidungen": 5}'),
-                     ("st_c.json", '{"review_bestaetigt": "abc"}'), ("st_d.json", '{"review_ausgeblendet": {"x": 1}}')):
+                     ("st_c.json", '{"review_bestaetigt": "abc"}'), ("st_d.json", '{"review_ausgeblendet": {"x": 1}}'),
+                     ("st_e.json", '{"tage": {"2026-09-20": []}}'),
+                     ("st_f.json", '{"tage": {"2026-09-20": {"fingerprint": "f", "kandidaten": [], "pruefliste": [5]}}}'),
+                     ("st_g.json", '{"entscheidungen": {"k": "confirmed"}}')):
     (_tmp / _nm).write_text(_inhalt, encoding="utf-8")
     try:
         ai.load_state(_tmp / _nm)
@@ -3537,7 +3540,7 @@ ai.merge_korpus(kx, ai.extract_notams(dritte, "seite2.html#msg_9")[0])
 ai.reevaluate(kx, zst, sp, fir)
 neu_k = [k for k in ai.candidates(zst) if k["entscheidung"] is None]
 check("weitere Zone: Kandidat 'aktualisiert'",
-      len(neu_k) == 1 and neu_k[0]["ersetzt"] == kl[0]["key"], [(k["key"], k["ersetzt"]) for k in neu_k])
+      len(neu_k) == 1 and neu_k[0]["ersetzt"] == [kl[0]["key"]], [(k["key"], k["ersetzt"]) for k in neu_k])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(neu_k, gs, sites, veh) == [])
 ai.confirm_many(zst, [(neu_k[0], "CZ-2D", "Yaogan 45", None)], archiv_t)
 a2 = app.load_archive(archiv_t)
@@ -3548,6 +3551,100 @@ check("  ... alter Schluessel als ersetzt vermerkt",
 
 # Bestaetigen wirkt auch fuer einen frueher entfernten Schluessel
 check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8"))
+
+# Fixrunde 1: Bestaetigung erst nach geprueftem Schreiben, Ersatz mehrerer Vorgaenger
+zf = ai.load_state(_tmp / "f.json")
+ai.reevaluate(kx, zf, sp, fir)
+kfl = ai.candidates(zf)
+kf = kfl[0]
+check("Sammelbestaetigung: GCAT-Rakete ohne Kuerzel -> einzeln bestaetigen",
+      ai.bulk_candidates(kfl, [dataclasses.replace(_treffer0, rakete="Unbekannte Rakete XQ")], sites, veh) == [],
+      [(r, p) for _, r, p, _ in ai.bulk_candidates(
+          kfl, [dataclasses.replace(_treffer0, rakete="Unbekannte Rakete XQ")], sites, veh)])
+_ord = _tmp / "archiv_ist_ordner"
+_ord.mkdir()
+_vorher = _copy.deepcopy(zf["entscheidungen"])
+try:
+    ai.confirm_many(zf, [(kf, "CZ-2D", "Yaogan 45", None)], _ord)
+    _fehler = None
+except ai.ImportStateError as exc:
+    _fehler = str(exc)
+except Exception as exc:
+    _fehler = "wrong type: {!r}".format(exc)
+check("Bestaetigen: Archiv nicht geschrieben -> ImportStateError mit Dateiname",
+      _fehler is not None and _ord.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
+check("  ... Zustand unveraendert", zf["entscheidungen"] == _vorher, zf["entscheidungen"])
+check("  ... kein Kandidat entschieden", all(k["entscheidung"] is None for k in ai.candidates(zf)))
+_entfernt_args = []
+_merge_orig = app.merge_archive
+def _merge_spion(bestand, neue, entfernt=None):
+    _entfernt_args.append(entfernt)
+    return _merge_orig(bestand, neue, entfernt=entfernt)
+archiv_f = _tmp / "archiv_f.csv"
+app.merge_archive = _merge_spion
+try:
+    ai.confirm_many(zf, [(kf, "CZ-2D", "Yaogan 45", None)], archiv_f)
+finally:
+    app.merge_archive = _merge_orig
+check("Bestaetigen uebergibt merge_archive kein archiv_removed", _entfernt_args == [set()], _entfernt_args)
+_persist_orig = app.persist_archive
+_vorher = _copy.deepcopy(zf["entscheidungen"])
+app.persist_archive = lambda path, df: None
+try:
+    ai.remove_orphan(zf, kf["key"], archiv_f)
+    _fehler = None
+except ai.ImportStateError as exc:
+    _fehler = str(exc)
+except Exception as exc:
+    _fehler = "wrong type: {!r}".format(exc)
+finally:
+    app.persist_archive = _persist_orig
+check("Remove: Archiv nicht geschrieben -> ImportStateError mit Dateiname",
+      _fehler is not None and archiv_f.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
+check("  ... Zustand unveraendert, Zeile noch da",
+      zf["entscheidungen"] == _vorher and len(app.load_archive(archiv_f)) == 1, zf["entscheidungen"])
+try:
+    ai.keep_orphan(zf, "gibt-es-nicht")
+    _fehler = None
+except ai.ImportStateError as exc:
+    _fehler = str(exc)
+except Exception as exc:
+    _fehler = "wrong type: {!r}".format(exc)
+check("Keep mit unbekanntem Schluessel -> ImportStateError",
+      _fehler is not None and not _fehler.startswith("wrong type"), _fehler)
+zf["entscheidungen"][kf["key"]]["behalten"] = True
+ai.reevaluate(kx, zf, sp, fir)
+check("Keep verfaellt, sobald der Start wieder erkannt wird",
+      "behalten" not in zf["entscheidungen"][kf["key"]], zf["entscheidungen"][kf["key"]])
+_tage_f = zf["tage"]
+zf["tage"] = {iso: dict(t, kandidaten=[]) for iso, t in _tage_f.items()}
+check("  ... und erneut verloren steht er wieder auf der Liste",
+      [k for k, _ in ai.orphans(zf)] == [kf["key"]], ai.orphans(zf))
+zf["tage"] = _tage_f
+
+# Zwei bestaetigte Vorgaenger fallen in einem neu gruppierten Kandidaten zusammen
+_roh = zf["tage"]["2026-09-20"]["kandidaten"][0]
+_r1 = dict(_roh["row"], NOTAM=_roh["notam_ids"][0])
+_r2 = dict(_roh["row"], NOTAM=_roh["notam_ids"][1])
+_k1, _k2 = app.archive_key(_r1), app.archive_key(_r2)
+archiv_z = _tmp / "archiv_z.csv"
+app.persist_archive(archiv_z, app.merge_archive(None, [_r1, _r2]))
+zz = ai.load_state(_tmp / "z.json")
+zz["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [_roh], "pruefliste": [], "usa": 0, "ausgeblendet": 0}
+for _k, _r in ((_k1, _r1), (_k2, _r2)):
+    zz["entscheidungen"][_k] = {"status": "confirmed", "rakete": "CZ-2D", "payload": "", "gcat": "",
+                                "notam_ids": [_r["NOTAM"]], "quellen": ["alt"]}
+_kz = ai.candidates(zz)
+check("zwei Vorgaenger: beide im Ersatzvermerk",
+      len(_kz) == 1 and _kz[0]["ersetzt"] == sorted([_k1, _k2]), [k["ersetzt"] for k in _kz])
+check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kz, gs, sites, veh) == [])
+ai.confirm_many(zz, [(_kz[0], "CZ-2D", "Yaogan 45", None)], archiv_z)
+_az = app.load_archive(archiv_z)
+check("  ... beide Zeilen durch eine ersetzt",
+      [app.archive_key(dict(r)) for _, r in _az.iterrows()] == [_roh["key"]], _az["NOTAM"].tolist())
+check("  ... beide als ersetzt vermerkt",
+      all(zz["entscheidungen"][_k] == {"status": "replaced", "durch": _roh["key"]} for _k in (_k1, _k2)),
+      zz["entscheidungen"])
 
 # Verwerfen
 zr = ai.load_state(_tmp / "r.json")

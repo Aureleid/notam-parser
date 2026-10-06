@@ -890,12 +890,29 @@ def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
     Struktur bricht ab (ImportStateError) und wird nie ueberschrieben.
     """
     data = read_json(path)
+
+    def kaputt(was: str) -> ImportStateError:
+        return ImportStateError(
+            "{} has an unexpected structure ({}). It is left untouched - "
+            "please check it.".format(path.name, was)
+        )
+
     for name, typ in _STATE_TYPEN:
         if name in data and not isinstance(data[name], typ):
-            raise ImportStateError(
-                "{} has an unexpected structure ({} is not a {}). It is left untouched - "
-                "please check it.".format(path.name, name, typ.__name__)
-            )
+            raise kaputt("{} is not a {}".format(name, typ.__name__))
+    for iso, tag in data.get("tage", {}).items():
+        if not isinstance(tag, dict) or not isinstance(tag.get("fingerprint"), str):
+            raise kaputt("day {} is not a day entry".format(iso))
+        for liste in ("kandidaten", "pruefliste"):
+            werte = tag.get(liste)
+            if not isinstance(werte, list) or not all(isinstance(w, dict) for w in werte):
+                raise kaputt("day {}: {} is not a list of entries".format(iso, liste))
+        for zahl in ("usa", "ausgeblendet"):
+            if zahl in tag and (not isinstance(tag[zahl], int) or isinstance(tag[zahl], bool)):
+                raise kaputt("day {}: {} is not a number".format(iso, zahl))
+    for key, e in data.get("entscheidungen", {}).items():
+        if not isinstance(e, dict):
+            raise kaputt("decision {} is not an entry".format(key))
     return {
         "version": 1,
         "tage": data.get("tage", {}),
@@ -969,7 +986,17 @@ def reevaluate(
         neu += 1
     if alle or erster_lauf:
         state["erkennungsstand"] = detection_stamp()
+    # Wieder erkannt: 'Keep' verfaellt, damit ein spaeterer Verlust erneut gemeldet wird.
+    aktuelle_ids = _aktuelle_ids(state)
+    for e in state["entscheidungen"].values():
+        if e.get("behalten") and set(e.get("notam_ids", [])) & aktuelle_ids:
+            del e["behalten"]
     return neu
+
+
+def _aktuelle_ids(state: Dict[str, Any]) -> Set[str]:
+    """NOTAM-Kennungen aller aktuellen Kandidaten."""
+    return {i for t in state["tage"].values() for k in t["kandidaten"] for i in k["notam_ids"]}
 
 
 def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -980,9 +1007,7 @@ def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     Archivzeilen nicht mehr. Geloescht wird nie automatisch - der Benutzer
     entscheidet (keep_orphan / remove_orphan).
     """
-    aktuelle_ids = {
-        i for t in state["tage"].values() for k in t["kandidaten"] for i in k["notam_ids"]
-    }
+    aktuelle_ids = _aktuelle_ids(state)
     return [
         (key, e)
         for key, e in sorted(state["entscheidungen"].items())
@@ -993,7 +1018,22 @@ def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
 
 
 def keep_orphan(state: Dict[str, Any], key: str) -> None:
+    if key not in state["entscheidungen"]:
+        raise ImportStateError("No decision is recorded for {}.".format(key))
     state["entscheidungen"][key]["behalten"] = True
+
+
+def _archiv_pruefen(archiv: Path, vorhanden: Set[str], fehlend: Set[str]) -> None:
+    """
+    Liest das Archiv nach dem Schreiben zurueck. app.persist_archive schluckt
+    Schreibfehler; erst dieser Abgleich zeigt, ob die Aenderung angekommen ist.
+    """
+    keys = {app.archive_key(dict(r)) for _, r in app.load_archive(archiv).iterrows()}
+    if not vorhanden <= keys or fehlend & keys:
+        raise ImportStateError(
+            "{} could not be written. Nothing was recorded - please check the file "
+            "and try again.".format(archiv.name)
+        )
 
 
 def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CSV) -> None:
@@ -1004,6 +1044,7 @@ def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CS
             [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
         ].reset_index(drop=True)
         app.persist_archive(archiv, bestand)
+    _archiv_pruefen(archiv, set(), {key})
     state["entscheidungen"][key] = {"status": "removed"}
 
 
@@ -1024,12 +1065,14 @@ def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
         eintrag = dict(k)
         eintrag["entscheidung"] = entscheidungen.get(k["key"])
-        eintrag["ersetzt"] = None
+        # alle bestaetigten Vorgaenger mit gemeinsamer Kennung; leer = keiner
+        eintrag["ersetzt"] = []
         if eintrag["entscheidung"] is None:
-            for alt_key, ids in bestaetigte_ids.items():
-                if alt_key != k["key"] and ids & set(k["notam_ids"]):
-                    eintrag["ersetzt"] = alt_key
-                    break
+            eintrag["ersetzt"] = sorted(
+                alt_key
+                for alt_key, ids in bestaetigte_ids.items()
+                if alt_key != k["key"] and ids & set(k["notam_ids"])
+            )
         gesehen[k["key"]] = eintrag
     return list(gesehen.values())
 
@@ -1067,23 +1110,31 @@ def confirm_many(
 
     Bestaetigen ist eine ausdrueckliche Handlung: ein frueher im Optionsmenue
     entfernter Schluessel wird deshalb nicht gefiltert (entfernt=set()).
-    Ein 'aktualisierter' Kandidat ersetzt die Zeile seines Vorgaengers.
+    Ein 'aktualisierter' Kandidat ersetzt die Zeilen aller seiner Vorgaenger.
+    Der Zustand aendert sich erst, wenn das zurueckgelesene Archiv die
+    Aenderung enthaelt; sonst ImportStateError und nichts ist vermerkt.
     """
     if not auswahl:
         return 0
     bestand = app.load_archive(archiv)
-    ersetzt = {k["ersetzt"] for k, _, _, _ in auswahl if k.get("ersetzt")}
+    ersetzt = {alt for k, _, _, _ in auswahl for alt in (k.get("ersetzt") or [])}
     if ersetzt and not bestand.empty:
         bestand = bestand[
             [app.archive_key(dict(r)) not in ersetzt for _, r in bestand.iterrows()]
         ].reset_index(drop=True)
     zeilen = []
+    neu: Dict[str, Dict[str, Any]] = {}
     for kand, rakete, payload, treffer in auswahl:
         row = dict(kand["row"])
         row["Trägersystem"] = rakete
         row["Payload"] = payload
         zeilen.append(row)
-        state["entscheidungen"][kand["key"]] = {
+        for alt in kand.get("ersetzt") or []:
+            neu[alt] = {"status": "replaced", "durch": kand["key"]}
+    # Bestaetigte zuletzt: ein Schluessel der Auswahl bleibt bestaetigt, auch wenn
+    # ein anderer Kandidat ihn als Vorgaenger fuehrt.
+    for kand, rakete, payload, treffer in auswahl:
+        neu[kand["key"]] = {
             "status": "confirmed",
             "rakete": rakete,
             "payload": payload,
@@ -1091,9 +1142,10 @@ def confirm_many(
             "notam_ids": list(kand["notam_ids"]),
             "quellen": list(kand["quellen"]),
         }
-        if kand.get("ersetzt"):
-            state["entscheidungen"][kand["ersetzt"]] = {"status": "replaced", "durch": kand["key"]}
     app.persist_archive(archiv, app.merge_archive(bestand, zeilen, entfernt=set()))
+    geschrieben = {app.archive_key(r) for r in zeilen}
+    _archiv_pruefen(archiv, geschrieben, ersetzt - geschrieben)
+    state["entscheidungen"].update(neu)
     return len(zeilen)
 
 
@@ -1107,7 +1159,7 @@ def bulk_candidates(
     sites: Dict[str, Tuple[List[str], str]],
     vehicles: pd.DataFrame,
 ) -> List[Tuple[Dict[str, Any], str, str, GcatStart]]:
-    """Nur unentschiedene, eindeutige Kandidaten ohne Warnung und ohne Ersatzvermerk."""
+    """Nur unentschiedene, eindeutige Kandidaten ohne Warnung, ohne Ersatzvermerk und mit Traeger-Kuerzel."""
     auswahl = []
     for k in kandidaten:
         if k["entscheidung"] is not None or k["ersetzt"]:
@@ -1116,7 +1168,10 @@ def bulk_candidates(
         if abgleich.status != STATUS_EINDEUTIG or abgleich.warnungen:
             continue
         s = abgleich.treffer[0]
-        auswahl.append((k, vehicle_code_for(s.rakete, vehicles), s.nutzlast, s))
+        code = vehicle_code_for(s.rakete, vehicles)
+        if not code:  # Rakete ohne Kuerzel: nur einzeln, mit sichtbarem Feld
+            continue
+        auswahl.append((k, code, s.nutzlast, s))
     return auswahl
 
 
