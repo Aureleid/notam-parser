@@ -22,6 +22,7 @@ import json
 import os
 import re
 import tempfile
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -586,7 +587,8 @@ class GcatStart:
 
 _RE_ORBITAL_TAG = re.compile(r"^\d{4}-(\d{3}|[EF]\d{2})$")
 _RE_GCAT_DATE = re.compile(
-    r"^(\d{4}) ([A-Z][a-z]{2}) +(\d{1,2})(?: (\d{2})(\d{2})(?::(\d{2}))?)?"
+    r"^(\d{4}) ([A-Z][a-z]{2}) +(\d{1,2})"
+    r"(?: (\d{2})(\d{2})(?::(\d{2}))?(?=\s|\?|$)|(?=\s*\??$))"
 )
 _MONATE = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
@@ -620,11 +622,14 @@ def parse_gcat(text: str) -> List[GcatStart]:
         if not YEARS[0] <= jahr <= YEARS[1]:
             continue
         nur_datum = m.group(4) is None
-        zeit = datetime(
-            jahr, _MONATE[m.group(2)], int(m.group(3)),
-            int(m.group(4) or 0), int(m.group(5) or 0), int(m.group(6) or 0),
-            tzinfo=timezone.utc,
-        )
+        try:
+            zeit = datetime(
+                jahr, _MONATE[m.group(2)], int(m.group(3)),
+                int(m.group(4) or 0), int(m.group(5) or 0), int(m.group(6) or 0),
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            continue  # unmoegliches Datum (z.B. 30. Feb): nur diese Zeile ueberspringen
         starts.append(
             GcatStart(
                 tag=r[0].strip(),
@@ -675,6 +680,14 @@ def load_gcat(
                 daten = antwort.read(MAX_GCAT_BYTES + 1)
             if len(daten) > MAX_GCAT_BYTES:
                 raise ValueError("launch list larger than expected")
+            # Nur Abrufe von GCAT_URL: Weiterleitung auf anderen Host ablehnen
+            endurl = getattr(antwort, "geturl", lambda: GCAT_URL)()
+            if urllib.parse.urlparse(endurl).hostname != urllib.parse.urlparse(GCAT_URL).hostname:
+                raise ValueError("redirected to another host")
+            # Muell (z.B. Captive-Portal-Seite) darf den guten Cache nicht ersetzen
+            text = daten.decode("utf-8", errors="replace")
+            if not text.startswith("#Launch_Tag") or not parse_gcat(text):
+                raise ValueError("not a launch list")
             _write_bytes_atomic(cache, daten)
         except Exception as exc:
             hinweis = "Download failed ({}). ".format(exc)

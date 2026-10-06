@@ -3343,6 +3343,19 @@ check("  ... nur Tagesdatum erkannt", gs[2].nur_datum, gs[2].zeit)
 check("  ... Fragezeichen toleriert", gs[3].zeit.strftime("%H:%M") == "19:24", gs[3].zeit)
 check("  ... Payload faellt auf Flight zurueck", gs[0].nutzlast == "Yaogan 45", gs[0].nutzlast)
 check("  ... Inklination und Azimut", (gs[0].inklination, gs[0].azimut) == (97.0, 189.0))
+check("  ... Sekunden gelesen", gs[1].zeit.second == 12, gs[1].zeit)
+GCAT_TXT2 = GCAT_KOPF + "".join([
+    _gz("2024-F01 ", "2024 Mar  3 1200", "Zhuque-3", "Test", "-", "SUNAN?"),
+    _gz("2026-210 ", "2026 Feb 30 0100", "Falcon 9", "Unmoeglich", "-", "VSFBS"),
+    _gz("2026-211 ", "2026 Sep 20 2460", "Falcon 9", "Unmoeglich 2", "-", "VSFBS"),
+    _gz("2026-212 ", "2026 Sep 20 03", "Falcon 9", "Grob", "-", "VSFBS"),
+    _gz("2026-213 ", "2026 Sep 20 0356:1", "Falcon 9", "Sekunde", "-", "VSFBS"),
+    _gz("2026-214 ", "2026 Sep 21 0100", "Falcon 9", "Gut", "-", "VSFBS"),
+])
+gs2 = ai.parse_gcat(GCAT_TXT2)
+check("GCAT: F-Tag bleibt, unmoegliche/grobe Datumsangaben werden uebersprungen",
+      [s.tag for s in gs2] == ["2024-F01", "2026-214"], [s.tag for s in gs2])
+check("  ... Fragezeichen am Startplatz entfernt", gs2[0].site == "SUNAN", gs2[0].site)
 sites = ai.load_gcat_sites()
 check("Referenz gcat_startplaetze.csv: JQ -> JSLC, China", sites.get("JQ") == (["JSLC"], "China"), sites.get("JQ"))
 check("  ... Baikonur unter GIK-5", sites.get("GIK-5") == (["BAIK"], "Russland"), sites.get("GIK-5"))
@@ -3366,6 +3379,35 @@ liste2, status2 = ai.load_gcat(refresh=True, cache=cache, opener=_opener_fehler)
 check("offline: Cache bleibt in Gebrauch", liste2 is not None and len(liste2) == 4, status2)
 liste3, status3 = ai.load_gcat(refresh=True, cache=_tmp / "nichts.tsv", opener=_opener_fehler)
 check("offline ohne Cache: nicht verfuegbar", liste3 is None, status3)
+
+# Kaputte Daten: Cache mit unmoeglichem Datum, Muell-Refresh, Weiterleitung, Uebergroesse
+cache_k = _tmp / "gcat_kaputt.tsv"
+cache_k.write_text(GCAT_TXT2, encoding="utf-8")
+lk, sk = ai.load_gcat(refresh=False, cache=cache_k)
+check("GCAT: Cache mit unmoeglichem Datum bleibt ladbar", lk is not None and len(lk) == 2, sk)
+cache_g = _tmp / "gcat_gut.tsv"
+cache_g.write_bytes(GCAT_TXT.encode("utf-8"))
+vorher = cache_g.read_bytes()
+lj, sj = ai.load_gcat(refresh=True, cache=cache_g,
+                      opener=lambda req, timeout=0: _Antwort(b"<html>captive portal</html>"))
+check("GCAT: Muell-Download ersetzt guten Cache nicht",
+      cache_g.read_bytes() == vorher and lj is not None and len(lj) == 4 and "Download failed" in sj, sj)
+check("  ... keine tmp-Reste", not list(_tmp.glob("gcat_gut*tmp*")) and not list(_tmp.glob("*.tmp")), list(_tmp.iterdir()))
+class _AntwortUmgeleitet(_Antwort):
+    def geturl(self): return "https://evil.example/launch.tsv"
+lu, su = ai.load_gcat(refresh=True, cache=cache_g,
+                      opener=lambda req, timeout=0: _AntwortUmgeleitet(GCAT_TXT.encode("utf-8")))
+check("GCAT: Weiterleitung auf anderen Host wird abgelehnt",
+      cache_g.read_bytes() == vorher and "Download failed" in su, su)
+_alt_max = ai.MAX_GCAT_BYTES
+ai.MAX_GCAT_BYTES = 100
+try:
+    lm, sm = ai.load_gcat(refresh=True, cache=cache_g, opener=_opener_ok)
+finally:
+    ai.MAX_GCAT_BYTES = _alt_max
+check("GCAT: uebergrosse Antwort wird abgelehnt",
+      cache_g.read_bytes() == vorher and "Download failed" in sm, sm)
+check("GCAT: Statustexte", "Download failed" in status2 and "GCAT (J. McDowell, CC-BY)" in status, (status, status2))
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
