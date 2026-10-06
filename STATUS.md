@@ -1,6 +1,6 @@
 # Projektstand — NOLA
 
-Stand: 02.10.2026 · `app.py` 6347 Zeilen · `test_app.py` 719 Tests, alle grün
+Stand: 06.10.2026 · `app.py` 7654 Zeilen · `test_app.py` 1210 Tests, alle grün
 
 ## Starten
 
@@ -18,7 +18,7 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 | Eingabe | Datei-Import (CSV/XLS/XLSX mit Vorspann-Erkennung) und Freitext-Feld; beide identisch verarbeitet |
 | Zuordnung | Drittstaaten-Regel über Spalte `Land`, Trägersystem → Startplatz, Startrichtungs-Prüfung (Sektor 225–325° ausgeschlossen), Fernzonen-Behandlung |
 | Gruppierung | Mehrere Dropzonen eines Starts werden zusammengefasst, Anker-Regel gegen Selbstbestätigung, Ausreißer-Trennung |
-| Nationen | China, Russland, Indien, Iran, Nordkorea, USA — 32 Startplätze, 130 FIRs, 51 Trägersysteme |
+| Nationen | China, Russland, Indien, Iran, Nordkorea, USA — 32 Startplätze, 130 FIRs, 65 Trägersysteme (13 am 06.10.2026 nach Freigabe ergänzt) |
 | Bedienung | 6 Reiter, Klartext-Auswertung, manuelle Prüfung (Space Launch / Ausblenden), Optionsmenü zur Referenzpflege |
 | Trägersystem | Dropdown unter NOTAM Data und Review, gestaffelt nach Nation; gilt für alle Zonen eines Starts; lesbare Spalte in der Launch Overview |
 | Prüfung | Externe Prüfung gegen `docs/intent/nola-massstab.md` am 25.09.2026; sechs Befunde behoben, einer als Vertragsfrage eingeordnet |
@@ -28,7 +28,8 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 | Bahnrechnung | Inklination mit Erdrotation (`orbital_azimuth_deg`); Orbitbänder auf die Streuung der Abschätzung geweitet (SSO 93–103°) |
 | Vorfilterung | `LOW` + Ausschlussbegriff → direkt unter *Excluded*; auf der Echtdatei 148 von 275 Review-Fällen, ohne einen Start zu verlieren. Zurückholen gewinnt dauerhaft. |
 | Payload | Freitextfeld unter NOTAM Data, gilt für alle Zonen eines Starts; Spalte in Launch Overview und Export |
-| Startarchiv | `startarchiv_updated.csv`, von der App geschrieben: eine Zeile je erkanntem Start, wird aktualisiert statt verdoppelt; eigener Reiter im Optionsmenü. Erkennungsmerkmal ist Startdatum + NOTAM-Kennungen — der Startplatz gehört seit dem 02.10.2026 nicht dazu, weil er sich mit besserer Erkennung ändert. |
+| Startarchiv | `startarchiv_updated.csv`, von der App geschrieben: eine Zeile je erkanntem Start, wird aktualisiert statt verdoppelt; eigener Reiter im Optionsmenü. Erkennungsmerkmal ist Startdatum + NOTAM-Kennungen — der Startplatz gehört seit dem 02.10.2026 nicht dazu, weil er sich mit besserer Erkennung ändert. Gelesen wird streng (`read_archive_strict`): eine vorhandene, aber unlesbare, leere oder in den Spalten abweichende Datei wird nie überschrieben — weder im Tagesbetrieb noch beim Import —, stattdessen erscheint eine Meldung. Geschrieben wird atomar über eine temporäre Datei (`_write_bytes_atomic`). |
+| Archiv-Import | Reiter *Archive Import* im Optionsmenü, **nur lokal** sichtbar (nicht unter `/mount/src`, Host lokal, TCP-Gegenstelle Loopback). Gespeicherte NSF-Forenseiten (HTML/TXT) oder eingefügter Text werden stapelweise gelesen, Zitate und Skripte verworfen, NOTAMs im lokalen Korpus `archiv_korpus.json` entdoppelt. Je Tag ein Bündel mit Nachlauf bis 06:00 UTC des Folgetags, ausgewertet mit derselben Erkennung wie im Tagesbetrieb (`MEDIUM`); US-Starts werden nach der Erkennung verworfen und gezählt. GCAT (J. McDowell) schlägt nur Rakete und Payload vor; der Abruf läuft nur auf Knopfdruck. Ins Archiv kommt nur Bestätigtes — einzeln oder als Sammelbestätigung eindeutiger Treffer, mit Prüfung nach dem Schreiben. Steht der Start schon aus dem Tagesbetrieb im Archiv, werden nur Trägersystem und Payload ergänzt; die vorherigen Werte bleiben im Importzustand `archiv_import.json`. NOTAMs, die die Erkennung zur Prüfung stellt oder ohne Startplatz lässt, gehen in eine Prüfliste (Space Launch / Hide). Die Tageslage bleibt unberührt (Gegenprobe in `test_app.py`). Entscheidung: `docs/decisions/ADR-0001-archiv-import-nola-erkennt-gcat-schlaegt-vor.md`. Browser-Test 06.10.2026: 3 eingefügte NOTAMs ergaben 3 Tage und 2 Kandidaten; ein Forenkommentar „Starship“ blieb ohne Wirkung; der 20.09.2026 wurde eindeutig mit GCAT 2026-220 (Lijian-1, Payload Pengcheng) gepaart; die bestätigte Zeile trug NOLAs eigene Inklination. |
 | Persistenz | Referenzänderungen direkt in die CSVs, Arbeitsstand (inkl. Trägersystem-Zuweisungen) in `notam_workspace.json` |
 | Oberfläche | Zweizeilige Wortmarke nach festem Regelwerk, unbunte Bühne mit bunten Signalen, durchgehend deckende Flächen, durchgehend englische Fachsprache, geometrische Symbole statt Piktogramme, Farbschema aus einer Referenzoberfläche gemessen (`.streamlit/config.toml`) |
 | Veröffentlichung | Repository `Aureleid/notam-parser`, Streamlit Community Cloud unter `notam-space-analyzer.streamlit.app` |
@@ -41,6 +42,10 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 - Der Rückgängig-Stapel im Optionsmenü ist nach einem Neustart leer.
 - `B4912/26` / `B4913/26` („CONDUCTED BY KOREA") bleiben bewusst im Review — der Text
   unterscheidet nicht zwischen Nord- und Südkorea.
+- NSF-Forenseiten lassen sich nicht automatisch abrufen (Cloudflare). Für den Archiv-Import
+  werden sie im Browser gespeichert oder als Text kopiert.
+- Kopierter Forentext kann zitierte NOTAMs enthalten. Sie werden über Kennung und B-Zeit
+  entdoppelt; als Zitat erkannt werden sie nur in gespeichertem HTML, nicht in kopiertem Text.
 
 ## Offene Punkte
 
@@ -64,8 +69,8 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
   entstanden (`F0511/26` in drei Zeilen, `F0494/26` in drei). Der Startplatz ist seit dem
   02.10.2026 aus dem Schlüssel entfernt, was die Seestart- und die Pad-Verschiebung behebt;
   die Kennungsmenge bleibt offen. Lösung wäre eine Suche über Kennungs-Überschneidung —
-  ändert die Semantik von `merge_archive` und braucht eine Entscheidung. Beim geplanten
-  Import von 500–650 Starts wiegt das deutlich schwerer als heute.
+  ändert die Semantik von `merge_archive` und braucht eine Entscheidung. Mit dem
+  Archiv-Import (500–650 historische Starts) wiegt das deutlich schwerer als vorher.
 - **Zwei Startversuche desselben Starts** werden als zwei Starts geführt. Der chinesische
   Seestart vom 11./12.02.2026 steht zweimal im Archiv — am 11. offenbar abgebrochen, am 12.
   geflogen. NOLA kann das nicht wissen; beide Tage hatten echte Luftraumsperrungen. Für die
@@ -94,4 +99,22 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 - **Altes Archiv kennt die Unterscheidung nicht.** Die 16 bestehenden Zeilen mit `WSLC`
   heißen weiter „Wenchang, Pad nicht unterschieden" — rückwirkend lässt sich das nicht
   klären.
+- **Zusatzfeld in der ersten Archivzeile** (Bead `nola-djk`): Hat die erste Datenzeile von
+  `startarchiv_updated.csv` ein Feld mehr als die Kopfzeile, verschieben sich beim Einlesen
+  alle Spalten. Bestand schon vor dem Archiv-Import; Risiko von Datenverlust.
+- **Echte NSF-Seite als Testfixture**: Die HTML-Extraktion ist bisher nur gegen
+  nachgebautes SMF-Markup getestet.
+- **Archivspalte Quelle**: Woher eine Importzeile stammt, steht vorerst nur im Nebenbestand
+  `archiv_import.json`, nicht im Archiv selbst — das würde den Spaltensatz ändern.
+- **`persist_sea_launches`** schreibt `seestarts_updated.csv` noch nicht atomar.
+- **Zwei gleichzeitig offene Tabs** können sich beim Schreiben des Archivs gegenseitig
+  überschreiben.
+- **Alte Dubletten**: Doppelte Zeilen, die vor dem Archiv-Import entstanden sind, werden nicht
+  bereinigt.
+- **Tagesbetrieb neben Importzeile**: Ist die NOTAM-Menge im Tagesbetrieb größer als beim
+  Import, legt er neben der Importzeile eine zweite an — Teil des offenen Punkts zum
+  Archivschlüssel (`archive_key`).
+- **Kein Rückgängig für ergänzte Zeilen**: Beim Ergänzen einer Tagesbetriebs-Zeile werden die
+  vorherigen Werte von Trägersystem und Payload unter `vorher` gespeichert, eine Aktion zum
+  Zurücknehmen gibt es noch nicht.
 - Lokale Änderungen erreichen die veröffentlichte App erst nach `git push`.

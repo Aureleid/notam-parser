@@ -11,17 +11,17 @@
 /* Layout: links der Funktionsbaum (Mindmap als Worktree), rechts die grossen Schritte als Chat. */
 :root{
   --bg:#eef0f3; --panel:#f8f9fb; --ink:#171b22; --mute:#5d6572; --line:#cfd5de;
-  --s1:#2f6fd6; --s2:#b8680f; --s3:#1e8a5a; --s4:#7a4fc7; --s5:#c43d6b; --s6:#0e8a96; --s7:#8a7a10; --s8:#4b5563; --s9:#b5451b;
+  --s1:#2f6fd6; --s2:#b8680f; --s3:#1e8a5a; --s4:#7a4fc7; --s5:#c43d6b; --s6:#0e8a96; --s7:#8a7a10; --s8:#4b5563; --s9:#b5451b; --s10:#a1288f;
   --open:#c2410c; --hl:#fff3c4;
   --f-sans:"IBM Plex Sans",system-ui,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,monospace;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#0f1218; --panel:#171b23; --ink:#e6e9ef; --mute:#98a1af; --line:#2c3340;
-  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c;
+  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c; --s10:#e57bd6;
   --open:#fb923c; --hl:#3a3410; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0f1218; --panel:#171b23; --ink:#e6e9ef; --mute:#98a1af; --line:#2c3340;
-  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c;
+  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c; --s10:#e57bd6;
   --open:#fb923c; --hl:#3a3410; color-scheme:dark}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--f-sans);padding-inline:16px;padding-block:20px}
@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>7.139</b> Zeilen app.py</span><span><b>872</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>52</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>7.654</b> Zeilen app.py</span><span><b>1.210</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -83,7 +83,7 @@ li.hit>.row{background:var(--hl)}
     <div id="tree"></div>
   </section>
   <aside class="panel chat">
-    <div class="bar"><h2>Große Schritte</h2><span class="sub">9 Schritte + offene Punkte</span></div>
+    <div class="bar"><h2>Große Schritte</h2><span class="sub">10 Schritte + offene Punkte</span></div>
     <div id="chat"></div>
     <div class="legend" id="legend"></div>
   </aside>
@@ -119,8 +119,11 @@ var STEPS=[
 {id:9,name:"Nachbarplätze",h:"Startplätze unter 5 km Abstand von Hand unterscheiden",
  p:"Wo zwei Plätze so nah liegen, dass die Sperrzonen sie nicht trennen (WSLC und HAIN, 1,92 km), wählt die Geometrie nur den ersten. Der Benutzer wählt den Platz per Dropdown, die App zeigt aus dem Archiv, wo das Trägersystem bisher flog. Hainan Commercial Launch Site (HAIN) ist neu in der Referenz.",
  r:"Ergebnis: keine geratene Zuordnung zwischen Nachbarplätzen, die Handwahl bleibt im Arbeitsstand."},
+{id:10,name:"Archiv-Import",h:"Historische NOTAMs aus Forenseiten ins Startarchiv",
+ p:"Gespeicherte NSF-Forenseiten oder kopierter Text werden stapelweise eingelesen (Zitate und Skripte verworfen) und in einem lokalen Korpus entdoppelt. Je Tag entsteht ein Bündel bis 06:00 UTC des Folgetags, ausgewertet mit derselben Erkennung wie im Tagesbetrieb. GCAT (J. McDowell) schlägt nur Rakete und Payload vor, nie Inklination oder Nation. Ins Archiv kommt nichts ohne Bestätigung, einzeln oder als Sammelbestätigung eindeutiger Treffer. US-Starts werden nach der Erkennung verworfen. Der Reiter erscheint nur lokal. Zeilen, die der Tagesbetrieb schon geschrieben hat, werden nur um Trägersystem und Payload ergänzt. Ein vorhandenes, aber unlesbares Archiv wird nie überschrieben, geschrieben wird atomar. Entscheidung: ADR-0001.",
+ r:"Ergebnis: Browser-Test am 06.10.2026: 3 NOTAMs, 3 Tage, 2 Kandidaten, 20.09.2026 eindeutig mit GCAT 2026-220 gepaart. Die Tageslage bleibt vor und nach einem Import-Durchlauf gleich, 1.210 Tests grün."},
 {id:0,name:"Offen",h:"Offene Punkte",
- p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten, .bak-Kopie der Referenzdateien.",
+ p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten, .bak-Kopie der Referenzdateien. Aus dem Archiv-Import: Spaltenverschiebung durch ein Zusatzfeld in der ersten Archivzeile (nola-djk), echte NSF-Seite als Testfixture, Archivspalte Quelle, nicht-atomares Schreiben der Seestarts, zwei gleichzeitig offene Tabs, alte Dubletten, Zweitzeile des Tagesbetriebs neben einer Importzeile, kein Rückgängig für ergänzte Zeilen.",
  r:"Quelle: STATUS.md, Abschnitt Offene Punkte."}
 ];
 
@@ -151,7 +154,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
  {t:"FIR und Drittstaaten-Regel",f:"_find_fir, load_firs",c:[{t:"Spalte Land trennt Zielnation und Drittstaat"},{t:"Fernzonen-Behandlung"}]},
  {t:"Nationen",n:"CN · RU · IN · IR · KP · US",f:"detect_nation_hint, detect_foreign_operator"},
  {t:"Startplatz",n:"32 Plätze",f:"_find_spaceport, detect_spaceport_hint, _restrict_candidates",c:[
-   {t:"Trägersystem schränkt Kandidaten ein",n:"52 Systeme",f:"load_vehicles, vehicle_nation"},
+   {t:"Trägersystem schränkt Kandidaten ein",n:"65 Systeme",f:"load_vehicles, vehicle_nation"},
    {t:"Entfernung entscheidet danach",f:"surface_distance_km"},
    {t:"Nachbarplätze unter 5 km",n:"CO_LOCATED_SITE_KM",s:9,f:"co_located_groups, _auto_selectable, site_alternatives_for, site_separation_km, mark_site_alternatives"}]},
  {t:"Startrichtungs-Prüfung",s:4,f:"initial_bearing_deg"}]},
@@ -187,22 +190,46 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
  {t:"Startplatz von Hand wählen",s:9,f:"_launch_site_picker, _set_launch_site, apply_launch_site_assignments",c:[
    {t:"Archivhinweis zum Trägersystem",f:"launch_site_history"},
    {t:"Hainan Commercial Launch Site",n:"HAIN neu in der Referenz"}]},
- {t:"Startarchiv",f:"merge_archive, archive_row, persist_archive",c:[{t:"startarchiv_updated.csv",n:"eine Zeile je Start"}]},
+ {t:"Startarchiv",f:"merge_archive, archive_row, persist_archive",c:[{t:"startarchiv_updated.csv",n:"eine Zeile je Start"},
+   {t:"Unlesbares Archiv wird nie überschrieben",s:10,f:"read_archive_strict, ArchiveUnreadable"},
+   {t:"Atomares Schreiben",s:10,f:"_write_bytes_atomic"}]},
+ {t:"Archiv-Import",s:10,n:"nur lokal",c:[
+   {t:"Forenseiten lesen",n:"HTML · TXT · Einfügen",f:"extract_notams, cut_block, texts_from_upload, _PostParser"},
+   {t:"Korpus",n:"archiv_korpus.json",f:"merge_korpus, load_korpus, save_korpus, ingest"},
+   {t:"Tagesbündel und Tagesanalyse",n:"Nachlauf bis 06:00 UTC",f:"bundle_days, analyze_day, drop_subsumed"},
+   {t:"GCAT-Vorschläge",n:"nur Rakete und Payload",f:"parse_gcat, load_gcat, load_gcat_sites, match_candidate, vehicle_code_for",c:[
+     {t:"gcat_startplaetze.csv",n:"GCAT-Code → Kürzel"},
+     {t:"gcat_traegersysteme.csv",n:"GCAT-Schreibweise → Kürzel",f:"load_gcat_vehicle_aliases"}]},
+   {t:"Importzustand",n:"archiv_import.json",f:"load_state, save_state, reevaluate, detection_stamp, is_stale"},
+   {t:"Bestätigen",f:"candidates, bulk_candidates, confirm_many, reject",c:[
+     {t:"Zeile aus dem Tagesbetrieb nur ergänzen",n:"im_archiv · vorher"}]},
+   {t:"Prüfliste",f:"review_items, review_launch, review_hide"},
+   {t:"Nicht mehr erkannt",f:"orphans, keep_orphan, remove_orphan"},
+   {t:"Reiter im Optionsmenü",f:"_archive_import_tab, _archive_import_candidate",c:[
+     {t:"Nur lokal sichtbar",f:"archive_import_allowed, import_gate, is_local_request, is_public_deployment"}]}]},
  {t:"Persistenz",f:"persist_reference, save_workspace, load_workspace",c:[{t:"CSV-Referenzen"},{t:"notam_workspace.json",n:"inkl. launch_site_assignments"}]}]},
 {t:"Qualität und Betrieb",s:8,c:[
- {t:"test_app.py",n:"872 Tests · 3.016 Zeilen"},
+ {t:"test_app.py",n:"1.210 Tests · 4.693 Zeilen"},
  {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
  {t:"Veröffentlichung",n:"Streamlit Community Cloud"},
- {t:"Dokumentation",n:"README · STATUS · docs/intent"}]},
+ {t:"Dokumentation",n:"README · STATUS · docs/intent · docs/decisions"}]},
 {t:"Offene Punkte",s:0,o:1,c:[
  {t:"Demo-Modus, schreibgeschützt",o:1},
  {t:"Hint-Listen aus Referenz ableiten",o:1,f:"NATION_HINTS, SPACEPORT_HINTS"},
  {t:"Archivspalten Art und Zuverlässigkeit",o:1},
  {t:"Zwei Startversuche desselben Starts",o:1},
- {t:"Automatische .bak-Kopie",o:1}]}
+ {t:"Automatische .bak-Kopie",o:1},
+ {t:"Zusatzfeld in der ersten Archivzeile verschiebt alle Spalten",n:"nola-djk",o:1},
+ {t:"Echte NSF-Seite als Testfixture",o:1},
+ {t:"Archivspalte Quelle",o:1},
+ {t:"Seestart-Protokoll atomar schreiben",o:1,f:"persist_sea_launches"},
+ {t:"Zwei offene Tabs überschreiben sich beim Archivschreiben",o:1},
+ {t:"Alte Dubletten im Archiv bereinigen",o:1},
+ {t:"Tagesbetrieb legt neben einer Importzeile eine zweite an",o:1,f:"archive_key"},
+ {t:"Rückgängig für ergänzte Zeilen",o:1}]}
 ]};
 
-var COL={0:"var(--open)",9:"var(--s9)",1:"var(--s1)",2:"var(--s2)",3:"var(--s3)",4:"var(--s4)",5:"var(--s5)",6:"var(--s6)",7:"var(--s7)",8:"var(--s8)"};
+var COL={0:"var(--open)",10:"var(--s10)",9:"var(--s9)",1:"var(--s1)",2:"var(--s2)",3:"var(--s3)",4:"var(--s4)",5:"var(--s5)",6:"var(--s6)",7:"var(--s7)",8:"var(--s8)"};
 var sel=null, tree=document.getElementById("tree");
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
 

@@ -19,9 +19,12 @@ Die App läuft dann auf <http://localhost:8501>.
 | Datei | Zweck |
 |---|---|
 | `app.py` | Gesamte Anwendung (Parser, Geodäsie, UI) |
-| `weltraumbahnhoefe_koordinaten_updated.csv` | 31 Startplätze der sechs Zielnationen |
-| `icao_fir_acc_coordinates_updated.csv` | 129 FIRs/ACCs mit Land und zugehöriger Startnation |
-| `traegersysteme_updated.csv` | 51 aktive Trägersysteme mit Nation, Name und Abkürzung |
+| `weltraumbahnhoefe_koordinaten_updated.csv` | 32 Startplätze der sechs Zielnationen |
+| `icao_fir_acc_coordinates_updated.csv` | 130 FIRs/ACCs mit Land und zugehöriger Startnation |
+| `traegersysteme_updated.csv` | 65 Trägersysteme mit Nation, Name und Abkürzung |
+| `archiv_import.py` | Archiv-Import historischer NOTAMs (Logik ohne Streamlit) |
+| `gcat_startplaetze.csv` | GCAT-Startplatzcode → NOLA-Kürzel und Land (nur Archiv-Import) |
+| `gcat_traegersysteme.csv` | GCAT-Schreibweise → Trägerkürzel (nur Archiv-Import) |
 | `test_app.py` | Tests über Parser, Orbitmechanik, Pipeline, Freitext-Eingabe und Regressionen |
 | `requirements.txt` | Abhängigkeiten |
 | `notam_workspace.json` | Arbeitsstand: manuelle NOTAMs, Bestätigungen, Ausblendungen (wird automatisch angelegt) |
@@ -433,6 +436,35 @@ der Tagesdatei steht — der Schlüssel wandert dafür in `notam_workspace.json`
 
 Die Datei ist in `.gitignore` aufgeführt: sie leitet sich aus den lokalen NOTAM-Rohdaten ab
 und bleibt wie diese lokal.
+
+## Archiv-Import
+
+Historische Starts von China, Russland, Indien, Iran und Nordkorea kommen über den Reiter
+*Archive Import* im Optionsmenü ins Startarchiv. Quelle sind die NOTAM-Sammlungen im
+NASASpaceflight-Forum (NSF). Der Ablauf in vier Schritten:
+
+1. **Seiten speichern** — die Forenseiten im Browser als HTML sichern oder eine ganze Seite
+   als Text kopieren. Ein automatischer Abruf ist nicht möglich, NSF steht hinter Cloudflare.
+2. **Hochladen oder einfügen** — beliebig viele Seiten auf einmal (5 MB je Datei, 200 MB je
+   Stapel). Zitate, Skripte und Forenkommentare werden verworfen, doppelte NOTAMs über
+   Kennung und B-Zeit zusammengeführt. Jeder Tag wird mit derselben Erkennung ausgewertet wie
+   im Tagesbetrieb; US-Starts werden danach verworfen und nur gezählt.
+3. **Eindeutige Treffer bestätigen** — zu jedem erkannten Start schlägt GCAT Rakete und
+   Payload vor, nie Inklination, Azimut oder Nation. *Confirm all unique matches* übernimmt
+   alle eindeutigen Paarungen auf einmal, die übrigen werden nach Jahr gefiltert einzeln
+   bestätigt oder verworfen.
+   Erst dann wird ins Archiv geschrieben. Steht ein Start schon aus dem Tagesbetrieb im
+   Archiv, werden nur Trägersystem und Payload ergänzt.
+4. **Prüfliste abarbeiten** — NOTAMs, die die Erkennung zur Prüfung stellt oder ohne
+   Startplatz lässt, werden mit *Space Launch* oder *Hide* entschieden.
+
+Der Reiter ist **nur lokal** sichtbar: nicht in der veröffentlichten Fassung und nur, wenn
+die Anfrage vom eigenen Rechner kommt. Korpus und Importzustand liegen in
+`archiv_korpus.json` und `archiv_import.json`, die GCAT-Liste im Cache
+`gcat_launch_cache.tsv` — alle drei lokal und in `.gitignore`. Die Begründung steht in
+`docs/decisions/ADR-0001-archiv-import-nola-erkennt-gcat-schlaegt-vor.md`.
+
+Startliste: GCAT (J. McDowell, CC-BY), `planet4589.org/space/gcat`.
 
 ## Warum mehr Referenzdaten den Review nicht leeren
 

@@ -4665,6 +4665,29 @@ for _p_k, _soll_ok in ((_kaputt_u, False), (_fremd, False), (_tmp_u / "einzel_ne
               (repr(_e), _auf))
 _shutil_u.rmtree(_tmp_u, ignore_errors=True)
 
+# Gegenprobe: Ein Import-Durchlauf (ingest -> Korpus -> reevaluate) auf temporaerem
+# Zustand laesst die Tageslage aus der echten FNS-Datei unveraendert.
+import glob as _glob
+_fns = sorted(_glob.glob(str(_P(app.APP_DIR) / "fnsNotams_*.xls")))
+if _fns:
+    def _lage():
+        _df = app.read_notam_table(_fns[-1], _fns[-1])
+        _ev, _st = app.analyze_notams(_df, sp, fir, min_confidence="MEDIUM")
+        return ([(e.notam_id, e.status, e.spaceport_code, e.nation) for e in _ev],
+                len(_st.get("groups", [])))
+    _vorher_lage = _lage()
+    _tmp_g = _P(tempfile.mkdtemp())
+    _zg = ai.load_state(_tmp_g / "g.json")
+    _kg = {}
+    _bg = ai.ingest(_kg, [], eingefuegt="\n\n".join(AI_CN))
+    ai.reevaluate(_kg, _zg, sp, fir)
+    check("Tageslage nach Archiv-Import unveraendert (Events, Status, Startplaetze, Gruppen)",
+          _bg.notams_neu == 3 and _zg["tage"] and _lage() == _vorher_lage,
+          (_bg.notams_neu, sorted(_zg["tage"])))
+    _shutil_u.rmtree(_tmp_g, ignore_errors=True)
+else:
+    check("Tageslage-Gegenprobe (FNS-Datei fehlt - uebersprungen)", True)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
