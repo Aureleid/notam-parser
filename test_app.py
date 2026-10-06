@@ -3233,6 +3233,53 @@ gi = (_P(app.APP_DIR) / ".gitignore").read_text(encoding="utf-8")
 check(".gitignore: lokale Importdateien",
       all(n in gi for n in ("archiv_korpus.json", "archiv_import.json", "gcat_launch_cache.tsv")))
 
+VB_GLEICHER_TAG = vandenberg.replace("2609210130", "2609200130").replace("2609210430", "2609200430")
+# Ohne Textbeleg, aber in eigener US-FIR: die Nation folgt aus der Geografie -> USA.
+US_ZOA = ("W1235/26 NOTAMN Q) ZOA/QRTCA/IV/BO/W/000/999/3444N12034W050 A) ZOA "
+          "B) 2609200130 C) 2609200430 E) DANGER AREA ACTIVATED. AREA BOUNDED BY 343000N1203500W - "
+          "341500N1201500W - 330000N1200000W - 331500N1204500W F) SFC G) UNL")
+# Ohne Textbeleg in einer FIR, die die Referenz nicht kennt: nichts belegt USA -> Pruefliste.
+VB_OHNE_BELEG = ohne_beleg.replace("W1234/26", "W1236/26").replace(
+    "2609210130", "2609200130").replace("2609210430", "2609200430")
+LANG = AI_CN[1].replace("A4631/26", "A4699/26").replace(
+    "B)2609200354 C)2609200415", "B)2609010000 C)2611300000")
+kt = {}
+ai.merge_korpus(kt, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG, US_ZOA, VB_OHNE_BELEG, LANG]), "t")[0])
+buendel = ai.bundle_days(kt)
+from datetime import date as _d
+check("Tagesbuendel: 20.09. enthaelt die fuenf kurzen", len(buendel[_d(2026, 9, 20)]) == 5, len(buendel[_d(2026, 9, 20)]))
+check("  ... lange Meldung hoechstens 14 Tage",
+      _d(2026, 9, 14) in buendel and _d(2026, 9, 15) not in buendel, sorted(buendel)[:3])
+check("Fingerabdruck stabil gegen Reihenfolge",
+      ai.day_fingerprint(buendel[_d(2026, 9, 20)]) == ai.day_fingerprint(list(reversed(buendel[_d(2026, 9, 20)]))))
+
+tag20 = ai.analyze_day(_d(2026, 9, 20), buendel[_d(2026, 9, 20)], sp, fir, set(), set())
+check("Tagesanalyse: ein chinesischer Kandidat",
+      [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tag20.kandidaten] == [("China", "JSLC")],
+      [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tag20.kandidaten])
+check("  ... Kandidat traegt beide Kennungen",
+      {"A4631/26", "A4632/26"} <= set(k for k in tag20.kandidaten[0]["notam_ids"]), tag20.kandidaten[0]["notam_ids"])
+check("  ... US-Starts gezaehlt, nicht gefuehrt", tag20.usa >= 1, tag20.usa)
+check("  ... weder W1234/26 noch W1235/26 auf der Pruefliste",
+      not {"W1234/26", "W1235/26"} & {p["notam_id"] for p in tag20.pruefliste},
+      [p["notam_id"] for p in tag20.pruefliste])
+check("  ... unbekannte FIR ohne Beleg bleibt auf der Pruefliste",
+      [p["notam_id"] for p in tag20.pruefliste] == ["W1236/26"], [p["notam_id"] for p in tag20.pruefliste])
+check("  ... Kandidatenschluessel = archive_key",
+      tag20.kandidaten[0]["key"] == app.archive_key(tag20.kandidaten[0]["row"]))
+spaeter = ai.analyze_day(_d(2026, 9, 5), buendel[_d(2026, 9, 5)], sp, fir, set(), set())
+check("Folgetag: lange Meldung erzeugt keinen Start mit fremdem Datum",
+      all(k["row"]["Startdatum"] == "05.09.2026" for k in spaeter.kandidaten),
+      [k["row"]["Startdatum"] for k in spaeter.kandidaten])
+
+kommentiert = {}
+ai.merge_korpus(kommentiert, ai.extract_notams(
+    AI_CN[1] + "\nprobably Starship from Boca Chica\n\n" + AI_CN[2] + "\nSTARSHIP FLIGHT 12", "t")[0])
+tk = ai.analyze_day(_d(2026, 9, 20), list(kommentiert.values()), sp, fir, set(), set())
+check("Pflichtfall: Starship-Kommentar aendert die Zuordnung nicht",
+      [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tk.kandidaten] == [("China", "JSLC")],
+      [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tk.kandidaten])
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

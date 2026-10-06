@@ -364,3 +364,170 @@ def ingest(
         bericht.notams_neu += neu
         bericht.dubletten += dup
     return bericht
+
+
+# --------------------------------------------------------------------------- #
+# Tagesbuendel und Tagesanalyse
+# --------------------------------------------------------------------------- #
+def _utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _fenster(n: KorpusNotam) -> Tuple[datetime, Optional[datetime]]:
+    von = _utc(app.parse_notam_datetime(n.b))
+    c_roh = (app.extract_items(n.text).get("C") or "").split()
+    bis = _utc(app.parse_notam_datetime(c_roh[0])) if c_roh else None
+    return von, bis
+
+
+def bundle_days(korpus: Dict[str, KorpusNotam]) -> Dict[date, List[KorpusNotam]]:
+    """
+    Buendelt den Korpus nach Aktivierungstagen.
+
+    Ein NOTAM gehoert in jedes Buendel eines Tages seines B-C-Fensters, damit
+    eine mehrtaegige Vorankuendigung am Starttag neben den kurzen Meldungen
+    liegt - so wie in der taeglichen FNS-Datei. Hoechstens MAX_BUNDLE_DAYS,
+    dazu der Nachlauf bis BUNDLE_TAIL des Folgetags.
+    """
+    buendel: Dict[date, List[KorpusNotam]] = defaultdict(list)
+    for n in korpus.values():
+        von, bis = _fenster(n)
+        if von is None:
+            continue
+        start = von.date()
+        ende = bis.date() if bis is not None and bis >= von else start
+        ende = min(ende, start + timedelta(days=MAX_BUNDLE_DAYS - 1))
+        # Nachlauf: ein Start ueber Mitternacht (UTC) soll im Buendel seines
+        # Starttags vollstaendig liegen. Was vor BUNDLE_TAIL beginnt, gehoert
+        # deshalb auch in das Buendel des Vortags.
+        if von.time() < BUNDLE_TAIL:
+            start -= timedelta(days=1)
+        tag = start
+        while tag <= ende:
+            buendel[tag].append(n)
+            tag += timedelta(days=1)
+    for liste in buendel.values():
+        liste.sort(key=lambda n: n.schluessel)
+    return dict(buendel)
+
+
+def day_fingerprint(notams: Sequence[KorpusNotam]) -> str:
+    """Aendert sich nur, wenn ein NOTAM dazukommt oder wegfaellt."""
+    roh = "\n".join(sorted(n.schluessel for n in notams))
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class DayResult:
+    kandidaten: List[Dict[str, Any]] = field(default_factory=list)
+    pruefliste: List[Dict[str, Any]] = field(default_factory=list)
+    usa: int = 0
+    ausgeblendet: int = 0
+
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    return _utc(dt).isoformat() if dt else None
+
+
+def analyze_day(
+    tag: date,
+    notams: Sequence[KorpusNotam],
+    spaceports: pd.DataFrame,
+    firs: pd.DataFrame,
+    bestaetigt: Set[str],
+    ausgeblendet: Set[str],
+) -> DayResult:
+    """
+    Wertet ein Tagesbuendel mit der Pipeline des Tagesbetriebs aus.
+
+    `bestaetigt` und `ausgeblendet` sind Event-Schluessel aus der Pruefliste des
+    Imports - getrennt von den Entscheidungen der Tageslage.
+    """
+    ergebnis = DayResult()
+    if not notams:
+        return ergebnis
+    df = pd.DataFrame(
+        {"NOTAM Text": [n.text for n in notams], app.SOURCE_COLUMN: SOURCE_ARCHIVE}
+    )
+    events, stats = app.analyze_notams(
+        df, spaceports, firs, min_confidence="MEDIUM", confirmed_keys=set(bestaetigt)
+    )
+    groups = stats.get("groups", [])
+    weg = {
+        e.row_index for e in events if e.auto_hidden_reason or e.key in ausgeblendet
+    }
+
+    def eigener_tag(dt: Optional[datetime]) -> bool:
+        # Gezaehlt wird nur im Buendel des eigenen Tages - mehrtaegige Meldungen
+        # und der Nachlauf legen dasselbe NOTAM in mehrere Buendel.
+        return dt is not None and _utc(dt).date() == tag
+
+    ergebnis.ausgeblendet = sum(
+        1 for e in events if e.row_index in weg and eigener_tag(e.valid_from)
+    )
+    tag_text = tag.strftime("%d.%m.%Y")
+    belegt: Set[int] = set()
+    ohne_platz: Set[int] = set()
+
+    for g in groups:
+        ok = [
+            e for e in events
+            if e.row_index in g.row_indices and e.status == "OK" and e.row_index not in weg
+        ]
+        if not ok:
+            continue
+        if g.nation == EXCLUDED_NATION:
+            ergebnis.usa += 1 if eigener_tag(g.window_from) else 0
+            belegt |= set(g.row_indices) | set(g.advance_row_indices)
+            continue
+        if not g.spaceport_code:
+            ohne_platz |= {e.row_index for e in ok}
+            continue
+        if g.nation not in IMPORT_NATIONS:
+            continue
+        row = app.archive_row(g, events)
+        belegt |= set(g.row_indices) | set(g.advance_row_indices)
+        if row["Startdatum"] != tag_text:
+            continue  # gehoert in das Buendel seines eigenen Starttags
+        mitglieder = sorted(set(g.row_indices) | set(g.advance_row_indices))
+        ergebnis.kandidaten.append(
+            {
+                "key": app.archive_key(row),
+                "row": row,
+                "tag": tag.isoformat(),
+                "nation": g.nation,
+                "seestart": bool(g.site_from_geometry),
+                "fenster": [_iso(g.window_from), _iso(g.window_to or g.window_from)],
+                "notam_ids": [notams[i].notam_id for i in mitglieder],
+                "quellen": sorted({q for i in mitglieder for q in notams[i].quellen}),
+                "inklination": g.inclination_deg,
+                "azimut": g.azimuth_deg,
+            }
+        )
+
+    for e in events:
+        if e.row_index in weg or e.row_index in belegt:
+            continue
+        if e.status == "OK" and e.row_index not in ohne_platz:
+            continue
+        if e.nation == EXCLUDED_NATION or (not e.nation and e.fir_country == EXCLUDED_NATION):
+            ergebnis.usa += 1 if eigener_tag(e.valid_from) else 0
+            continue
+        n = notams[e.row_index]
+        grund = e.review_reason
+        if e.row_index in ohne_platz:
+            grund = GRUND_OHNE_PLATZ
+        ergebnis.pruefliste.append(
+            {
+                "event_key": e.key,
+                "schluessel": n.schluessel,
+                "notam_id": n.notam_id,
+                "tag": tag.isoformat(),
+                "grund": grund,
+                "text": n.text,
+                "quellen": list(n.quellen),
+            }
+        )
+    return ergebnis
