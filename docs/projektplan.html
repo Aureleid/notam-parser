@@ -11,17 +11,17 @@
 /* Layout: links der Funktionsbaum (Mindmap als Worktree), rechts die grossen Schritte als Chat. */
 :root{
   --bg:#eef0f3; --panel:#f8f9fb; --ink:#171b22; --mute:#5d6572; --line:#cfd5de;
-  --s1:#2f6fd6; --s2:#b8680f; --s3:#1e8a5a; --s4:#7a4fc7; --s5:#c43d6b; --s6:#0e8a96; --s7:#8a7a10; --s8:#4b5563; --s9:#b5451b; --s10:#a1288f;
+  --s1:#2f6fd6; --s2:#b8680f; --s3:#1e8a5a; --s4:#7a4fc7; --s5:#c43d6b; --s6:#0e8a96; --s7:#8a7a10; --s8:#4b5563; --s9:#b5451b; --s10:#a1288f; --s11:#2a7d3f;
   --open:#c2410c; --hl:#fff3c4;
   --f-sans:"IBM Plex Sans",system-ui,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,monospace;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#0f1218; --panel:#171b23; --ink:#e6e9ef; --mute:#98a1af; --line:#2c3340;
-  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c; --s10:#e57bd6;
+  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c; --s10:#e57bd6; --s11:#6fd08a;
   --open:#fb923c; --hl:#3a3410; color-scheme:dark}}
 :root[data-theme="dark"]{
   --bg:#0f1218; --panel:#171b23; --ink:#e6e9ef; --mute:#98a1af; --line:#2c3340;
-  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c; --s10:#e57bd6;
+  --s1:#6ea2ff; --s2:#e3a04f; --s3:#4fc994; --s4:#b18cff; --s5:#ff7fa6; --s6:#4fcfd9; --s7:#d6c24a; --s8:#9aa5b5; --s9:#ff8a5c; --s10:#e57bd6; --s11:#6fd08a;
   --open:#fb923c; --hl:#3a3410; color-scheme:dark}
 *{box-sizing:border-box}
 body{background:var(--bg);color:var(--ink);font:14px/1.5 var(--f-sans);padding-inline:16px;padding-block:20px}
@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>7.654</b> Zeilen app.py</span><span><b>1.210</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>7.755</b> Zeilen app.py</span><span><b>1.248</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -122,6 +122,9 @@ var STEPS=[
 {id:10,name:"Archiv-Import",h:"Historische NOTAMs aus Forenseiten ins Startarchiv",
  p:"Gespeicherte NSF-Forenseiten oder kopierter Text werden stapelweise eingelesen (Zitate und Skripte verworfen) und in einem lokalen Korpus entdoppelt. Je Tag entsteht ein Bündel bis 06:00 UTC des Folgetags, ausgewertet mit derselben Erkennung wie im Tagesbetrieb. GCAT (J. McDowell) schlägt nur Rakete und Payload vor, nie Inklination oder Nation. Ins Archiv kommt nichts ohne Bestätigung, einzeln oder als Sammelbestätigung eindeutiger Treffer. US-Starts werden nach der Erkennung verworfen. Der Reiter erscheint nur lokal. Zeilen, die der Tagesbetrieb schon geschrieben hat, werden nur um Trägersystem und Payload ergänzt. Ein vorhandenes, aber unlesbares Archiv wird nie überschrieben, geschrieben wird atomar. Entscheidung: ADR-0001.",
  r:"Ergebnis: Browser-Test am 06.10.2026: 3 NOTAMs, 3 Tage, 2 Kandidaten, 20.09.2026 eindeutig mit GCAT 2026-220 gepaart. Die Tageslage bleibt vor und nach einem Import-Durchlauf gleich, 1.210 Tests grün."},
+{id:11,name:"Schlussprüfung",h:"Archiv-Import: derselbe Start, geschützte Werte, abgesichertes Rückgängig",
+ p:"NOTAM-Kennungen sind über Nationen und Monate nicht eindeutig (A0500/24 kann im Februar ein chinesischer und im November ein russischer Start sein). Derselbe Start heißt jetzt überall: gemeinsame Kennung, Startdatum höchstens einen Tag auseinander und gleiche Nation. Das gilt für Ersatz, Ergänzung, Bruchstücke, nicht mehr erkannte Starts und Keep. Ein aktualisierter Kandidat übernimmt Trägersystem und Payload seines Vorgängers und nennt vorher, welche Zeile er ersetzt. Der Tageslauf behält ein vorhandenes Trägersystem wie die Payload. Rückgängig im Startarchiv schreibt atomar und nur, wenn das Archiv seit der Änderung unverändert ist.",
+ r:"Ergebnis: keine Archivzeile wird mehr über eine fremde Kennungskollision gelöscht, 1.248 Tests grün."},
 {id:0,name:"Offen",h:"Offene Punkte",
  p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten, .bak-Kopie der Referenzdateien. Aus dem Archiv-Import: Spaltenverschiebung durch ein Zusatzfeld in der ersten Archivzeile (nola-djk), echte NSF-Seite als Testfixture, Archivspalte Quelle, nicht-atomares Schreiben der Seestarts, zwei gleichzeitig offene Tabs, alte Dubletten, Zweitzeile des Tagesbetriebs neben einer Importzeile, kein Rückgängig für ergänzte Zeilen.",
  r:"Quelle: STATUS.md, Abschnitt Offene Punkte."}
@@ -184,15 +187,17 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
  {t:"Sprung zum Volltext",f:"_zur_notam_springen"},
  {t:"Gestaltung",s:8,c:[{t:"Zweizeilige Wortmarke"},{t:"Maskottchen im Kopf",f:"_mascot_img, _render_header"},{t:"Unbunte Bühne, bunte Signale"},{t:"Farbschema in .streamlit/config.toml"}]}]},
 {t:"Referenzdaten und Archiv",s:6,c:[
- {t:"Optionsmenü",f:"_reference_dialog, _spaceport_editor, _fir_editor, _vehicle_editor",c:[{t:"Rückgängig-Stapel",f:"_push_undo, _undo_reference"}]},
+ {t:"Optionsmenü",f:"_reference_dialog, _spaceport_editor, _fir_editor, _vehicle_editor",c:[{t:"Rückgängig-Stapel",f:"_push_undo, _undo_reference",c:[
+   {t:"Archiv nur bei unverändertem Stand zurücknehmen",s:11,f:"_undo_archive, UndoRefused"}]}]},
  {t:"Trägersystem zuweisen",f:"_vehicle_picker, apply_vehicle_assignments"},
  {t:"Payload eintragen",f:"_payload_field, apply_payload_assignments"},
  {t:"Startplatz von Hand wählen",s:9,f:"_launch_site_picker, _set_launch_site, apply_launch_site_assignments",c:[
    {t:"Archivhinweis zum Trägersystem",f:"launch_site_history"},
    {t:"Hainan Commercial Launch Site",n:"HAIN neu in der Referenz"}]},
  {t:"Startarchiv",f:"merge_archive, archive_row, persist_archive",c:[{t:"startarchiv_updated.csv",n:"eine Zeile je Start"},
+   {t:"Trägersystem bleibt wie Payload",s:11,n:"leerer neuer Wert überschreibt nicht",f:"merge_archive"},
    {t:"Unlesbares Archiv wird nie überschrieben",s:10,f:"read_archive_strict, ArchiveUnreadable"},
-   {t:"Atomares Schreiben",s:10,f:"_write_bytes_atomic"}]},
+   {t:"Atomares Schreiben",s:10,n:"Dateirechte bleiben",f:"_write_bytes_atomic"}]},
  {t:"Archiv-Import",s:10,n:"nur lokal",c:[
    {t:"Forenseiten lesen",n:"HTML · TXT · Einfügen",f:"extract_notams, cut_block, texts_from_upload, _PostParser"},
    {t:"Korpus",n:"archiv_korpus.json",f:"merge_korpus, load_korpus, save_korpus, ingest"},
@@ -202,14 +207,16 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"gcat_traegersysteme.csv",n:"GCAT-Schreibweise → Kürzel",f:"load_gcat_vehicle_aliases"}]},
    {t:"Importzustand",n:"archiv_import.json",f:"load_state, save_state, reevaluate, detection_stamp, is_stale"},
    {t:"Bestätigen",f:"candidates, bulk_candidates, confirm_many, reject",c:[
-     {t:"Zeile aus dem Tagesbetrieb nur ergänzen",n:"im_archiv · vorher"}]},
+     {t:"Zeile aus dem Tagesbetrieb nur ergänzen",n:"im_archiv · vorher"},
+     {t:"Derselbe Start",s:11,n:"Kennung · ±1 Tag · Nation",f:"_gleicher_start, _start_index"},
+     {t:"Vorgänger ersetzen mit seinen Werten",s:11,n:"ersetzt_werte",f:"_werte_des_vorgaengers"}]},
    {t:"Prüfliste",f:"review_items, review_launch, review_hide"},
    {t:"Nicht mehr erkannt",f:"orphans, keep_orphan, remove_orphan"},
    {t:"Reiter im Optionsmenü",f:"_archive_import_tab, _archive_import_candidate",c:[
      {t:"Nur lokal sichtbar",f:"archive_import_allowed, import_gate, is_local_request, is_public_deployment"}]}]},
  {t:"Persistenz",f:"persist_reference, save_workspace, load_workspace",c:[{t:"CSV-Referenzen"},{t:"notam_workspace.json",n:"inkl. launch_site_assignments"}]}]},
 {t:"Qualität und Betrieb",s:8,c:[
- {t:"test_app.py",n:"1.210 Tests · 4.693 Zeilen"},
+ {t:"test_app.py",n:"1.248 Tests · 5.008 Zeilen"},
  {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
  {t:"Veröffentlichung",n:"Streamlit Community Cloud"},
  {t:"Dokumentation",n:"README · STATUS · docs/intent · docs/decisions"}]},
@@ -229,7 +236,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
  {t:"Rückgängig für ergänzte Zeilen",o:1}]}
 ]};
 
-var COL={0:"var(--open)",10:"var(--s10)",9:"var(--s9)",1:"var(--s1)",2:"var(--s2)",3:"var(--s3)",4:"var(--s4)",5:"var(--s5)",6:"var(--s6)",7:"var(--s7)",8:"var(--s8)"};
+var COL={0:"var(--open)",10:"var(--s10)",11:"var(--s11)",9:"var(--s9)",1:"var(--s1)",2:"var(--s2)",3:"var(--s3)",4:"var(--s4)",5:"var(--s5)",6:"var(--s6)",7:"var(--s7)",8:"var(--s8)"};
 var sel=null, tree=document.getElementById("tree");
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")}
 
