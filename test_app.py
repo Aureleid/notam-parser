@@ -4308,6 +4308,31 @@ check("Reiter: Vorgaenger-Importzeile mit Hinweis auf 'Launch Archive' genannt",
       _stub.aufrufe("text"))
 
 
+# Referenz: 13 Traegersysteme (freigegeben 06.10.2026, nola-3dq.5)
+_veh_neu = app.load_vehicles(str(app.VEHICLE_CSV), app.VEHICLE_CSV.stat().st_mtime)
+_neue_codes = ["LJ-1", "LJ-2", "CZ-8A", "CZ-6C", "CZ-10B", "CZ-12A", "CZ-12B",
+               "ZQ-2E", "ZQ-3", "TL-2", "TL-3", "GSX-2", "Vikram-1"]
+_alle_codes = [str(c) for c in _veh_neu["Abkürzung"]]
+check("Referenz: alle 13 neuen Traegersysteme vorhanden",
+      all(c in _alle_codes for c in _neue_codes), [c for c in _neue_codes if c not in _alle_codes])
+check("Referenz: kein Kuerzel doppelt", len(_alle_codes) == len(set(_alle_codes)),
+      sorted(c for c in set(_alle_codes) if _alle_codes.count(c) > 1))
+for _gcat, _soll in (("Lijian-1", "LJ-1"), ("Chang Zheng 8A", "CZ-8A"),
+                     ("Zhuque-2E", "ZQ-2E"), ("Vikram-1", "Vikram-1")):
+    _ist = ai.vehicle_code_for(_gcat, _veh_neu)
+    check("Referenz: vehicle_code_for({!r}) -> {}".format(_gcat, _soll), _ist == _soll, _ist)
+_opt_cn = app.vehicle_options(_veh_neu, "China")
+check("Referenz: Dropdown China fuehrt CZ-8A und LJ-1 vor der Trennzeile",
+      app.VEHICLE_SEPARATOR in _opt_cn and "CZ-8A" in _opt_cn and "LJ-1" in _opt_cn
+      and _opt_cn.index("CZ-8A") < _opt_cn.index(app.VEHICLE_SEPARATOR)
+      and _opt_cn.index("LJ-1") < _opt_cn.index(app.VEHICLE_SEPARATOR), _opt_cn[:5])
+_opt_in = app.vehicle_options(_veh_neu, "Indien")
+check("Referenz: Dropdown Indien fuehrt Vikram-1 vor der Trennzeile",
+      "Vikram-1" in _opt_in and _opt_in.index("Vikram-1") < _opt_in.index(app.VEHICLE_SEPARATOR))
+check("Referenz: Beschriftung Lijian-1 (LJ-1)", app.vehicle_label("LJ-1", _veh_neu) == "Lijian-1 (LJ-1)",
+      app.vehicle_label("LJ-1", _veh_neu))
+
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
