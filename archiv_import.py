@@ -421,6 +421,14 @@ def day_fingerprint(notams: Sequence[KorpusNotam]) -> str:
 
 @dataclass
 class DayResult:
+    """
+    Ergebnis eines Tagesbuendels.
+
+    Einheiten der Zaehler: `usa` zaehlt US-Starts (einen je Gruppe) plus lose
+    US-Meldungen ohne Gruppe (eine je NOTAM). `ausgeblendet` zaehlt NOTAMs.
+    Beide nur fuer NOTAMs bzw. Gruppen, die an diesem Tag beginnen.
+    """
+
     kandidaten: List[Dict[str, Any]] = field(default_factory=list)
     pruefliste: List[Dict[str, Any]] = field(default_factory=list)
     usa: int = 0
@@ -487,11 +495,12 @@ def analyze_day(
             continue
         if g.nation not in IMPORT_NATIONS:
             continue
-        row = app.archive_row(g, events)
+        # Ausgeblendete Mitglieder gehoeren weder in die Zeile noch in den Schluessel.
+        row = app.archive_row(g, [e for e in events if e.row_index not in weg])
         belegt |= set(g.row_indices) | set(g.advance_row_indices)
         if row["Startdatum"] != tag_text:
             continue  # gehoert in das Buendel seines eigenen Starttags
-        mitglieder = sorted(set(g.row_indices) | set(g.advance_row_indices))
+        mitglieder = sorted((set(g.row_indices) | set(g.advance_row_indices)) - weg)
         ergebnis.kandidaten.append(
             {
                 "key": app.archive_key(row),
@@ -515,6 +524,8 @@ def analyze_day(
         if e.nation == EXCLUDED_NATION or (not e.nation and e.fir_country == EXCLUDED_NATION):
             ergebnis.usa += 1 if eigener_tag(e.valid_from) else 0
             continue
+        if not eigener_tag(e.valid_from):
+            continue  # Pruefposten nur im Buendel seines eigenen Tages
         n = notams[e.row_index]
         grund = e.review_reason
         if e.row_index in ohne_platz:
@@ -531,3 +542,23 @@ def analyze_day(
             }
         )
     return ergebnis
+
+
+def drop_subsumed(kandidaten: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Entfernt Kandidaten, deren NOTAM-Kennungen eine echte Teilmenge eines
+    anderen Kandidaten sind.
+
+    Solche Bruchstuecke entstehen ueber Tagesgrenzen hinweg: Der Nachlauf legt
+    einen Start ueber Mitternacht vollstaendig in das Buendel des Vortags, im
+    eigenen Buendel des Folgetags bildet der Rest eine zweite, kleinere Gruppe.
+    Ebenso koennen mehrtaegige Meldungen an einem Tag ohne ihre Partner liegen.
+    Gleiche Mengen bleiben stehen - exakte Doppel entfernt spaeter der Schluessel.
+    Die Reihenfolge bleibt erhalten.
+    """
+    mengen = [frozenset(k["notam_ids"]) for k in kandidaten]
+    return [
+        k
+        for k, m in zip(kandidaten, mengen)
+        if not any(m < andere for andere in mengen)
+    ]

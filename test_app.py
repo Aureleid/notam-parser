@@ -3250,6 +3250,12 @@ from datetime import date as _d
 check("Tagesbuendel: 20.09. enthaelt die fuenf kurzen", len(buendel[_d(2026, 9, 20)]) == 5, len(buendel[_d(2026, 9, 20)]))
 check("  ... lange Meldung hoechstens 14 Tage",
       _d(2026, 9, 14) in buendel and _d(2026, 9, 15) not in buendel, sorted(buendel)[:3])
+_ids19 = {n.notam_id for n in buendel[_d(2026, 9, 19)]}
+check("  ... Nachlauf: 19.09. enthaelt die Meldungen vom 20.09. vor 06:00",
+      {"A4631/26", "A4632/26", "W1234/26", "W1235/26", "W1236/26"} <= _ids19, sorted(_ids19))
+check("  ... Nachlauf: 31.08. enthaelt die lange Meldung",
+      "A4699/26" in {n.notam_id for n in buendel[_d(2026, 8, 31)]},
+      [n.notam_id for n in buendel[_d(2026, 8, 31)]])
 check("Fingerabdruck stabil gegen Reihenfolge",
       ai.day_fingerprint(buendel[_d(2026, 9, 20)]) == ai.day_fingerprint(list(reversed(buendel[_d(2026, 9, 20)]))))
 
@@ -3259,7 +3265,7 @@ check("Tagesanalyse: ein chinesischer Kandidat",
       [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tag20.kandidaten])
 check("  ... Kandidat traegt beide Kennungen",
       {"A4631/26", "A4632/26"} <= set(k for k in tag20.kandidaten[0]["notam_ids"]), tag20.kandidaten[0]["notam_ids"])
-check("  ... US-Starts gezaehlt, nicht gefuehrt", tag20.usa >= 1, tag20.usa)
+check("  ... US-Starts gezaehlt, nicht gefuehrt", tag20.usa == 2, tag20.usa)
 check("  ... weder W1234/26 noch W1235/26 auf der Pruefliste",
       not {"W1234/26", "W1235/26"} & {p["notam_id"] for p in tag20.pruefliste},
       [p["notam_id"] for p in tag20.pruefliste])
@@ -3267,10 +3273,48 @@ check("  ... unbekannte FIR ohne Beleg bleibt auf der Pruefliste",
       [p["notam_id"] for p in tag20.pruefliste] == ["W1236/26"], [p["notam_id"] for p in tag20.pruefliste])
 check("  ... Kandidatenschluessel = archive_key",
       tag20.kandidaten[0]["key"] == app.archive_key(tag20.kandidaten[0]["row"]))
-spaeter = ai.analyze_day(_d(2026, 9, 5), buendel[_d(2026, 9, 5)], sp, fir, set(), set())
-check("Folgetag: lange Meldung erzeugt keinen Start mit fremdem Datum",
-      all(k["row"]["Startdatum"] == "05.09.2026" for k in spaeter.kandidaten),
-      [k["row"]["Startdatum"] for k in spaeter.kandidaten])
+tag19 = ai.analyze_day(_d(2026, 9, 19), buendel[_d(2026, 9, 19)], sp, fir, set(), set())
+check("Vortag: Nachlauf mit A4631/26 erzeugt keinen Kandidaten",
+      "A4631/26" in _ids19 and tag19.kandidaten == [] and len(tag20.kandidaten) == 1,
+      ([k["notam_ids"] for k in tag19.kandidaten], len(tag20.kandidaten)))
+check("  ... im Nachlauf weder US-Starts noch Ausgeblendete gezaehlt",
+      tag19.usa == 0 and tag19.ausgeblendet == 0, (tag19.usa, tag19.ausgeblendet))
+check("  ... Pruefposten nur im Buendel seines Starttags",
+      "W1236/26" in {p["notam_id"] for p in tag20.pruefliste}
+      and "W1236/26" not in {p["notam_id"] for p in tag19.pruefliste},
+      [p["notam_id"] for p in tag19.pruefliste])
+
+# Ausgeblendetes Mitglied: weder in den Kennungen noch in der Archivzeile.
+_k4632 = app.event_key(AI_CN[2])
+tag20_ohne = ai.analyze_day(_d(2026, 9, 20), buendel[_d(2026, 9, 20)], sp, fir, set(), {_k4632})
+check("Ausgeblendetes Mitglied faellt aus Kandidat und Zeile",
+      len(tag20_ohne.kandidaten) == 1
+      and "A4632/26" not in tag20_ohne.kandidaten[0]["notam_ids"]
+      and "A4632/26" not in tag20_ohne.kandidaten[0]["row"]["NOTAM"]
+      and "A4631/26" in tag20_ohne.kandidaten[0]["notam_ids"],
+      [(k["notam_ids"], k["row"]["NOTAM"]) for k in tag20_ohne.kandidaten])
+
+# Start ueber Mitternacht: der Nachlauf liefert den vollstaendigen Start im
+# Vortag, das eigene Buendel des 21.09. ein Bruchstueck. drop_subsumed raeumt auf.
+MN1 = AI_CN[1].replace("B)2609200354 C)2609200415", "B)2609202345 C)2609202359")
+MN2 = AI_CN[2].replace("B)2609200356 C)2609200435", "B)2609210005 C)2609210040")
+kmn = {}
+ai.merge_korpus(kmn, ai.extract_notams(MN1 + "\n\n" + MN2, "t")[0])
+bmn = ai.bundle_days(kmn)
+mn_alle = [k for t in (_d(2026, 9, 20), _d(2026, 9, 21))
+           for k in ai.analyze_day(t, bmn[t], sp, fir, set(), set()).kandidaten]
+check("Mitternacht: vor dem Aufraeumen zwei Kandidaten", len(mn_alle) == 2,
+      [k["notam_ids"] for k in mn_alle])
+mn_rest = ai.drop_subsumed(mn_alle)
+check("  ... danach nur der vollstaendige Start",
+      [set(k["notam_ids"]) for k in mn_rest] == [{"A4631/26", "A4632/26"}],
+      [k["notam_ids"] for k in mn_rest])
+_ds = ai.drop_subsumed([{"notam_ids": ["a", "b"]}, {"notam_ids": ["a"]}, {"notam_ids": ["c"]},
+                        {"notam_ids": ["c"]}])
+check("drop_subsumed: echte Teilmenge faellt, gleiche Mengen bleiben",
+      [k["notam_ids"] for k in _ds] == [["a", "b"], ["c"], ["c"]], _ds)
+check("  ... LANG bleibt auf 14 Tage begrenzt",
+      max(t for t, l in buendel.items() if any(n.notam_id == "A4699/26" for n in l)) == _d(2026, 9, 14))
 
 kommentiert = {}
 ai.merge_korpus(kommentiert, ai.extract_notams(
