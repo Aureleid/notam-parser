@@ -1843,9 +1843,17 @@ try:
           list(zurueck.columns) == list(app.ARCHIVE_COLUMNS))
     check("Payload ueberlebt den Dateiweg", zurueck["Payload"].iloc[0] == "Yaogan-XX")
     (tmp_a / "halb.csv").write_text("NOTAM,Payload\nA/26,Yaogan\n", encoding="utf-8")
+    # nola-3dq.11: fehlende Spalten wuerden beim Schreiben geleert - die Datei
+    # gilt als unlesbar (wird nie ueberschrieben), die Anzeige zeigt sie leer
     halb = app.load_archive(tmp_a / "halb.csv")
-    check("unvollstaendige Datei wird ergaenzt statt verworfen",
-          len(halb) == 1 and halb["Weltraumbahnhof"].iloc[0] == "", halb.to_dict("records"))
+    try:
+        app.read_archive_strict(tmp_a / "halb.csv")
+        _halb_e = None
+    except app.ArchiveUnreadable as exc:
+        _halb_e = exc
+    check("unvollstaendige Datei gilt als unlesbar statt still ergaenzt",
+          halb.empty and _halb_e is not None and "Weltraumbahnhof" in str(_halb_e),
+          (halb.to_dict("records"), repr(_halb_e)))
 finally:
     _shutil.rmtree(tmp_a, ignore_errors=True)
 
@@ -4262,7 +4270,9 @@ check("Ergaenzen nicht geschrieben -> ImportStateError mit Dateiname",
 check("  ... Zustand und Archiv unveraendert",
       zv["entscheidungen"] == _vorher_v and archiv_v.read_bytes() == _inhalt_v, zv["entscheidungen"])
 # Zeile inzwischen verschwunden: nichts schreiben, nichts vermerken
-archiv_v.write_text("", encoding="utf-8")
+# (Archiv nur mit Kopfzeile - eine 0-Byte-Datei waere "unlesbar", nicht "Zeile fehlt")
+app.persist_archive(archiv_v, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)))
+_leer_v = archiv_v.read_bytes()
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -4272,7 +4282,7 @@ except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
 check("Ergaenzen: Zeile nicht mehr im Archiv -> ImportStateError, nichts geschrieben",
       _fehler is not None and not _fehler.startswith("wrong type") and zv["entscheidungen"] == _vorher_v
-      and archiv_v.read_text(encoding="utf-8") == "", _fehler)
+      and "no longer in" in _fehler and archiv_v.read_bytes() == _leer_v, _fehler)
 
 # Aktualisiert UND schon im Tagesbetrieb: keine Dublette, kein Datenverlust
 _imp_row = dict(_TAG_ROW, NOTAM="A4631/26", Trägersystem="CZ-2D", Payload="alt")
@@ -4445,6 +4455,214 @@ _st_m = {"tage": {}, "entscheidungen": {}}
 _r, _e = _versuch(lambda: ai.confirm_many(_st_m, [(_kand_k, "CZ-2D", "P", None)], _fehlt_k))
 check("Import: fehlendes Archiv -> confirm_many legt es an",
       _e is None and _r == 1 and len(app.load_archive(_fehlt_k)) == 1, repr(_e))
+
+print("== Startarchiv: Spaltenpruefung und atomares Schreiben (nola-3dq.11, Nachbesserung 1) ==")
+_kopf_ok = ",".join(app.ARCHIVE_COLUMNS)
+
+
+def _strikt(pfad):
+    try:
+        return app.read_archive_strict(pfad), None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+# Fremde Kopfzeile: lesbar, aber kein Archiv -> nie ueberschreiben
+_fremd = _tmp_u / "fremd.csv"
+_fremd_inhalt = b"Foo,Bar,Baz\n1,2,3\n4,5,6\n"
+_fremd.write_bytes(_fremd_inhalt)
+_r, _e = _strikt(_fremd)
+check("Spalten: fremde Kopfzeile -> ArchiveUnreadable mit Datei und fehlenden Spalten",
+      isinstance(_e, app.ArchiveUnreadable) and _fremd.name in str(_e)
+      and "NOTAM" in str(_e) and "Startdatum" in str(_e), repr(_e))
+_orig_f = (app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace)
+_meld_f = []
+try:
+    app.st = _st_u()
+    app.archive_row = lambda g, ev: dict(_zeile_u)
+    app._persist_workspace = lambda *a, **k: None
+    app.ARCHIVE_CSV = _fremd
+    _meld_u.clear()
+    _r, _e = _versuch(lambda: app._update_archive([], _grp_u, _tab_u))
+    check("Spalten: Tagesbetrieb laesst die fremde Datei byte-gleich",
+          _e is None and _fremd.read_bytes() == _fremd_inhalt, repr(_e))
+finally:
+    app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace = _orig_f
+_r, _e = _versuch(lambda: ai.confirm_many({"tage": {}, "entscheidungen": {}},
+                                          [(_kand_k, "CZ-2D", "P", None)], _fremd))
+check("Spalten: confirm_many -> ImportStateError, fremde Datei byte-gleich",
+      isinstance(_e, ai.ImportStateError) and _fremd.read_bytes() == _fremd_inhalt, repr(_e))
+
+# Doppelt kodierte Kopfzeile: die Traegersystem-Spalte wuerde still geleert
+_verhunzt = _tmp_u / "verhunzt.csv"
+_verhunzt.write_bytes((_kopf_ok.replace("Trägersystem", "TrÃ¤gersystem")
+                       + "\nA1/26,01.01.2026,10:00,China,JSLC,CZ-2D,X,SSO,97,190,\n").encode("utf-8"))
+_r, _e = _strikt(_verhunzt)
+check("Spalten: verhunzte Traegersystem-Spalte -> ArchiveUnreadable",
+      isinstance(_e, app.ArchiveUnreadable) and "Trägersystem" in str(_e), repr(_e))
+
+# Unbekannte Zusatzspalte ginge beim Schreiben verloren
+_extra = _tmp_u / "extra.csv"
+_extra.write_bytes((_kopf_ok + ",Notiz\nA1/26,01.01.2026,10:00,China,JSLC,CZ-2D,X,SSO,97,190,,wichtig\n")
+                   .encode("utf-8"))
+_r, _e = _strikt(_extra)
+check("Spalten: unbekannte Zusatzspalte -> ArchiveUnreadable mit Spaltenname",
+      isinstance(_e, app.ArchiveUnreadable) and "Notiz" in str(_e), repr(_e))
+
+# Korrektes Archiv liest weiter
+_gut = _tmp_u / "gut.csv"
+_gut.write_bytes((_kopf_ok + "\nA1/26,01.01.2026,10:00,China,JSLC,CZ-2D,X,SSO,97,190,\n")
+                 .encode("utf-8-sig"))
+_r, _e = _strikt(_gut)
+check("Spalten: korrektes Archiv liest weiter",
+      _e is None and len(_r) == 1 and _r["Trägersystem"].iloc[0] == "CZ-2D", repr(_e))
+_leer_kopf = _tmp_u / "nur_kopf.csv"
+app.persist_archive(_leer_kopf, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)))
+_r, _e = _strikt(_leer_kopf)
+check("Spalten: Archiv nur mit Kopfzeile liest als leer", _e is None and _r is not None and _r.empty,
+      repr(_e))
+if app.ARCHIVE_CSV.exists():
+    _echt = _tmp_u / "echt_kopie.csv"
+    _shutil_u.copyfile(app.ARCHIVE_CSV, _echt)
+    os.chmod(_echt, 0o444)
+    _zeilen_echt = len(pd.read_csv(_echt, encoding="utf-8-sig", dtype=str))
+    _r, _e = _strikt(_echt)
+    check("Spalten: Kopie des echten Archivs liest mit allen Zeilen",
+          _e is None and len(_r) == _zeilen_echt, (repr(_e), _zeilen_echt))
+    os.chmod(_echt, 0o644)
+
+# Leere Datei: unlesbar, aber mit verstaendlicher Meldung
+for _name_l, _inh_l in (("leer.csv", b""), ("leer_ws.csv", b"  \n\n \t\n"), ("leer_bom.csv", b"\xef\xbb\xbf\n")):
+    _p_l = _tmp_u / _name_l
+    _p_l.write_bytes(_inh_l)
+    _r, _e = _strikt(_p_l)
+    check("Leer ({}): ArchiveUnreadable, Meldung sagt 'empty' und wie man neu beginnt".format(_name_l),
+          isinstance(_e, app.ArchiveUnreadable) and _name_l in str(_e) and "empty" in str(_e)
+          and "delet" in str(_e).lower() and "delimiter" not in str(_e), repr(_e))
+    check("  ... {} byte-gleich nach confirm_many".format(_name_l),
+          isinstance(_versuch(lambda: ai.confirm_many({"tage": {}, "entscheidungen": {}},
+                                                      [(_kand_k, "CZ-2D", "P", None)], _p_l))[1],
+                     ai.ImportStateError) and _p_l.read_bytes() == _inh_l)
+
+# Atomares Schreiben
+_df_a = app.read_archive_strict(_gut)
+_alt_a, _neu_a = _tmp_u / "alt_weg.csv", _tmp_u / "neu_weg.csv"
+_alt_a.write_text(_df_a[list(app.ARCHIVE_COLUMNS)].to_csv(index=False), encoding="utf-8-sig")
+app.persist_archive(_neu_a, _df_a)
+check("Atomar: persist_archive schreibt byte-gleich zur bisherigen Fassung",
+      _neu_a.read_bytes() == _alt_a.read_bytes())
+check("Atomar: app._write_bytes_atomic vorhanden", hasattr(app, "_write_bytes_atomic"))
+_vorher_a = _gut.read_bytes()
+_replace_orig = os.replace
+
+
+def _replace_kaputt(*a, **k):
+    raise OSError("disk full (test)")
+
+
+os.replace = _replace_kaputt
+try:
+    _r, _e = _versuch(lambda: app.persist_archive(_gut, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS))))
+finally:
+    os.replace = _replace_orig
+check("Atomar: Schreibfehler stoppt die App nicht, alte Datei byte-gleich, keine Temp-Reste",
+      _e is None and _gut.read_bytes() == _vorher_a
+      and not list(_tmp_u.glob("*.tmp")), (repr(_e), list(_tmp_u.glob("*.tmp"))))
+_spion_a = []
+_wba_orig = getattr(app, "_write_bytes_atomic", None)
+app._write_bytes_atomic = lambda p, d: _spion_a.append(p)
+try:
+    ai.write_json_atomic(_tmp_u / "x.json", {"a": 1})
+finally:
+    if _wba_orig is None:
+        del app._write_bytes_atomic
+    else:
+        app._write_bytes_atomic = _wba_orig
+check("Atomar: archiv_import._write_bytes_atomic nutzt app._write_bytes_atomic",
+      _spion_a == [_tmp_u / "x.json"], _spion_a)
+_gi = (Path(app.__file__).parent / ".gitignore").read_text(encoding="utf-8").splitlines()
+check(".gitignore deckt Temp-Dateien neben dem Startarchiv ab",
+      "startarchiv_updated.csv.*.tmp" in _gi)
+
+
+# Archiv-Editor: unlesbar -> st.error, keine Remove-Knoepfe
+class _StubSt:
+    def __init__(self, knopf=False):
+        self.aufrufe, self.session_state, self._knopf = [], {}, knopf
+
+    def __getattr__(self, name):
+        def _f(*a, **k):
+            self.aufrufe.append((name, " ".join(map(str, a))))
+            if name == "columns":
+                n = a[0] if isinstance(a[0], int) else len(a[0])
+                return [self for _ in range(n)]
+            if name == "button":
+                return self._knopf and a and a[0] == "Confirm"
+            if name == "selectbox":
+                return a[1][k.get("index", 0)]
+            if name == "text_input":
+                return k.get("value", "")
+            if name == "radio":
+                return None
+            if name == "expander":
+                return self
+            return None
+        return _f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_orig_e = (app.st, app.ARCHIVE_CSV)
+try:
+    for _p_e in (_kaputt_u, _fremd):
+        app.st = _StubSt()
+        app.ARCHIVE_CSV = _p_e
+        _r, _e = _versuch(app._archive_editor)
+        _namen_e = [n for n, _ in app.st.aufrufe]
+        check("Archiv-Editor ({}): st.error mit Dateiname, keine Remove-Knoepfe".format(_p_e.name),
+              _e is None and any(n == "error" and _p_e.name in t for n, t in app.st.aufrufe)
+              and "button" not in _namen_e and "columns" not in _namen_e, (repr(_e), app.st.aufrufe))
+finally:
+    app.st, app.ARCHIVE_CSV = _orig_e
+
+# Einzelkandidat: Confirm ruft confirm_many; unlesbares Archiv -> st.error, nichts gespeichert
+_veh_k = app.load_vehicles(str(app.VEHICLE_CSV))
+_kand_e = {"key": "einzel", "row": {"Startdatum": "05.01.2026", "Startzeit": "10:00",
+                                     "Weltraumbahnhof": "JSLC", "Orbit": "SSO", "NOTAM": "A8/26"},
+           "nation": "China", "quellen": ["Forum"], "ersetzt": [], "notam_ids": ["A8/26"]}
+_abgl_e = _types_u.SimpleNamespace(status="no match", warnungen=[], hinweise=[], treffer=[])
+for _p_k, _soll_ok in ((_kaputt_u, False), (_fremd, False), (_tmp_u / "einzel_neu.csv", True)):
+    _gesp, _bytes_vor = [], (_p_k.read_bytes() if _p_k.exists() else None)
+    _ai_stub = _types_u.SimpleNamespace(
+        ImportStateError=ai.ImportStateError, STATUS_EINDEUTIG=ai.STATUS_EINDEUTIG,
+        vehicle_code_for=ai.vehicle_code_for, reject=ai.reject,
+        confirm_many=lambda z, sel, _p=_p_k: ai.confirm_many(z, sel, _p),
+        save_state=lambda z: _gesp.append(1),
+    )
+    _zst_e = {"tage": {}, "entscheidungen": {}}
+    _orig_k = app.st
+    try:
+        app.st = _StubSt(knopf=True)
+        _r, _e = _versuch(lambda: app._archive_import_candidate(_ai_stub, _zst_e, _kand_e, _abgl_e, _veh_k))
+        _auf = app.st.aufrufe
+    finally:
+        app.st = _orig_k
+    if _soll_ok:
+        check("Einzelkandidat: Confirm schreibt ueber confirm_many, speichert, laedt neu",
+              _e is None and _gesp == [1] and any(n == "rerun" for n, _ in _auf)
+              and len(app.load_archive(_p_k)) == 1
+              and _zst_e["entscheidungen"].get("einzel", {}).get("status") == "confirmed",
+              (repr(_e), _auf))
+    else:
+        check("Einzelkandidat ({}): st.error, nichts gespeichert, Datei byte-gleich".format(_p_k.name),
+              _e is None and not _gesp and not any(n == "rerun" for n, _ in _auf)
+              and any(n == "error" and _p_k.name in t for n, t in _auf)
+              and _p_k.read_bytes() == _bytes_vor and not _zst_e["entscheidungen"],
+              (repr(_e), _auf))
 _shutil_u.rmtree(_tmp_u, ignore_errors=True)
 
 print()

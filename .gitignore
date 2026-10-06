@@ -17,6 +17,8 @@ fnsNotams_*.xlsx
 
 # Startarchiv - aus den lokalen NOTAM-Rohdaten abgeleitet, bleibt wie diese lokal
 startarchiv_updated.csv
+# Temp-Datei des atomaren Schreibens, bleibt nur nach einem Absturz liegen
+startarchiv_updated.csv.*.tmp
 
 # Seestart-Protokoll - aus den lokalen NOTAM-Rohdaten abgeleitet, bleibt lokal
 seestarts_updated.csv

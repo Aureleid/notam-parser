@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 import types
 import urllib.parse
 import urllib.request
@@ -277,21 +275,8 @@ def read_json(path: Path) -> Dict[str, Any]:
 
 
 def _write_bytes_atomic(path: Path, daten: bytes) -> None:
-    """Schreibt erst eine temporaere Datei und benennt sie dann um."""
-    # eindeutiger Name im selben Ordner, damit os.replace atomar bleibt
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(daten)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    """Schreibt atomar - die eine Umsetzung steht in app._write_bytes_atomic."""
+    app._write_bytes_atomic(path, daten)
 
 
 def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:

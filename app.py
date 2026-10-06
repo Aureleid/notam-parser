@@ -22,7 +22,9 @@ import html
 import io
 import json
 import math
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from datetime import datetime, timezone
@@ -4911,22 +4913,48 @@ def read_archive_strict(path: Path) -> pd.DataFrame:
     Liest das Startarchiv fuer jeden Schreibvorgang.
 
     Fehlt die Datei, beginnt das Archiv leer. Ist sie vorhanden, aber nicht
-    lesbar (Zerlegungs-, Rechte-, Encodingfehler), bricht es mit
-    ArchiveUnreadable ab: ein leeres Archiv darueberzuschreiben hiesse, den
-    ganzen Bestand zu verlieren.
+    lesbar (Zerlegungs-, Rechte-, Encodingfehler, leer oder mit anderer
+    Kopfzeile), bricht es mit ArchiveUnreadable ab: ein leeres Archiv
+    darueberzuschreiben hiesse, den ganzen Bestand zu verlieren.
     """
     if not path.exists():
         return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
     try:
-        df = _read_csv_any(str(path))
+        roh = path.read_bytes()
+    except OSError as exc:
+        raise ArchiveUnreadable(
+            "{} could not be read ({}). It was left untouched and not updated - "
+            "please check the file.".format(path.name, exc)
+        ) from exc
+    # 0 Byte oder nur Leerraum: sieht aus wie ein abgebrochener Schreibvorgang.
+    # Nicht still neu anlegen - der Benutzer entscheidet.
+    if not roh.replace(b"\xef\xbb\xbf", b"").strip():
+        raise ArchiveUnreadable(
+            "{} is empty. It was left untouched and not updated - if no launches "
+            "are to be kept, delete the file and a new archive is started.".format(path.name)
+        )
+    try:
+        df = _read_csv_any(io.BytesIO(roh))
     except Exception as exc:
         raise ArchiveUnreadable(
             "{} could not be read ({}). It was left untouched and not updated - "
             "please check the file.".format(path.name, exc)
         ) from exc
-    for spalte in ARCHIVE_COLUMNS:
-        if spalte not in df.columns:
-            df[spalte] = ""
+    # Alle Spalten muessen da sein, und keine weiteren: fehlende wuerden beim
+    # naechsten Schreiben geleert, unbekannte fielen weg. Alle Spalten kamen mit
+    # derselben Fassung (b6c1130) - es gibt kein aelteres Archiv mit weniger.
+    fehlend = [s for s in ARCHIVE_COLUMNS if s not in df.columns]
+    fremd = [str(s) for s in df.columns if s not in ARCHIVE_COLUMNS]
+    if fehlend or fremd:
+        teile = []
+        if fehlend:
+            teile.append("missing columns: {}".format(", ".join(fehlend)))
+        if fremd:
+            teile.append("unknown columns: {}".format(", ".join(fremd)))
+        raise ArchiveUnreadable(
+            "{} does not have the launch archive columns ({}). It was left untouched "
+            "and not updated - please check the file.".format(path.name, "; ".join(teile))
+        )
     return df[list(ARCHIVE_COLUMNS)].fillna("").astype(str)
 
 
@@ -4944,13 +4972,34 @@ def load_archive(path: Path) -> pd.DataFrame:
         return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
 
 
-def persist_archive(path: Path, df: pd.DataFrame) -> None:
-    """Schreibt das Archiv in die Projektdatei."""
+def _write_bytes_atomic(path: Path, daten: bytes) -> None:
+    """Schreibt erst eine temporaere Datei und benennt sie dann um."""
+    # eindeutiger Name im selben Ordner, damit os.replace atomar bleibt
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        path.write_text(
-            df[list(ARCHIVE_COLUMNS)].to_csv(index=False), encoding="utf-8-sig"
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(daten)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def persist_archive(path: Path, df: pd.DataFrame) -> None:
+    """
+    Schreibt das Archiv atomar in die Projektdatei - ein Absturz hinterlaesst
+    die alte oder die neue Fassung, nie eine halbe.
+    """
+    try:
+        _write_bytes_atomic(
+            path, df[list(ARCHIVE_COLUMNS)].to_csv(index=False).encode("utf-8-sig")
         )
-    except OSError:  # pragma: no cover - Schreibfehler duerfen die App nicht stoppen
+    except OSError:  # Schreibfehler duerfen die App nicht stoppen; der Import prueft nach
         pass
 
 
