@@ -1080,14 +1080,29 @@ def _kennungen(notam: str) -> Set[str]:
     return {t.strip().upper() for t in str(notam).split(",") if t.strip()}
 
 
+def _nahe_datum(a: str, b: str) -> bool:
+    """
+    Startdaten (TT.MM.JJJJ) hoechstens einen Tag auseinander - ein Start kann
+    ueber Mitternacht laufen. Unlesbares Datum zaehlt als nah: lieber den
+    Benutzer die Zielzeile pruefen lassen als eine Dublette anlegen.
+    """
+    try:
+        da = datetime.strptime(str(a).strip(), "%d.%m.%Y").date()
+        db = datetime.strptime(str(b).strip(), "%d.%m.%Y").date()
+    except ValueError:
+        return True
+    return abs((da - db).days) <= 1
+
+
 def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Dict[str, Any]]:
     """
     Alle Kandidaten, je Schluessel einmal, mit Entscheidung und zwei Vermerken:
 
     - ersetzt: vom Import bestaetigte Vorgaenger mit gemeinsamer Kennung.
     - im_archiv: andere Archivzeilen (etwa aus dem Tagesbetrieb) mit gemeinsamer
-      Kennung. Bestaetigen ergaenzt dann nur deren Traegersystem und Payload,
-      statt denselben Start ein zweites Mal anzulegen.
+      Kennung und Startdatum innerhalb eines Tages. Bestaetigen ergaenzt dann nur
+      deren Traegersystem und Payload, statt denselben Start ein zweites Mal
+      anzulegen. archiv_werte nennt je Zielzeile deren aktuelle Werte.
     """
     entscheidungen = state["entscheidungen"]
     bestaetigte_ids = {
@@ -1096,7 +1111,7 @@ def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Di
         if _ist_importzeile(e)
     }
     archivzeilen = [
-        (key, _kennungen(r["NOTAM"]))
+        (key, _kennungen(r["NOTAM"]), r)
         for key, r in (
             (app.archive_key(dict(r)), r) for _, r in app.load_archive(archiv).iterrows()
         )
@@ -1113,8 +1128,9 @@ def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Di
         eintrag["entscheidung"] = entscheidungen.get(k["key"])
         # alle bestaetigten Vorgaenger mit gemeinsamer Kennung; leer = keiner
         eintrag["ersetzt"] = []
-        # vorhandene fremde Archivzeilen mit gemeinsamer Kennung; leer = keine
+        # vorhandene fremde Archivzeilen desselben Starts; leer = keine
         eintrag["im_archiv"] = []
+        eintrag["archiv_werte"] = []
         if eintrag["entscheidung"] is None:
             eintrag["ersetzt"] = sorted(
                 alt_key
@@ -1122,7 +1138,20 @@ def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Di
                 if alt_key != k["key"] and ids & set(k["notam_ids"])
             )
             eigene = {i.upper() for i in k["notam_ids"]}
-            eintrag["im_archiv"] = sorted({key for key, ids in archivzeilen if ids & eigene})
+            ziele = {
+                key: r
+                for key, ids, r in archivzeilen
+                if ids & eigene and _nahe_datum(r["Startdatum"], k["row"]["Startdatum"])
+            }
+            eintrag["im_archiv"] = sorted(ziele)
+            eintrag["archiv_werte"] = [
+                {
+                    "key": key,
+                    "Tr\u00e4gersystem": str(ziele[key]["Tr\u00e4gersystem"]),
+                    "Payload": str(ziele[key]["Payload"]),
+                }
+                for key in sorted(ziele)
+            ]
         gesehen[k["key"]] = eintrag
     return list(gesehen.values())
 
@@ -1167,7 +1196,11 @@ def confirm_many(
     auch keine geloeschte, die Importzeile des Vorgaengers bleibt stehen.
     Der Zustand aendert sich erst, wenn das zurueckgelesene Archiv die
     Aenderung enthaelt; sonst ImportStateError und nichts ist vermerkt.
-    Rueckgabe: Zahl der bestaetigten Kandidaten.
+    Die vorherigen Werte jeder ergaenzten Zeile stehen in der Entscheidung
+    unter vorher ({Schluessel: {Traegersystem, Payload}}), damit die Aenderung
+    nachvollziehbar und rueckgaengig zu machen bleibt.
+    Rueckgabe: Zahl der bestaetigten Kandidaten - neu angelegte UND ergaenzte,
+    also len(auswahl); nicht die Zahl der geschriebenen Zeilen.
     """
     if not auswahl:
         return 0
@@ -1177,6 +1210,10 @@ def confirm_many(
     # Ergaenzen: nur Traegersystem und Payload der vorhandenen Zeile(n)
     schluessel = [app.archive_key(dict(r)) for _, r in bestand.iterrows()]
     werte: Dict[str, Dict[str, str]] = {}
+    # Werte vor dem Ergaenzen, fuer die Entscheidung (nachvollziehbar, umkehrbar)
+    alt: Dict[str, Dict[str, str]] = {}
+    for key, (_, r) in zip(schluessel, bestand.iterrows()):
+        alt.setdefault(key, {s: str(r[s]) for s in ("Tr\u00e4gersystem", "Payload")})
     for kand, rakete, payload, _ in ergaenzen:
         for ziel in kand["im_archiv"]:
             if ziel not in schluessel:
@@ -1219,6 +1256,7 @@ def confirm_many(
         }
         if kand.get("im_archiv"):
             neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])
+            neu[kand["key"]]["vorher"] = {z: dict(alt[z]) for z in kand["im_archiv"]}
     app.persist_archive(archiv, app.merge_archive(bestand, zeilen, entfernt=set()))
     geschrieben = {app.archive_key(r) for r in zeilen}
     _archiv_pruefen(archiv, geschrieben | set(werte), ersetzt - geschrieben, werte)

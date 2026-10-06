@@ -6413,11 +6413,28 @@ def _archive_import_candidate(
     with st.expander(_md_plain(kopf)):
         # Quellen und Hinweise stammen aus Forum/Upload/GCAT: nur als Text
         st.text("NOTAM: {} · Source: {}".format(row["NOTAM"], ", ".join(k["quellen"])))
+        # Werte der Zielzeile(n) gehen vor dem GCAT-Vorschlag; bei widerspruechlichen
+        # Werten mehrerer Zielzeilen wird nichts vorbelegt
+        archiv_werte = k.get("archiv_werte") or []
+        # je Spalte: der eine vorhandene Wert, "" = keiner, None = widerspruechlich
+        vorhanden: Dict[str, Optional[str]] = {}
+        for spalte in ("Tr\u00e4gersystem", "Payload"):
+            gefuellt = sorted({w[spalte] for w in archiv_werte if w.get(spalte)})
+            vorhanden[spalte] = None if len(gefuellt) > 1 else (gefuellt or [""])[0]
         if im_archiv:
             st.text(
-                "Already in the archive. Confirming adds only vehicle and payload to: "
+                "Already in the archive. Confirming sets only vehicle and payload of: "
                 + "; ".join(im_archiv)
             )
+            for w in archiv_werte:
+                st.text("{} - current vehicle: {} · payload: {}".format(
+                    w["key"], w.get("Tr\u00e4gersystem") or "-", w.get("Payload") or "-"
+                ))
+            for alt in k["ersetzt"]:
+                st.text(
+                    "Older import row {} remains in the archive. Remove it in the "
+                    "Launch Archive tab if it is no longer needed.".format(alt)
+                )
         for w in abgleich.warnungen:
             st.warning(_md_plain(w))
         for h in abgleich.hinweise:
@@ -6438,8 +6455,20 @@ def _archive_import_candidate(
             wahl = st.radio("GCAT", beschriftung, index=vorwahl, key="ai_gcat_" + k["key"])
             if wahl is not None and wahl != keiner:
                 treffer = abgleich.treffer[beschriftung.index(wahl)]
-        vorschlag = ai.vehicle_code_for(treffer.rakete, vehicles) if treffer else ""
+        gcat_code = ai.vehicle_code_for(treffer.rakete, vehicles) if treffer else ""
         optionen = vehicle_options(vehicles, k["nation"])
+        vorschlag = gcat_code
+        payload_vorschlag = treffer.nutzlast if treffer else ""
+        if vorhanden["Tr\u00e4gersystem"] is None:
+            vorschlag = VEHICLE_NONE
+        elif vorhanden["Tr\u00e4gersystem"]:
+            vorschlag = vorhanden["Tr\u00e4gersystem"]
+            if vorschlag not in optionen:  # Kuerzel ausserhalb der Referenz
+                optionen = [optionen[0], vorschlag] + optionen[1:]
+        if vorhanden["Payload"] is None:
+            payload_vorschlag = ""
+        elif vorhanden["Payload"]:
+            payload_vorschlag = vorhanden["Payload"]
         rakete = st.selectbox(
             "Launch vehicle",
             optionen,
@@ -6447,12 +6476,12 @@ def _archive_import_candidate(
             format_func=lambda c: vehicle_label(c, vehicles),
             key="ai_veh_{}_{}".format(k["key"], treffer.tag if treffer else ""),
         )
-        if treffer and not vorschlag and treffer.rakete:
+        if treffer and not gcat_code and treffer.rakete:
             st.text(
                 "GCAT vehicle '{}' has no entry in the vehicle reference.".format(treffer.rakete)
             )
         payload = st.text_input(
-            "Payload", value=treffer.nutzlast if treffer else "",
+            "Payload", value=payload_vorschlag,
             key="ai_pay_{}_{}".format(k["key"], treffer.tag if treffer else ""),
         )
         a, b = st.columns(2)

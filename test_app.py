@@ -4192,6 +4192,90 @@ check("  ... nie roh in Markdown-Elementen", not _roh, _roh[:3])
 _r, _e = _versuch(_tab_lauf, _StStub(), candidates=lambda z: [dict(_kand("k_eins", "2020-05-02"))])
 check("Reiter: Kandidat ohne im_archiv-Feld rendert weiter", _e is None, repr(_e))
 
+# --- Fix-Runde 1 (nola-3dq.12): vorhandene Werte sichtbar, vorrangig, rueckverfolgbar ---
+_TAG_GEPFLEGT = dict(_TAG_ROW, Trägersystem="CZ-4C", Payload="Yaogan 50")
+zw, archiv_w = _dub_zustand("werte", [_TAG_GEPFLEGT])
+_kw = ai.candidates(zw, archiv_w)[0]
+check("candidates: aktuelle Werte der Zielzeile im Kandidaten",
+      _kw.get("archiv_werte") == [{"key": _TAG_KEY, "Trägersystem": "CZ-4C", "Payload": "Yaogan 50"}],
+      _kw.get("archiv_werte"))
+_inhalt_w = app.load_archive(archiv_w).to_dict("records")
+ai.confirm_many(zw, [(_kw, "CZ-4C", "Yaogan 50", None)], archiv_w)
+check("Bestaetigen mit den vorhandenen Werten laesst die Zeile unveraendert",
+      app.load_archive(archiv_w).to_dict("records") == _inhalt_w, app.load_archive(archiv_w).to_dict("records"))
+zw2, archiv_w2 = _dub_zustand("werte2", [_TAG_GEPFLEGT])
+_kw2 = ai.candidates(zw2, archiv_w2)[0]
+ai.confirm_many(zw2, [(_kw2, "CZ-2D", "X", None)], archiv_w2)
+_aw2 = app.load_archive(archiv_w2)
+check("Bestaetigen mit anderen Werten schreibt sie",
+      len(_aw2) == 1 and (_aw2.iloc[0]["Trägersystem"], _aw2.iloc[0]["Payload"]) == ("CZ-2D", "X"),
+      _aw2.to_dict("records"))
+check("  ... Entscheidung haelt die vorherigen Werte (vorher)",
+      zw2["entscheidungen"][_kw2["key"]].get("vorher")
+      == {_TAG_KEY: {"Trägersystem": "CZ-4C", "Payload": "Yaogan 50"}},
+      zw2["entscheidungen"][_kw2["key"]])
+check("confirm_many gibt die Zahl der bestaetigten Kandidaten zurueck (gemischt: 1 ergaenzt + 1 neu = 2)",
+      _zahl == 2, _zahl)
+
+# Ueberschneidung nur bei gemeinsamer Kennung UND Startdatum innerhalb +-1 Tag
+for _datum, _erwartet in (("20.10.2026", False), ("21.09.2026", True), ("19.09.2026", True)):
+    _zt, _archiv_t = _dub_zustand("datum_" + _datum[:5].replace(".", ""),
+                                  [dict(_TAG_ROW, Startdatum=_datum)])
+    _kt = ai.candidates(_zt, _archiv_t)[0]
+    check("Datum {}: im_archiv {}".format(_datum, "gesetzt" if _erwartet else "leer"),
+          bool(_kt["im_archiv"]) == _erwartet, _kt["im_archiv"])
+
+# Reiter: vorhandene Werte als Text und vorbelegt (vor dem GCAT-Vorschlag CZ-4C/Sat B)
+_stub = _StStub()
+_r, _e = _versuch(_tab_lauf, _stub, candidates=lambda z: [dict(
+    _kand("k_eins", "2020-05-02"), im_archiv=[_ziel],
+    archiv_werte=[{"key": _ziel, "Trägersystem": "CZ-2D", "Payload": _BOESE}])])
+_sb = [c for c in _stub.aufrufe("selectbox") if c[1][0] == "Launch vehicle"]
+_ti = [c for c in _stub.aufrufe("text_input") if c[1][0] == "Payload"]
+check("Reiter: Traeger mit vorhandenem Wert vorbelegt",
+      _e is None and len(_sb) == 1 and _sb[0][1][1][_sb[0][2]["index"]] == "CZ-2D",
+      (repr(_e), [(c[1][1][c[2]["index"]]) for c in _sb]))
+check("  ... Payload mit vorhandenem Wert vorbelegt", len(_ti) == 1 and _ti[0][2]["value"] == _BOESE,
+      [c[2] for c in _ti])
+_wtext = [c for c in _stub.aufrufe("text") if _ziel in c[1][0] and "CZ-2D" in c[1][0] and _BOESE in c[1][0].replace(_ziel, "")]
+check("  ... Zielzeile mit Traeger und Payload als st.text", len(_wtext) == 1, _stub.aufrufe("text"))
+_roh = [c for c in _stub.calls if c[0] in _md_elemente and _BOESE in repr(c[1]) + repr(c[2])]
+check("  ... Werte nie in Markdown-Elementen", not _roh, _roh[:3])
+
+# Leere Zielzeile: GCAT-Vorschlag bleibt
+_stub = _StStub()
+_versuch(_tab_lauf, _stub, candidates=lambda z: [dict(
+    _kand("k_eins", "2020-05-02"), im_archiv=[_ziel],
+    archiv_werte=[{"key": _ziel, "Trägersystem": "", "Payload": ""}])])
+_sb = [c for c in _stub.aufrufe("selectbox") if c[1][0] == "Launch vehicle"]
+_ti = [c for c in _stub.aufrufe("text_input") if c[1][0] == "Payload"]
+check("Reiter: leere Zielzeile -> GCAT-Vorschlag vorbelegt",
+      len(_sb) == 1 and _sb[0][1][1][_sb[0][2]["index"]] == "CZ-4C" and _ti[0][2]["value"] == "Sat B",
+      ([c[2] for c in _sb], [c[2] for c in _ti]))
+
+# Mehrere Zielzeilen mit verschiedenen Werten: nichts vorbelegen, alle zeigen
+_stub = _StStub()
+_versuch(_tab_lauf, _stub, candidates=lambda z: [dict(
+    _kand("k_eins", "2020-05-02"), im_archiv=["z1", "z2"],
+    archiv_werte=[{"key": "z1", "Trägersystem": "CZ-2D", "Payload": "P1"},
+                  {"key": "z2", "Trägersystem": "CZ-2C", "Payload": "P2"}])])
+_sb = [c for c in _stub.aufrufe("selectbox") if c[1][0] == "Launch vehicle"]
+_ti = [c for c in _stub.aufrufe("text_input") if c[1][0] == "Payload"]
+_alle = " ".join(c[1][0] for c in _stub.aufrufe("text"))
+check("Reiter: widerspruechliche Zielzeilen -> keine Vorbelegung, alle Werte gezeigt",
+      len(_sb) == 1 and _sb[0][1][1][_sb[0][2]["index"]] == app.VEHICLE_NONE and _ti[0][2]["value"] == ""
+      and all(s in _alle for s in ("z1", "z2", "CZ-2D", "CZ-2C", "P1", "P2")),
+      ([c[2] for c in _sb], [c[2] for c in _ti], _alle))
+
+# Aktualisiert UND schon archiviert: aeltere Importzeile wird genannt
+_stub = _StStub()
+_versuch(_tab_lauf, _stub, candidates=lambda z: [dict(
+    _kand("k_eins", "2020-05-02"), im_archiv=[_ziel], ersetzt=["alt|A1/20"],
+    archiv_werte=[{"key": _ziel, "Trägersystem": "", "Payload": ""}])])
+_vt = [c for c in _stub.aufrufe("text") if "alt|A1/20" in c[1][0] and "Launch Archive" in c[1][0]]
+check("Reiter: Vorgaenger-Importzeile mit Hinweis auf 'Launch Archive' genannt", len(_vt) == 1,
+      _stub.aufrufe("text"))
+
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
