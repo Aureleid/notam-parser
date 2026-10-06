@@ -4732,9 +4732,11 @@ def merge_archive(
     """
     Fuehrt neu erkannte Starts mit dem vorhandenen Archiv zusammen.
 
-    Bekannte Starts werden aktualisiert statt verdoppelt. Die Nutzlast bildet
-    die Ausnahme: sie ist das Einzige, was kein Automat kennt, also bleibt ein
-    vorhandener Eintrag stehen, wenn der neue Durchlauf nichts dazu weiss.
+    Bekannte Starts werden aktualisiert statt verdoppelt. Nutzlast und
+    Traegersystem bilden die Ausnahme: der Tagesbetrieb kennt sie meist nicht,
+    sie stammen von Hand oder aus dem Archiv-Import. Ein vorhandener Eintrag
+    bleibt deshalb stehen, wenn der neue Durchlauf nichts dazu weiss (leerer
+    Wert); ein neuer, nicht leerer Wert ueberschreibt ihn.
     Von Hand geloeschte Zeilen kommen nicht zurueck, solange ihr Schluessel in
     `entfernt` steht.
     """
@@ -4756,8 +4758,9 @@ def merge_archive(
             continue
         if schluessel in index:
             alt = zeilen[index[schluessel]]
-            if not row["Payload"]:
-                row["Payload"] = alt["Payload"]
+            for spalte in ("Payload", "Tr\u00e4gersystem"):
+                if not row[spalte]:
+                    row[spalte] = alt[spalte]
             zeilen[index[schluessel]] = row
         else:
             index[schluessel] = len(zeilen)
@@ -5409,22 +5412,76 @@ FIR_EXPORT_COLUMNS = (
 VEHICLE_EXPORT_COLUMNS = ("Land", "Name", "Alternativname englisch", "Abkürzung")
 
 
-def _push_undo(path: Path, label: str) -> None:
-    """Sichert den Dateistand vor einer Aenderung, damit sie ruecknehmbar bleibt."""
+def _push_undo(path: Path, label: str) -> Optional[Dict[str, Any]]:
+    """
+    Sichert den Dateistand vor einer Aenderung, damit sie ruecknehmbar bleibt.
+    Rueckgabe: der neue Eintrag (None, wenn die Datei nicht lesbar war).
+    """
     try:
         inhalt = path.read_text(encoding="utf-8")
     except OSError:
-        return
+        return None
     stapel = st.session_state.setdefault("ref_undo", [])
-    stapel.append({"pfad": str(path), "inhalt": inhalt, "label": label})
+    eintrag = {"pfad": str(path), "inhalt": inhalt, "label": label}
+    stapel.append(eintrag)
     del stapel[:-UNDO_LIMIT]
+    return eintrag
+
+
+class UndoRefused(Exception):
+    """Rueckgaengig wurde verweigert - die Meldung sagt dem Benutzer, warum."""
+
+
+ARCHIVE_UNDO_REFUSED = (
+    "Launch archive changed since this action - undo refused to protect newer entries."
+)
+ARCHIVE_UNDO_UNREADABLE = (
+    "Launch archive could not be read - undo refused, the file was left untouched."
+)
+
+
+def _file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _undo_archive(letzter: Dict[str, Any], stapel: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Nimmt eine Aenderung am Startarchiv zurueck - nur, wenn es seit dieser
+    Aenderung unveraendert ist. Sonst (Import-Bestaetigungen, Tageslauf)
+    wuerde die Ruecknahme neuere Zeilen still mit zuruecksetzen.
+
+    Geaendert: der Eintrag faellt vom Stapel, denn dieser Stand kehrt nicht
+    zurueck - und bliebe er liegen, versperrte er die Ruecknahme aller
+    aelteren Referenzaenderungen darunter. Unlesbar: der Eintrag bleibt, der
+    Benutzer kann die Datei pruefen und es erneut versuchen.
+    """
+    pfad = Path(letzter["pfad"])
+    try:
+        read_archive_strict(pfad)
+        jetzt = _file_hash(pfad) if pfad.exists() else ""
+    except (ArchiveUnreadable, OSError) as exc:
+        raise UndoRefused(ARCHIVE_UNDO_UNREADABLE) from exc
+    stapel.pop()
+    if jetzt != letzter["archiv_nachher"]:
+        raise UndoRefused(ARCHIVE_UNDO_REFUSED)
+    try:
+        # dieselben utf-8-sig-Bytes, die persist_archive vorher geschrieben hatte
+        _write_bytes_atomic(pfad, letzter["roh"])
+    except OSError:
+        return None
+    return letzter["label"]
 
 
 def _undo_reference() -> Optional[str]:
-    """Nimmt die letzte Referenzaenderung zurueck."""
+    """
+    Nimmt die letzte Referenzaenderung zurueck. Eine Aenderung am Startarchiv
+    laeuft ueber _undo_archive und kann mit UndoRefused abgelehnt werden.
+    """
     stapel = st.session_state.get("ref_undo", [])
     if not stapel:
         return None
+    if "archiv_nachher" in stapel[-1]:
+        return _undo_archive(stapel[-1], stapel)
     letzter = stapel.pop()
     try:
         Path(letzter["pfad"]).write_text(letzter["inhalt"], encoding="utf-8")
@@ -5715,6 +5772,9 @@ def _reference_dialog(
     flash = st.session_state.pop("ref_flash", None)
     if flash:
         st.success(flash)
+    flash_fehler = st.session_state.pop("ref_flash_error", None)
+    if flash_fehler:
+        st.error(flash_fehler)
     titel = [
         "Launch Sites ({})".format(len(spaceports)),
         "ICAO FIR / ACC ({})".format(len(firs)),
@@ -5755,10 +5815,14 @@ def _reference_dialog(
         disabled=not stapel,
         use_container_width=True,
     ):
-        zurueck = _undo_reference()
-        st.session_state["ref_flash"] = (
-            "Undone: {}".format(zurueck) if zurueck else "Nothing to undo."
-        )
+        try:
+            zurueck = _undo_reference()
+        except UndoRefused as exc:
+            st.session_state["ref_flash_error"] = str(exc)
+        else:
+            st.session_state["ref_flash"] = (
+                "Undone: {}".format(zurueck) if zurueck else "Nothing to undo."
+            )
         st.rerun(scope="app")
     b.download_button(
         "Download launch sites",
@@ -6218,7 +6282,13 @@ def _remove_archive_row(schluessel: str) -> None:
     except ArchiveUnreadable as exc:
         st.error("Launch archive: {} Nothing was removed.".format(exc))
         return
-    _push_undo(ARCHIVE_CSV, "Archivzeile entfernt")
+    eintrag = _push_undo(ARCHIVE_CSV, "Archivzeile entfernt")
+    if eintrag is not None:
+        try:
+            eintrag["roh"] = ARCHIVE_CSV.read_bytes()
+        except OSError:
+            st.session_state["ref_undo"].remove(eintrag)
+            eintrag = None
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
     behalten = [
         r for _, r in bestand.iterrows() if archive_key(dict(r)) != schluessel
@@ -6226,6 +6296,12 @@ def _remove_archive_row(schluessel: str) -> None:
     persist_archive(
         ARCHIVE_CSV, pd.DataFrame(behalten, columns=list(ARCHIVE_COLUMNS))
     )
+    if eintrag is not None:
+        # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
+        try:
+            eintrag["archiv_nachher"] = _file_hash(ARCHIVE_CSV)
+        except OSError:
+            eintrag["archiv_nachher"] = ""
     _persist_workspace()
     st.session_state["ref_flash"] = "Archivzeile entfernt"
 

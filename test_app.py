@@ -4804,6 +4804,79 @@ check("  ... aber durch den wieder erkannten eigenen Start",
       "behalten" not in _zo["entscheidungen"][_cn_key] and ai.orphans(_zo) == [],
       _zo["entscheidungen"][_cn_key])
 
+# Wichtig 1: Tagesbetrieb behaelt ein vom Import gesetztes Traegersystem wie die Payload
+_mb = pd.DataFrame([_s_row("03.02.2024", "A0500/24", "China", "CZ-4C", "Yaogan")])
+_m1 = app.merge_archive(_mb, [_s_row("03.02.2024", "A0500/24", "China", "", "")])
+check("merge_archive: vorhandenes Traegersystem bleibt bei leerem neuem Wert",
+      (_m1["Trägersystem"].iloc[0], _m1["Payload"].iloc[0]) == ("CZ-4C", "Yaogan"), _m1.to_dict("records"))
+_m2 = app.merge_archive(_mb, [_s_row("03.02.2024", "A0500/24", "China", "CZ-2D", "")])
+check("  ... ein neuer nicht leerer Wert ueberschreibt", _m2["Trägersystem"].iloc[0] == "CZ-2D",
+      _m2.to_dict("records"))
+_orig_t = (app.st, app.ARCHIVE_CSV, app.archive_row)
+try:
+    app.st = _types.SimpleNamespace(session_state={}, warning=lambda *a, **k: None)
+    app.ARCHIVE_CSV = _s_archiv("tagesbetrieb", [_s_row("03.02.2024", "A0500/24", "China", "CZ-4C", "Yaogan")])
+    app.archive_row = lambda g, ev: _s_row("03.02.2024", "A0500/24", "China", "", "")
+    app._update_archive([], [_types.SimpleNamespace(spaceport_code="JSLC", row_indices=[0])],
+                        pd.DataFrame({"Status": ["OK"], "_row": [0]}))
+    _at = app.load_archive(app.ARCHIVE_CSV)
+    check("  ... _update_archive (Tageslauf) setzt CZ-4C nicht zurueck",
+          (_at["Trägersystem"].iloc[0], _at["Payload"].iloc[0]) == ("CZ-4C", "Yaogan"), _at.to_dict("records"))
+finally:
+    app.st, app.ARCHIVE_CSV, app.archive_row = _orig_t
+
+# Wichtig 3: Rueckgaengig im Startarchiv nur, solange es seit der Aktion unveraendert ist
+
+
+def _undo_lauf():
+    try:
+        return app._undo_reference(), None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+_orig_r = (app.st, app.ARCHIVE_CSV, app._persist_workspace, app._write_bytes_atomic)
+_atomar_r = []
+try:
+    app._persist_workspace = lambda *a, **k: None
+    app._write_bytes_atomic = lambda p, d, _w=_orig_r[3]: (_atomar_r.append(p), _w(p, d))[1]
+    _zwei = [_s_row("03.02.2024", "A0500/24", "China", "CZ-2D", "P"),
+             _s_row("04.02.2024", "A0600/24", "China", "CZ-4C", "Q")]
+    # a) unveraendert seit der Aktion -> wiederhergestellt, atomar
+    app.st = _types.SimpleNamespace(session_state={}, error=lambda *a, **k: None)
+    app.ARCHIVE_CSV = _s_archiv("undo_a", _zwei)
+    _vor_r = app.ARCHIVE_CSV.read_bytes()
+    app._remove_archive_row("03.02.2024|A0500/24")
+    _atomar_r.clear()
+    _r, _e = _undo_lauf()
+    check("Undo Archiv: unveraendert seit dem Entfernen -> Zeile wieder da (byte-gleich)",
+          _e is None and _r and app.ARCHIVE_CSV.read_bytes() == _vor_r, (repr(_e), _r))
+    check("  ... ueber _write_bytes_atomic geschrieben", _atomar_r == [app.ARCHIVE_CSV], _atomar_r)
+    # b) Archiv seither geaendert -> verweigert, Datei byte-gleich
+    app.st = _types.SimpleNamespace(session_state={}, error=lambda *a, **k: None)
+    app.ARCHIVE_CSV = _s_archiv("undo_b", _zwei)
+    app._remove_archive_row("03.02.2024|A0500/24")
+    app.persist_archive(app.ARCHIVE_CSV, app.merge_archive(app.read_archive_strict(app.ARCHIVE_CSV),
+                                                           [_s_row("05.02.2024", "A0700/24", "China")]))
+    _neu_r = app.ARCHIVE_CSV.read_bytes()
+    _r, _e = _undo_lauf()
+    check("Undo Archiv: seither geaendert -> verweigert mit Meldung, Datei byte-gleich",
+          type(_e).__name__ == "UndoRefused" and "changed since this action" in str(_e)
+          and app.ARCHIVE_CSV.read_bytes() == _neu_r, (repr(_e), _r))
+    check("  ... der veraltete Eintrag ist vom Stapel", not app.st.session_state.get("ref_undo"),
+          app.st.session_state.get("ref_undo"))
+    # c) Archiv unlesbar -> verweigert, Datei byte-gleich
+    app.st = _types.SimpleNamespace(session_state={}, error=lambda *a, **k: None)
+    app.ARCHIVE_CSV = _s_archiv("undo_c", _zwei)
+    app._remove_archive_row("03.02.2024|A0500/24")
+    app.ARCHIVE_CSV.write_bytes(b"\x00\x01kaputt")
+    _r, _e = _undo_lauf()
+    check("Undo Archiv: unlesbar -> verweigert, Datei byte-gleich",
+          type(_e).__name__ == "UndoRefused" and app.ARCHIVE_CSV.read_bytes() == b"\x00\x01kaputt",
+          (repr(_e), _r))
+finally:
+    app.st, app.ARCHIVE_CSV, app._persist_workspace, app._write_bytes_atomic = _orig_r
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
