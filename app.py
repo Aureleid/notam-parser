@@ -2024,6 +2024,48 @@ WORKSPACE_FILE = APP_DIR / "notam_workspace.json"
 #: Archiv der erkannten Starts - anders als die drei Referenzen oben wird diese
 #: Datei nicht eingelesen, sondern von der Anwendung selbst fortgeschrieben.
 ARCHIVE_CSV = APP_DIR / "startarchiv_updated.csv"
+
+
+def is_public_deployment(app_dir: Path = APP_DIR) -> bool:
+    """
+    Laeuft die Anwendung als oeffentliche Fassung?
+
+    Streamlit Community Cloud legt die Repositories unter /mount/src ab. Dort
+    darf der Archiv-Import nicht erscheinen, solange es keinen Demo-Modus gibt.
+    """
+    return Path(app_dir).resolve().parts[:3] == ("/", "mount", "src")
+
+
+def is_local_request(host: Optional[str]) -> bool:
+    """
+    Kommt die Anfrage nachweislich vom eigenen Rechner?
+
+    Fail-closed: fehlt der Host-Header oder ist er unklar, gilt sie als nicht
+    lokal. Ein Aufruf ueber die IP im Heimnetz zaehlt bewusst nicht dazu.
+    """
+    if not host:
+        return False
+    host = host.strip().lower()
+    if host.startswith("["):
+        name = host[1:].split("]", 1)[0]
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return name in ("localhost", "127.0.0.1", "::1")
+
+
+def archive_import_allowed() -> bool:
+    """Reiter nur lokal: nicht unter /mount/src UND Aufruf von localhost."""
+    if is_public_deployment():
+        return False
+    try:
+        # ohne Laufzeit (Tests, bare mode) gibt es keinen Host - verborgen,
+        # und st.context wird gar nicht erst angefasst (sonst Warnung)
+        if not st.runtime.exists():
+            return False
+        host = st.context.headers.get("Host")
+    except Exception:  # ohne Laufzeit/Kontext: verborgen
+        return False
+    return is_local_request(host)
 #: Protokoll der Starts von beweglichen Seeplattformen. Wie das Archiv von der
 #: Anwendung geschrieben, nicht eingelesen.
 SEA_LAUNCH_CSV = APP_DIR / "seestarts_updated.csv"
@@ -5579,25 +5621,31 @@ def _reference_dialog(
     flash = st.session_state.pop("ref_flash", None)
     if flash:
         st.success(flash)
-    tab_sp, tab_fir, tab_veh, tab_arc, tab_sea = st.tabs(
-        [
-            "Launch Sites ({})".format(len(spaceports)),
-            "ICAO FIR / ACC ({})".format(len(firs)),
-            "Launch Vehicles ({})".format(len(vehicles)),
-            "Launch Archive ({})".format(len(load_archive(ARCHIVE_CSV))),
-            "Sea Launches ({})".format(len(load_sea_launches(SEA_LAUNCH_CSV))),
-        ]
-    )
-    with tab_sp:
+    titel = [
+        "Launch Sites ({})".format(len(spaceports)),
+        "ICAO FIR / ACC ({})".format(len(firs)),
+        "Launch Vehicles ({})".format(len(vehicles)),
+        "Launch Archive ({})".format(len(load_archive(ARCHIVE_CSV))),
+        "Sea Launches ({})".format(len(load_sea_launches(SEA_LAUNCH_CSV))),
+    ]
+    # Archiv-Import nur lokal (fail-closed), nie in der oeffentlichen Fassung
+    mit_import = archive_import_allowed()
+    if mit_import:
+        titel.append("Archive Import")
+    reiter = st.tabs(titel)
+    with reiter[0]:
         _spaceport_editor(spaceports)
-    with tab_fir:
+    with reiter[1]:
         _fir_editor(firs)
-    with tab_veh:
+    with reiter[2]:
         _vehicle_editor(vehicles)
-    with tab_arc:
+    with reiter[3]:
         _archive_editor()
-    with tab_sea:
+    with reiter[4]:
         _sea_launch_editor()
+    if mit_import:
+        with reiter[5]:
+            _archive_import_tab(spaceports, firs, vehicles)
 
     st.divider()
     stapel = st.session_state.get("ref_undo", [])
@@ -6126,6 +6174,237 @@ def _archive_editor() -> None:
             st.rerun(scope="app")
     if len(zeilen) > 60:
         st.info("Only the first 60 matches are shown - narrow the search.")
+
+
+def _archive_import_tab(
+    spaceports: pd.DataFrame, firs: pd.DataFrame, vehicles: pd.DataFrame
+) -> None:
+    """
+    Archiv-Import historischer NOTAMs (China, Russland, Indien, Iran, Nordkorea).
+
+    Getrennt von der Tageslage: nichts hier beruehrt die eingefuegten NOTAMs
+    oder die Arbeitsdatei der Sitzung. Ins Archiv kommt nur, was bestaetigt wird.
+    Jeder Lade- und Schreibfehler erscheint als Meldung; dann wird nichts
+    gespeichert und nicht neu gezeichnet.
+    """
+    import archiv_import as ai  # erst hier - siehe Modulkopf von archiv_import
+
+    try:
+        korpus = ai.load_korpus()
+        zustand = ai.load_state()
+    except (ai.ImportStateError, OSError) as exc:
+        st.error(str(exc))
+        return
+    st.caption(
+        "Historic launches of China, Russia, India, Iran and North Korea. "
+        "Save NSF thread pages in your browser (or copy a whole page) and import "
+        "them here. Detection is the same as in daily use; nothing is written to "
+        "the archive until you confirm it. US launches are left out."
+    )
+
+    with st.form("archiv_import_form", clear_on_submit=True):
+        dateien = st.file_uploader(
+            "Forum pages", type=["html", "htm", "txt"], accept_multiple_files=True
+        )
+        text = st.text_area("Or paste a whole page", height=120)
+        los = st.form_submit_button("Import", type="primary")
+    if los:
+        bericht = ai.ingest(korpus, [(d.name, d.getvalue()) for d in dateien or []], text or "")
+        balken = st.progress(0.0, text="Analysing days …")
+        bericht.tage_ausgewertet = ai.reevaluate(
+            korpus, zustand, spaceports, firs,
+            fortschritt=lambda n, g: balken.progress(
+                n / g, text="Analysing day {} of {}".format(n, g)
+            ),
+        )
+        balken.empty()
+        try:
+            ai.save_korpus(korpus)
+            ai.save_state(zustand)
+        except (ai.ImportStateError, OSError) as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["archiv_import_bericht"] = bericht
+    bericht = st.session_state.get("archiv_import_bericht")
+    if bericht is not None:
+        summen = ai.totals(zustand)
+        st.info(
+            "{} file(s) · {} new NOTAM(s) · {} duplicate(s) · {} not usable · "
+            "{} day(s) analysed · {} US case(s) left out in total · {} hidden in total".format(
+                bericht.dateien, bericht.notams_neu, bericht.dubletten, bericht.unbrauchbar,
+                bericht.tage_ausgewertet, summen["usa"], summen["ausgeblendet"],
+            )
+        )
+        for fehler in bericht.fehler:
+            st.warning(fehler)
+
+    if ai.is_stale(zustand):
+        st.warning(
+            "NOLA's detection changed since the last analysis ({} days). Re-analyse "
+            "them so the candidates reflect the current rules.".format(len(zustand["tage"]))
+        )
+        if st.button("Re-analyse all days"):
+            balken = st.progress(0.0)
+            ai.reevaluate(
+                korpus, zustand, spaceports, firs, alle=True,
+                fortschritt=lambda n, g: balken.progress(n / g, text="Day {} of {}".format(n, g)),
+            )
+            try:
+                ai.save_state(zustand)
+            except (ai.ImportStateError, OSError) as exc:
+                st.error(str(exc))
+            else:
+                st.rerun(scope="app")
+
+    waisen = ai.orphans(zustand)
+    if waisen:
+        st.subheader("No longer recognised ({})".format(len(waisen)))
+        st.caption(
+            "Confirmed launches whose NOTAMs no longer form a launch with the current "
+            "detection. They are still in the archive until you decide."
+        )
+        for key, e in waisen[:40]:
+            a, b, c = st.columns([3, 1, 1])
+            a.text("{} · {} · {}".format(key, e.get("rakete", ""), e.get("payload", "")))
+            if b.button("Keep", key="ai_keep_" + key):
+                try:
+                    ai.keep_orphan(zustand, key)
+                    ai.save_state(zustand)
+                except (ai.ImportStateError, OSError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="app")
+            if c.button("Remove from archive", key="ai_rm_" + key):
+                try:
+                    ai.remove_orphan(zustand, key)
+                    ai.save_state(zustand)
+                except (ai.ImportStateError, OSError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="app")
+
+    links, rechts = st.columns([3, 1])
+    gcat, gcat_status = ai.load_gcat(refresh=rechts.button("Refresh launch list"))
+    links.caption(gcat_status)
+    sites = ai.load_gcat_sites()
+
+    kandidaten = ai.candidates(zustand)
+    offen = [k for k in kandidaten if k["entscheidung"] is None]
+    st.subheader("Candidates ({} open of {})".format(len(offen), len(kandidaten)))
+    sammel = ai.bulk_candidates(kandidaten, gcat, sites, vehicles)
+    if st.button(
+        "Confirm all unique matches ({})".format(len(sammel)), disabled=not sammel
+    ):
+        try:
+            ai.confirm_many(zustand, sammel)
+            ai.save_state(zustand)
+        except (ai.ImportStateError, OSError) as exc:
+            st.error(str(exc))
+        else:
+            st.rerun(scope="app")
+
+    jahre = sorted({k["tag"][:4] for k in offen}, reverse=True)
+    if jahre:
+        jahr = st.selectbox("Year", jahre, key="archiv_import_jahr")
+        for k in [k for k in offen if k["tag"].startswith(jahr)][:40]:
+            _archive_import_candidate(ai, zustand, k, gcat, sites, vehicles)
+
+    pruef = ai.review_items(zustand)
+    st.subheader("Review list ({})".format(len(pruef)))
+    for p in pruef[:40]:
+        with st.expander("{} · {} · {}".format(p["tag"], p["notam_id"], p["grund"][:80])):
+            st.code(p["text"], language=None)
+            st.caption("Source: " + ", ".join(p["quellen"]))
+            a, b = st.columns(2)
+            if a.button("Space Launch", key="ai_sl_" + p["event_key"]):
+                ai.review_launch(zustand, korpus, p["event_key"], p["tag"], spaceports, firs)
+                try:
+                    ai.save_state(zustand)
+                except (ai.ImportStateError, OSError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="app")
+            if b.button("Hide", key="ai_hide_" + p["event_key"]):
+                ai.review_hide(zustand, p["event_key"])
+                try:
+                    ai.save_state(zustand)
+                except (ai.ImportStateError, OSError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun(scope="app")
+
+
+def _archive_import_candidate(
+    ai: Any,
+    zustand: Dict[str, Any],
+    k: Dict[str, Any],
+    gcat: Any,
+    sites: Dict[str, Any],
+    vehicles: pd.DataFrame,
+) -> None:
+    """Ein Kandidat mit Vorschlag, Auswahl und den beiden Entscheidungen."""
+    abgleich = ai.match_candidate(k, gcat, sites)
+    row = k["row"]
+    kopf = "{} {} · {} · {} · {} · {}".format(
+        row["Startdatum"], row["Startzeit"], nation_label(k["nation"]),
+        row["Weltraumbahnhof"] or "sea", row["Orbit"],
+        # ersetzt ist eine Liste der Vorgaenger-Schluessel, leer = keiner
+        "updated" if k["ersetzt"] else abgleich.status,
+    )
+    with st.expander(kopf):
+        st.caption("NOTAM: {} · Source: {}".format(row["NOTAM"], ", ".join(k["quellen"])))
+        for w in abgleich.warnungen:
+            st.warning(w)
+        for h in abgleich.hinweise:
+            st.caption(h)
+        treffer = None
+        if abgleich.treffer:
+            # Startplatz mit anzeigen: ein Seestart kann neben Landstarts
+            # derselben Nation stehen
+            beschriftung = [
+                "{} · {} · {} · {} · {}".format(
+                    s.tag, s.zeit.strftime("%d.%m.%Y %H:%M"), s.site or "?", s.rakete, s.nutzlast
+                )
+                for s in abgleich.treffer
+            ] + ["none of these"]
+            wahl = st.radio("GCAT", beschriftung, key="ai_gcat_" + k["key"])
+            if wahl != "none of these":
+                treffer = abgleich.treffer[beschriftung.index(wahl)]
+        vorschlag = ai.vehicle_code_for(treffer.rakete, vehicles) if treffer else ""
+        optionen = vehicle_options(vehicles, k["nation"])
+        rakete = st.selectbox(
+            "Launch vehicle",
+            optionen,
+            index=optionen.index(vorschlag) if vorschlag in optionen else 0,
+            format_func=lambda c: vehicle_label(c, vehicles),
+            key="ai_veh_{}_{}".format(k["key"], treffer.tag if treffer else ""),
+        )
+        if treffer and not vorschlag and treffer.rakete:
+            st.caption(
+                "GCAT vehicle '{}' has no entry in the vehicle reference.".format(treffer.rakete)
+            )
+        payload = st.text_input(
+            "Payload", value=treffer.nutzlast if treffer else "",
+            key="ai_pay_{}_{}".format(k["key"], treffer.tag if treffer else ""),
+        )
+        a, b = st.columns(2)
+        if a.button("Confirm", key="ai_ok_" + k["key"], type="primary"):
+            wert = "" if rakete == VEHICLE_SEPARATOR else rakete
+            try:
+                ai.confirm_many(zustand, [(k, wert, payload.strip(), treffer)])
+                ai.save_state(zustand)
+            except (ai.ImportStateError, OSError) as exc:
+                st.error(str(exc))
+            else:
+                st.rerun(scope="app")
+        if b.button("Discard", key="ai_no_" + k["key"]):
+            ai.reject(zustand, k["key"])
+            try:
+                ai.save_state(zustand)
+            except (ai.ImportStateError, OSError) as exc:
+                st.error(str(exc))
+            else:
+                st.rerun(scope="app")
 
 
 #: Schriftstapel. Die Grotesk tritt nur in der Wortmarke und in Ueberschriften

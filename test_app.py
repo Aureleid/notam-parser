@@ -1465,7 +1465,7 @@ check("Hauptnavigation nutzt kein st.tabs mehr",
       "tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(" not in quelle,
       "Hauptnavigation noch auf st.tabs")
 check("  ... im Optionsdialog bleibt st.tabs zulaessig",
-      "tab_sp, tab_fir, tab_veh, tab_arc, tab_sea = st.tabs(" in quelle)
+      "reiter = st.tabs(titel)" in quelle)
 check("Segmentleiste steuert die Bereiche", "st.segmented_control(" in quelle)
 check("sechs Bereiche definiert", quelle.count("if bereich == reiter[") == 6,
       quelle.count("if bereich == reiter["))
@@ -3733,6 +3733,103 @@ check("Space Launch: Bestaetigung gemerkt, Tag trotz gleichem Fingerabdruck neu 
 quelle_ai = (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8")
 check("Archiv-Import fasst die Tageslage nicht an",
       all(w not in quelle_ai for w in ("manual_notams", "WORKSPACE_FILE", "save_workspace", "session_state")))
+
+# --- Aufgabe 7: Reiter "Archive Import", nur lokal sichtbar ---
+check("oeffentliche Fassung erkannt", app.is_public_deployment(_P("/mount/src/notam-parser")))
+check("lokal nicht oeffentlich", not app.is_public_deployment(_P("/Users/x/NOTAM Parser")))
+quelle_app = (_P(app.APP_DIR) / "app.py").read_text(encoding="utf-8")
+import inspect as _inspect
+tab_src = _inspect.getsource(app._archive_import_tab)
+kand_src = _inspect.getsource(app._archive_import_candidate)
+check("Reiter ohne unsafe_allow_html", "unsafe_allow_html" not in tab_src)
+check("Kandidat ohne unsafe_allow_html", "unsafe_allow_html" not in kand_src)
+check("Reiter importiert das Modul erst beim Aufruf",
+      "import archiv_import" in tab_src and "\nimport archiv_import" not in quelle_app)
+check("Reiter nur bei erlaubtem Import",
+      "archive_import_allowed()" in _inspect.getsource(app._reference_dialog))
+for _host, _soll in (("localhost:8501", True), ("127.0.0.1:8501", True), ("[::1]:8501", True),
+                     ("LOCALHOST", True), ("notam-space-analyzer.streamlit.app", False),
+                     ("192.168.1.20:8501", False), ("localhost.evil.com", False), ("", False), (None, False)):
+    check("Host {!r} -> lokal {}".format(_host, _soll), app.is_local_request(_host) == _soll)
+check("ohne Streamlit-Kontext verborgen (fail-closed)", app.archive_import_allowed() is False)
+check("GCAT-Treffer zeigt den Startplatz", "s.site" in kand_src)
+check("Reiter fasst die Tageslage nicht an",
+      all(w not in tab_src + kand_src
+          for w in ("manual_notams", "WORKSPACE_FILE", "notam_workspace", "save_workspace")))
+
+# Jeder schreibende/ladende Aufruf steht in einem try, das ai.ImportStateError faengt.
+import ast as _ast
+import textwrap as _tw
+
+
+def _faengt_importfehler(handler):
+    typen = handler.type.elts if isinstance(handler.type, _ast.Tuple) else [handler.type]
+    return any(isinstance(t, _ast.Attribute) and t.attr == "ImportStateError"
+               and isinstance(t.value, _ast.Name) and t.value.id == "ai" for t in typen)
+
+
+def _ungeschuetzte_aufrufe(src, namen):
+    baum = _ast.parse(_tw.dedent(src))
+    eltern = {}
+    for knoten in _ast.walk(baum):
+        for kind in _ast.iter_child_nodes(knoten):
+            eltern[kind] = knoten
+    fehlend, gefunden = [], []
+    for knoten in _ast.walk(baum):
+        if (isinstance(knoten, _ast.Call) and isinstance(knoten.func, _ast.Attribute)
+                and isinstance(knoten.func.value, _ast.Name) and knoten.func.value.id == "ai"
+                and knoten.func.attr in namen):
+            gefunden.append(knoten.func.attr)
+            kind, p = knoten, eltern.get(knoten)
+            geschuetzt = False
+            while p is not None:
+                if (isinstance(p, _ast.Try) and kind in p.body
+                        and any(_faengt_importfehler(h) for h in p.handlers)):
+                    geschuetzt = True
+                    break
+                kind, p = p, eltern.get(p)
+            if not geschuetzt:
+                fehlend.append("{} (Zeile {})".format(knoten.func.attr, knoten.lineno))
+    return fehlend, gefunden
+
+
+_kritisch = ("confirm_many", "remove_orphan", "keep_orphan", "save_state", "save_korpus",
+             "load_korpus", "load_state")
+_f1, _g1 = _ungeschuetzte_aufrufe(tab_src, _kritisch)
+_f2, _g2 = _ungeschuetzte_aufrufe(kand_src, _kritisch)
+check("Reiter: alle kritischen Aufrufe fangen ImportStateError",
+      not _f1 and {"confirm_many", "remove_orphan", "keep_orphan", "save_state", "save_korpus",
+                   "load_korpus", "load_state"} <= set(_g1), (_f1, sorted(set(_g1))))
+check("Kandidat: alle kritischen Aufrufe fangen ImportStateError",
+      not _f2 and {"confirm_many", "save_state"} <= set(_g2), (_f2, sorted(set(_g2))))
+
+# Verhalten: kaputter Zustand -> Fehlermeldung, nichts geschrieben, keine Ausnahme
+import archiv_import as _ai7
+import types as _types
+_meldungen, _geschrieben = [], []
+_orig = (app.st, _ai7.load_state, _ai7.save_state, _ai7.save_korpus, _ai7.load_korpus)
+
+
+def _kaputt(*a, **k):
+    raise _ai7.ImportStateError("archiv_import.json is unreadable (test).")
+
+
+try:
+    app.st = _types.SimpleNamespace(error=_meldungen.append)
+    _ai7.load_korpus = lambda *a, **k: {}
+    _ai7.load_state = _kaputt
+    _ai7.save_state = lambda *a, **k: _geschrieben.append("state")
+    _ai7.save_korpus = lambda *a, **k: _geschrieben.append("korpus")
+    _ausnahme = None
+    try:
+        app._archive_import_tab(sp, fir, app.load_vehicles(str(app.VEHICLE_CSV)))
+    except Exception as exc:  # noqa: BLE001
+        _ausnahme = exc
+finally:
+    app.st, _ai7.load_state, _ai7.save_state, _ai7.save_korpus, _ai7.load_korpus = _orig
+check("ImportStateError beim Laden: angezeigt, nichts geschrieben",
+      _ausnahme is None and _meldungen == ["archiv_import.json is unreadable (test)."]
+      and not _geschrieben, (_ausnahme, _meldungen, _geschrieben))
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
