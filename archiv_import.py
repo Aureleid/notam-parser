@@ -1046,6 +1046,18 @@ def keep_orphan(state: Dict[str, Any], key: str) -> None:
     state["entscheidungen"][key]["behalten"] = True
 
 
+def _archiv_lesen(archiv: Path) -> pd.DataFrame:
+    """
+    Liest das Startarchiv strikt: eine vorhandene, aber unlesbare Datei bricht
+    mit ImportStateError ab, statt als leeres Archiv zu gelten - sonst
+    ueberschriebe der naechste Schreibvorgang den ganzen Bestand.
+    """
+    try:
+        return app.read_archive_strict(archiv)
+    except app.ArchiveUnreadable as exc:
+        raise ImportStateError(str(exc)) from exc
+
+
 def _archiv_pruefen(
     archiv: Path,
     vorhanden: Set[str],
@@ -1057,7 +1069,7 @@ def _archiv_pruefen(
     Schreibfehler; erst dieser Abgleich zeigt, ob die Aenderung angekommen ist.
     `werte`: je Schluessel Spalten, die jede Zeile dieses Schluessels tragen muss.
     """
-    zeilen = [(app.archive_key(dict(r)), r) for _, r in app.load_archive(archiv).iterrows()]
+    zeilen = [(app.archive_key(dict(r)), r) for _, r in _archiv_lesen(archiv).iterrows()]
     keys = {key for key, _ in zeilen}
     falsch = any(
         r[spalte] != wert
@@ -1073,7 +1085,7 @@ def _archiv_pruefen(
 
 def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CSV) -> None:
     """Die einzige Stelle, an der der Import eine Archivzeile loescht - nur auf Anweisung."""
-    bestand = app.load_archive(archiv)
+    bestand = _archiv_lesen(archiv)
     if not bestand.empty:
         bestand = bestand[
             [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
@@ -1126,7 +1138,7 @@ def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Di
     archivzeilen = [
         (key, _kennungen(r["NOTAM"]), r)
         for key, r in (
-            (app.archive_key(dict(r)), r) for _, r in app.load_archive(archiv).iterrows()
+            (app.archive_key(dict(r)), r) for _, r in _archiv_lesen(archiv).iterrows()
         )
         if key not in bestaetigte_ids  # eigene Zeilen laufen ueber ersetzt
     ]
@@ -1217,7 +1229,7 @@ def confirm_many(
     """
     if not auswahl:
         return 0
-    bestand = app.load_archive(archiv)
+    bestand = _archiv_lesen(archiv)
     ergaenzen = [a for a in auswahl if a[0].get("im_archiv")]
     anlegen = [a for a in auswahl if not a[0].get("im_archiv")]
     # Ergaenzen: nur Traegersystem und Payload der vorhandenen Zeile(n)

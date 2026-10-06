@@ -3103,6 +3103,92 @@ check("  ... und sie besteht nachweislich noch",
       app.archive_key(_d) != app.archive_key(_a),
       (app.archive_key(_d), app.archive_key(_a)))
 
+print("== Startarchiv: unlesbare Datei wird nie ueberschrieben (nola-3dq.11) ==")
+import types as _types_u, tempfile as _tempfile_u, shutil as _shutil_u
+_tmp_u = Path(_tempfile_u.mkdtemp())
+# Deterministisch unlesbar: NUL-Bytes lehnt der CSV-Leser in jedem Encoding ab
+# ("line contains NUL") - so sieht eine beim Absturz halb geschriebene Datei aus.
+_kaputt_u = _tmp_u / "startarchiv_updated.csv"
+_kaputt_inhalt = b"Startdatum,NOTAM\n01.01.2026,A1/26\x00\x00\n"
+_kaputt_u.write_bytes(_kaputt_inhalt)
+_fehlt_u = _tmp_u / "fehlt.csv"
+_e_u = None
+try:
+    app.read_archive_strict(_kaputt_u)
+except Exception as exc:  # noqa: BLE001
+    _e_u = exc
+check("strikt lesen: vorhandene, unlesbare Datei -> ArchiveUnreadable mit Dateiname",
+      hasattr(app, "ArchiveUnreadable") and isinstance(_e_u, app.ArchiveUnreadable)
+      and _kaputt_u.name in str(_e_u), repr(_e_u))
+_r_u, _e2_u = None, None
+try:
+    _r_u = app.read_archive_strict(_fehlt_u)
+except Exception as exc:  # noqa: BLE001
+    _e2_u = exc
+check("strikt lesen: fehlende Datei -> leeres Archiv",
+      _e2_u is None and _r_u is not None and _r_u.empty
+      and list(_r_u.columns) == list(app.ARCHIVE_COLUMNS), repr(_e2_u))
+check("Anzeige: load_archive liefert fuer die unlesbare Datei weiter leer",
+      app.load_archive(_kaputt_u).empty)
+
+# Tagesbetrieb: _update_archive mit Stub-st und Ersatz-Archivpfad
+_orig_u = (app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace)
+_meld_u, _ws_u = [], []
+def _st_u():
+    ns = _types_u.SimpleNamespace(session_state={})
+    for _n in ("warning", "error", "info", "caption", "markdown"):
+        setattr(ns, _n, lambda *a, _n=_n, **k: _meld_u.append((_n, " ".join(map(str, a)))))
+    return ns
+_grp_u = [_types_u.SimpleNamespace(spaceport_code="JSLC", row_indices=[0])]
+_tab_u = pd.DataFrame({"Status": ["OK"], "_row": [0]})
+_zeile_u = {"Startdatum": "02.01.2026", "NOTAM": "A9/26", "Weltraumbahnhof": "JSLC"}
+try:
+    app.st = _st_u()
+    app.archive_row = lambda g, ev: dict(_zeile_u)
+    app._persist_workspace = lambda *a, **k: _ws_u.append(1)
+    app.ARCHIVE_CSV = _kaputt_u
+    _r, _e = None, None
+    try:
+        app._update_archive([], _grp_u, _tab_u)
+    except Exception as exc:  # noqa: BLE001
+        _e = exc
+    check("Tagesbetrieb: unlesbares Archiv wird nicht geschrieben (byte-gleich)",
+          _e is None and _kaputt_u.read_bytes() == _kaputt_inhalt, repr(_e))
+    check("  ... mit Warnung, die die Datei nennt",
+          any(n == "warning" and "could not be read" in t and _kaputt_u.name in t
+              for n, t in _meld_u), _meld_u)
+    _kaputt_u.write_bytes(_kaputt_inhalt)
+    _meld_u.clear()
+    _platz_u = _types_u.SimpleNamespace(markdown=lambda *a, **k: _meld_u.append(("markdown", a[0])))
+    app._show_archive_status(_platz_u)
+    check("Seitenleiste: Archivstatus meldet 'unreadable'",
+          any("unreadable" in t for _, t in _meld_u), _meld_u)
+    _kaputt_u.write_bytes(_kaputt_inhalt)
+    _meld_u.clear()
+    _e = None
+    try:
+        app._remove_archive_row("irgendwas")
+    except Exception as exc:  # noqa: BLE001
+        _e = exc
+    check("Archiv-Editor: Entfernen verweigert, Datei byte-gleich, Arbeitsstand unberuehrt",
+          _e is None and _kaputt_u.read_bytes() == _kaputt_inhalt and not _ws_u
+          and "archiv_removed" not in app.st.session_state
+          and not app.st.session_state.get("ref_undo"), (repr(_e), _ws_u, app.st.session_state))
+    check("  ... mit Meldung", any("could not be read" in t for _, t in _meld_u)
+          or "could not be read" in str(app.st.session_state.get("ref_flash", "")),
+          (_meld_u, app.st.session_state))
+    # Fehlende Datei: wie bisher, das Archiv entsteht
+    app.st = _st_u()
+    _meld_u.clear()
+    app.ARCHIVE_CSV = _fehlt_u
+    app._update_archive([], _grp_u, _tab_u)
+    _neu_u = app.load_archive(_fehlt_u)
+    check("Tagesbetrieb: fehlende Datei wird wie bisher angelegt",
+          _fehlt_u.exists() and len(_neu_u) == 1 and _neu_u["NOTAM"].iloc[0] == "A9/26"
+          and not any(n == "warning" for n, _ in _meld_u), (_neu_u.to_dict("records"), _meld_u))
+finally:
+    app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace = _orig_u
+
 print("== Archiv-Import ==")
 import archiv_import as ai
 
@@ -4332,6 +4418,34 @@ check("Referenz: Dropdown Indien fuehrt Vikram-1 vor der Trennzeile",
 check("Referenz: Beschriftung Lijian-1 (LJ-1)", app.vehicle_label("LJ-1", _veh_neu) == "Lijian-1 (LJ-1)",
       app.vehicle_label("LJ-1", _veh_neu))
 
+
+# Import: unlesbares Archiv (nola-3dq.11) - kein Schreiben, ImportStateError, Zustand gleich
+_st_k = {"tage": {}, "entscheidungen": {"alt": {"status": "confirmed", "notam_ids": ["A1/26"]}}}
+_st_k_vorher = _copy.deepcopy(_st_k)
+_kand_k = {"key": "neu", "row": {"Startdatum": "03.01.2026", "NOTAM": "A7/26"},
+           "notam_ids": ["A7/26"], "quellen": []}
+for _name_k, _fn_k in (
+    ("confirm_many", lambda: ai.confirm_many(_st_k, [(_kand_k, "CZ-2D", "P", None)], _kaputt_u)),
+    ("remove_orphan", lambda: ai.remove_orphan(_st_k, "alt", _kaputt_u)),
+    ("candidates", lambda: ai.candidates(_st_k, _kaputt_u)),
+):
+    _st_k.clear()
+    _st_k.update(_copy.deepcopy(_st_k_vorher))
+    _kaputt_u.write_bytes(_kaputt_inhalt)
+    _r, _e = _versuch(_fn_k)
+    check("Import: {} bei unlesbarem Archiv -> ImportStateError mit Dateiname".format(_name_k),
+          isinstance(_e, ai.ImportStateError) and _kaputt_u.name in str(_e)
+          and "could not be read" in str(_e), repr(_e))
+    check("  ... {}: Datei byte-gleich, Zustand unveraendert".format(_name_k),
+          _kaputt_u.read_bytes() == _kaputt_inhalt and _st_k == _st_k_vorher, _st_k)
+_fehlt_k = _tmp_u / "fehlt_import.csv"
+_r, _e = _versuch(lambda: ai.candidates({"tage": {}, "entscheidungen": {}}, _fehlt_k))
+check("Import: fehlendes Archiv -> candidates wie bisher leer", _e is None and _r == [], repr(_e))
+_st_m = {"tage": {}, "entscheidungen": {}}
+_r, _e = _versuch(lambda: ai.confirm_many(_st_m, [(_kand_k, "CZ-2D", "P", None)], _fehlt_k))
+check("Import: fehlendes Archiv -> confirm_many legt es an",
+      _e is None and _r == 1 and len(app.load_archive(_fehlt_k)) == 1, repr(_e))
+_shutil_u.rmtree(_tmp_u, ignore_errors=True)
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

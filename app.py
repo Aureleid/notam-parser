@@ -4902,24 +4902,46 @@ def persist_sea_launches(path: Path, df: pd.DataFrame) -> None:
         pass
 
 
-def load_archive(path: Path) -> pd.DataFrame:
-    """
-    Liest das Startarchiv; fehlt oder bricht die Datei, beginnt es leer.
+class ArchiveUnreadable(Exception):
+    """Das Startarchiv ist vorhanden, aber nicht lesbar - es darf nicht geschrieben werden."""
 
-    Bewusst ohne Cache: die Anwendung schreibt diese Datei selbst, ein
-    veralteter Zwischenstand waere hier gefaehrlicher als der Lesevorgang teuer.
+
+def read_archive_strict(path: Path) -> pd.DataFrame:
     """
-    leer = pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
+    Liest das Startarchiv fuer jeden Schreibvorgang.
+
+    Fehlt die Datei, beginnt das Archiv leer. Ist sie vorhanden, aber nicht
+    lesbar (Zerlegungs-, Rechte-, Encodingfehler), bricht es mit
+    ArchiveUnreadable ab: ein leeres Archiv darueberzuschreiben hiesse, den
+    ganzen Bestand zu verlieren.
+    """
     if not path.exists():
-        return leer
+        return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
     try:
         df = _read_csv_any(str(path))
-    except Exception:
-        return leer
+    except Exception as exc:
+        raise ArchiveUnreadable(
+            "{} could not be read ({}). It was left untouched and not updated - "
+            "please check the file.".format(path.name, exc)
+        ) from exc
     for spalte in ARCHIVE_COLUMNS:
         if spalte not in df.columns:
             df[spalte] = ""
     return df[list(ARCHIVE_COLUMNS)].fillna("").astype(str)
+
+
+def load_archive(path: Path) -> pd.DataFrame:
+    """
+    Liest das Startarchiv fuer Anzeige und Zaehlung; fehlt oder bricht die
+    Datei, beginnt es leer. Wer schreibt, liest mit read_archive_strict.
+
+    Bewusst ohne Cache: die Anwendung schreibt diese Datei selbst, ein
+    veralteter Zwischenstand waere hier gefaehrlicher als der Lesevorgang teuer.
+    """
+    try:
+        return read_archive_strict(path)
+    except ArchiveUnreadable:
+        return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
 
 
 def persist_archive(path: Path, df: pd.DataFrame) -> None:
@@ -5982,7 +6004,16 @@ def _vehicle_picker(
 
 def _show_archive_status(platzhalter: Any) -> None:
     """Schreibt den Archivstand in die Seitenleiste."""
-    anzahl = len(load_archive(ARCHIVE_CSV))
+    try:
+        anzahl = len(read_archive_strict(ARCHIVE_CSV))
+    except ArchiveUnreadable:
+        platzhalter.markdown(
+            "{} Launch archive: unreadable - not updated".format(
+                glyph(GLYPH_MISSING, COLOR_ERROR)
+            ),
+            unsafe_allow_html=True,
+        )
+        return
     platzhalter.markdown(
         "{} Launch archive: {} launch(es)".format(
             glyph(GLYPH_OK, COLOR_OK, 0.85), anzahl
@@ -6016,7 +6047,12 @@ def _update_archive(
     ]
     if not kandidaten:
         return
-    bestand = load_archive(ARCHIVE_CSV)
+    try:
+        bestand = read_archive_strict(ARCHIVE_CSV)
+    except ArchiveUnreadable as exc:
+        # Nie ueber eine unlesbare Datei schreiben; die Auswertung laeuft weiter.
+        st.warning("Launch archive: {}".format(exc))
+        return
     neu = merge_archive(
         bestand,
         [archive_row(g, events) for g in kandidaten],
@@ -6128,9 +6164,13 @@ def _remove_archive_row(schluessel: str) -> None:
     Der Schluessel wandert in den Arbeitsstand, sonst legte der naechste Import
     denselben Start sofort wieder an, solange sein NOTAM in der Tagesdatei steht.
     """
+    try:
+        bestand = read_archive_strict(ARCHIVE_CSV)
+    except ArchiveUnreadable as exc:
+        st.error("Launch archive: {} Nothing was removed.".format(exc))
+        return
     _push_undo(ARCHIVE_CSV, "Archivzeile entfernt")
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
-    bestand = load_archive(ARCHIVE_CSV)
     behalten = [
         r for _, r in bestand.iterrows() if archive_key(dict(r)) != schluessel
     ]
@@ -6143,7 +6183,11 @@ def _remove_archive_row(schluessel: str) -> None:
 
 def _archive_editor() -> None:
     """Tabelle des Startarchivs mit Entfernen-Funktion."""
-    archiv = load_archive(ARCHIVE_CSV)
+    try:
+        archiv = read_archive_strict(ARCHIVE_CSV)
+    except ArchiveUnreadable as exc:
+        st.error("Launch archive: {}".format(exc))
+        return
     st.caption(
         "This file is written by the application itself: every recognised launch "
         "gets a row, payload or not. You add the payload under *NOTAM Data* - it is "
