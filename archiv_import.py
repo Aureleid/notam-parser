@@ -116,8 +116,9 @@ def extract_notams(text: str, quelle: str) -> Tuple[List[KorpusNotam], int]:
     Loest alle NOTAMs aus einem Forenbeitrag oder Langtext.
 
     Rueckgabe: die verwertbaren NOTAMs und die Zahl der Bloecke, die mit einer
-    Kennung beginnen, aber kein E)/Q) oder kein lesbares B) haben. Vortext ohne
-    Kennung ist Forengespraech und zaehlt nicht.
+    Kennung beginnen, aber kein E)/Q) oder kein lesbares B) haben. Ebenfalls als nicht
+    verwertbar zaehlen !FDC- und NAVAREA-Bloecke (ohne ICAO-Kennung). Sonstiger
+    Vortext ohne Kennung ist Forengespraech und zaehlt nicht.
     """
     gefunden: List[KorpusNotam] = []
     unbrauchbar = 0
@@ -126,7 +127,7 @@ def extract_notams(text: str, quelle: str) -> Tuple[List[KorpusNotam], int]:
             continue
         kopf = _RE_BLOCK_ID.match(teil)
         if not kopf:
-            if teil.lstrip().startswith(("!", "NAVAREA", "navarea")):
+            if teil.lstrip().upper().startswith(("!", "NAVAREA")):
                 unbrauchbar += 1
             continue
         block = cut_block(teil)
@@ -157,7 +158,7 @@ class _PostParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.beitraege: List[Tuple[str, str]] = []
         self.ganz: List[str] = []
-        self._stack: List[Tuple[str, str]] = []  # (Tag, Rolle: "", "post", "quote", "skip")
+        self._stack: List[Tuple[str, str]] = []  # (Tag, Rolle: "", "post", "skip")
         self._post_id = ""
         self._post: Optional[List[str]] = None
         self._verdeckt = 0
@@ -191,21 +192,33 @@ class _PostParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag in self.VOID:
             return
-        while self._stack:
-            offen, rolle = self._stack.pop()
-            if rolle == "skip":
-                self._verdeckt -= 1
-            elif rolle == "post" and self._post is not None:
-                self.beitraege.append((self._post_id, "".join(self._post)))
-                self._post = None
-            if offen == tag:
-                break
+        # Ein Endtag ohne passendes offenes Tag wird ignoriert; sonst wuerde er
+        # den ganzen Stapel (Beitrag, Zitat) vorzeitig schliessen.
+        if any(offen == tag for offen, _ in self._stack):
+            while self._stack:
+                offen, rolle = self._stack.pop()
+                if rolle == "skip":
+                    self._verdeckt -= 1
+                elif rolle == "post":
+                    self._flush_post()
+                if offen == tag:
+                    break
         if tag in self.BLOCK and not self._verdeckt:
             self._ziel().append("\n")
 
     def handle_data(self, data: str) -> None:
         if not self._verdeckt:
             self._ziel().append(data)
+
+    def _flush_post(self) -> None:
+        if self._post is not None:
+            self.beitraege.append((self._post_id, "".join(self._post)))
+            self._post = None
+
+    def close(self) -> None:
+        super().close()
+        # Abgeschnittene Seite: ein nie geschlossener Beitrag bleibt erhalten.
+        self._flush_post()
 
 
 def texts_from_upload(name: str, data: bytes) -> List[Tuple[str, str]]:

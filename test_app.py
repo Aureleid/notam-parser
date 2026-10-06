@@ -3135,7 +3135,22 @@ check("HTML: je Beitrag ein Text", [q for q, _ in teile] == ["thread_p1.html#msg
       [q for q, _ in teile])
 check("HTML: Zitat verworfen", "A4631/26" not in teile[1][1], teile[1][1][:80])
 check("HTML: Skript verworfen", all("A7777/26" not in t for _, t in teile))
-check("HTML: Zeilenumbrueche aus <br>", "\nE)" in teile[0][1] or "\nE) " in teile[0][1])
+check("HTML: Zeilenumbrueche aus <br>", "\nE)" in teile[0][1])
+_n1 = "A1234/26 NOTAMN<br>B) 2609200354 C) 2609200415<br>E) DANGER AREA 3948N10002E"
+_t = ai.texts_from_upload("s.html", ('<div class="inner" id="msg_1"><p>Intro</p></p>' + _n1 + '</div>').encode())
+check("HTML: ueberzaehliges </p> schliesst den Beitrag nicht",
+      len(_t) == 1 and ai.extract_notams(_t[0][1], "q")[0] != [], _t)
+_t = ai.texts_from_upload("s.html", ('<div class="inner" id="msg_1">Mein Text <blockquote>ZITAT A9999/26</span> noch Zitat</blockquote> Ende</div>').encode())
+check("HTML: ueberzaehliges </span> im Zitat: eigener Text bleibt, Zitat bleibt verdeckt",
+      len(_t) == 1 and "Mein Text" in _t[0][1] and "Ende" in _t[0][1] and "ZITAT" not in _t[0][1]
+      and "noch Zitat" not in _t[0][1], _t)
+_t = ai.texts_from_upload("t.html", b'<div class="inner" id="msg_1">A1234/26 never closed')
+check("HTML: nie geschlossener Beitrag wird geliefert",
+      [q for q, _ in _t] == ["t.html#msg_1"] and "A1234/26 never closed" in _t[0][1], _t)
+_g, _u = ai.extract_notams("A1234/26 NOTAMN\nB) XYZ\nE) DANGER AREA", "q")
+check("Block mit E), aber unlesbarem B) gilt als nicht verwertbar", _g == [] and _u == 1, (_g, _u))
+_g, _u = ai.extract_notams("Navarea IV 123/26\n\n!FDC 6/1234 ZZZ", "q")
+check("NAVAREA-/!FDC-Bloecke ohne Kennung zaehlen als nicht verwertbar (ohne Schreibweise)", _g == [] and _u == 2, (_g, _u))
 try:
     ai.texts_from_upload("gross.txt", b"x" * (ai.MAX_FILE_BYTES + 1))
     check("Datei ueber 5 MB abgelehnt", False)
