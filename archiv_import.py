@@ -274,13 +274,13 @@ def read_json(path: Path) -> Dict[str, Any]:
     return data
 
 
-def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+def _write_bytes_atomic(path: Path, daten: bytes) -> None:
     """Schreibt erst eine temporaere Datei und benennt sie dann um."""
     # eindeutiger Name im selben Ordner, damit os.replace atomar bleibt
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, ensure_ascii=False, indent=1))
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(daten)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_name, path)
@@ -290,6 +290,11 @@ def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
+    """Schreibt JSON atomar (siehe _write_bytes_atomic)."""
+    _write_bytes_atomic(path, json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8"))
 
 
 def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
@@ -562,3 +567,126 @@ def drop_subsumed(kandidaten: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for k, m in zip(kandidaten, mengen)
         if not any(m < andere for andere in mengen)
     ]
+
+
+# --------------------------------------------------------------------------- #
+# GCAT-Startliste (J. McDowell, CC-BY)
+# --------------------------------------------------------------------------- #
+@dataclass
+class GcatStart:
+    tag: str
+    zeit: datetime
+    nur_datum: bool
+    rakete: str
+    nutzlast: str
+    site: str
+    inklination: Optional[float]
+    azimut: Optional[float]
+
+
+_RE_ORBITAL_TAG = re.compile(r"^\d{4}-(\d{3}|[EF]\d{2})$")
+_RE_GCAT_DATE = re.compile(
+    r"^(\d{4}) ([A-Z][a-z]{2}) +(\d{1,2})(?: (\d{2})(\d{2})(?::(\d{2}))?)?"
+)
+_MONATE = {m: i for i, m in enumerate(
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
+
+
+def _zahl(text: str) -> Optional[float]:
+    try:
+        return float(text.strip())
+    except ValueError:
+        return None
+
+
+def _leer(text: str) -> str:
+    t = text.strip()
+    return "" if t in ("", "-") else t
+
+
+def parse_gcat(text: str) -> List[GcatStart]:
+    """Liest launch.tsv; behalten werden nur Orbitalstarts der Jahre YEARS."""
+    starts: List[GcatStart] = []
+    for zeile in text.splitlines():
+        if not zeile or zeile.startswith("#"):
+            continue
+        r = zeile.split("\t")
+        if len(r) < 20 or not _RE_ORBITAL_TAG.match(r[0].strip()):
+            continue
+        m = _RE_GCAT_DATE.match(r[2].strip())
+        if not m or m.group(2) not in _MONATE:
+            continue
+        jahr = int(m.group(1))
+        if not YEARS[0] <= jahr <= YEARS[1]:
+            continue
+        nur_datum = m.group(4) is None
+        zeit = datetime(
+            jahr, _MONATE[m.group(2)], int(m.group(3)),
+            int(m.group(4) or 0), int(m.group(5) or 0), int(m.group(6) or 0),
+            tzinfo=timezone.utc,
+        )
+        starts.append(
+            GcatStart(
+                tag=r[0].strip(),
+                zeit=zeit,
+                nur_datum=nur_datum,
+                rakete=_leer(r[3]),
+                nutzlast=_leer(r[8]) or _leer(r[7]),
+                site=r[11].strip().rstrip("?"),
+                inklination=_zahl(r[18]),
+                azimut=_zahl(r[19]),
+            )
+        )
+    return starts
+
+
+def load_gcat_sites(path: Path = GCAT_SITES_CSV) -> Dict[str, Tuple[List[str], str]]:
+    """GCAT-Startplatzcode -> (NOLA-Kuerzel, Land). Fehlt die Datei, ist sie leer."""
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+    return {
+        r["GCAT"].strip(): (
+            [k.strip() for k in r["Kurzel"].split(";") if k.strip()],
+            r["Land"].strip(),
+        )
+        for _, r in df.iterrows()
+        if r["GCAT"].strip()
+    }
+
+
+_GCAT_MEMO: Dict[Tuple[str, float], List[GcatStart]] = {}
+
+
+def load_gcat(
+    refresh: bool = False, cache: Path = GCAT_CACHE, opener: Any = urllib.request.urlopen
+) -> Tuple[Optional[List[GcatStart]], str]:
+    """
+    Startliste aus dem Cache; mit refresh vorher neu abrufen.
+
+    Abgerufen wird nur GCAT_URL. Scheitert der Abruf, bleibt ein vorhandener
+    Cache in Gebrauch; ohne Cache gibt es keinen Abgleich (None).
+    """
+    hinweis = ""
+    if refresh or not cache.exists():
+        try:
+            anfrage = urllib.request.Request(GCAT_URL, headers={"User-Agent": "NOLA archive import"})
+            with opener(anfrage, timeout=60) as antwort:
+                daten = antwort.read(MAX_GCAT_BYTES + 1)
+            if len(daten) > MAX_GCAT_BYTES:
+                raise ValueError("launch list larger than expected")
+            _write_bytes_atomic(cache, daten)
+        except Exception as exc:
+            hinweis = "Download failed ({}). ".format(exc)
+    if not cache.exists():
+        return None, hinweis + "Launch list not available - no suggestions."
+    mtime = cache.stat().st_mtime
+    stand = datetime.fromtimestamp(mtime, timezone.utc).strftime("%d.%m.%Y")
+    # 13 MB bei jedem Streamlit-Durchlauf neu zu lesen waere spuerbar - je
+    # Datei und Aenderungszeit wird nur einmal gelesen.
+    memo_key = (str(cache), mtime)
+    if memo_key not in _GCAT_MEMO:
+        _GCAT_MEMO.clear()
+        _GCAT_MEMO[memo_key] = parse_gcat(cache.read_text(encoding="utf-8", errors="replace"))
+    starts = _GCAT_MEMO[memo_key]
+    return starts, hinweis + "GCAT (J. McDowell, CC-BY), copy from {}: {} launches.".format(stand, len(starts))

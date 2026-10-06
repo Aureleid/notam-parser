@@ -3324,6 +3324,49 @@ check("Pflichtfall: Starship-Kommentar aendert die Zuordnung nicht",
       [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tk.kandidaten] == [("China", "JSLC")],
       [(k["nation"], k["row"]["Weltraumbahnhof"]) for k in tk.kandidaten])
 
+GCAT_KOPF = "#Launch_Tag\tLaunch_JD\tLaunch_Date\tLV_Type\tVariant\tFairing\tFlight_ID\tFlight\tMission\tFlightCode\tPlatform\tLaunch_Site\tLaunch_Pad\tAscent_Site\tAscent_Pad\tPerigee\tApogee\tApoflag\tInc\tAzimuth\n# Updated\n"
+def _gz(tag, datum, lv, flight, mission, site, inc="-", az="-", platform="-"):
+    return "\t".join([tag, "0", datum, lv, "-", "-", "-", flight, mission, "-", platform, site, "-", "-", "-", "-", "-", " ", inc, az]) + "\n"
+GCAT_TXT = GCAT_KOPF + "".join([
+    _gz("2026-201 ", "2026 Sep 20 0356", "Chang Zheng 2D/YZ-3", "Yaogan 45", "-", "JQ", " 97.0 ", " 189.0"),
+    _gz("2026-202 ", "2026 Sep 20 0354:12", "Falcon 9", "Starlink 11-2", "Starlink 11-2", "VSFBS"),
+    _gz("2026-S12 ", "2026 Sep 20 0400", "Iran SRBM", "-", "-", "IRAN"),
+    _gz("2025-E01 ", "2025 Mar  1", "Kuaizhou-1A", "Unknown", "-", "JQ"),
+    _gz("2019-001 ", "2019 Jan 10 1611", "Chang Zheng 3B", "ChinaSat 2D", "-", "XSC"),
+    _gz("2023-200 ", "2023 Dec  5 1924?", "Jielong-3", "WHJSW 03", "-", "YJ", platform="DFHT"),
+])
+gs = ai.parse_gcat(GCAT_TXT)
+check("GCAT: Orbitalstarts 2020-2026, ohne Suborbital", [s.tag for s in gs] == ["2026-201", "2026-202", "2025-E01", "2023-200"],
+      [s.tag for s in gs])
+check("  ... Uhrzeit gelesen", gs[0].zeit.strftime("%Y-%m-%d %H:%M") == "2026-09-20 03:56" and not gs[0].nur_datum)
+check("  ... nur Tagesdatum erkannt", gs[2].nur_datum, gs[2].zeit)
+check("  ... Fragezeichen toleriert", gs[3].zeit.strftime("%H:%M") == "19:24", gs[3].zeit)
+check("  ... Payload faellt auf Flight zurueck", gs[0].nutzlast == "Yaogan 45", gs[0].nutzlast)
+check("  ... Inklination und Azimut", (gs[0].inklination, gs[0].azimut) == (97.0, 189.0))
+sites = ai.load_gcat_sites()
+check("Referenz gcat_startplaetze.csv: JQ -> JSLC, China", sites.get("JQ") == (["JSLC"], "China"), sites.get("JQ"))
+check("  ... Baikonur unter GIK-5", sites.get("GIK-5") == (["BAIK"], "Russland"), sites.get("GIK-5"))
+check("  ... Seegebiet ohne festen Platz", sites.get("ECS") == ([], "China"), sites.get("ECS"))
+
+aufgerufen = []
+class _Antwort:
+    def __init__(self, daten): self.daten = daten
+    def read(self, n=-1): return self.daten
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+def _opener_ok(req, timeout=0):
+    aufgerufen.append(req.full_url); return _Antwort(GCAT_TXT.encode("utf-8"))
+def _opener_fehler(req, timeout=0):
+    raise OSError("offline")
+cache = _tmp / "gcat.tsv"
+liste, status = ai.load_gcat(refresh=True, cache=cache, opener=_opener_ok)
+check("GCAT-Abruf nur von der festen Adresse", aufgerufen == [ai.GCAT_URL], aufgerufen)
+check("  ... Cache geschrieben", cache.exists() and len(liste) == 4, status)
+liste2, status2 = ai.load_gcat(refresh=True, cache=cache, opener=_opener_fehler)
+check("offline: Cache bleibt in Gebrauch", liste2 is not None and len(liste2) == 4, status2)
+liste3, status3 = ai.load_gcat(refresh=True, cache=_tmp / "nichts.tsv", opener=_opener_fehler)
+check("offline ohne Cache: nicht verfuegbar", liste3 is None, status3)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

@@ -40,3 +40,4 @@ archiv_korpus.json
 archiv_import.json
 gcat_launch_cache.tsv
 *.json.*.tmp
+gcat_launch_cache.tsv.*.tmp
