@@ -54,7 +54,11 @@ Festlegungen:
 - **Tagesbündel:** NOTAMs werden nach dem Datum aus `B)` gebündelt und je Tag analysiert.
   Mehrtägige Meldungen (Vorankündigungen) kommen in jedes Bündel eines Tages innerhalb ihres
   `B)`–`C)`-Fensters, höchstens in die ersten 14 Tage. Länger gültige Meldungen (Dauer-
-  Sperrgebiete) würden sonst hunderte Bündel füllen. So greift die bestehende Vorankündigungs-Paarung am Starttag. Erzeugt
+  Sperrgebiete) würden sonst hunderte Bündel füllen.
+- **Nachlauf über Mitternacht:** Ein Bündel D enthält zusätzlich die NOTAMs, die bis 06:00 UTC
+  des Folgetags beginnen. Ein Start über Mitternacht liegt damit vollständig im Bündel seines
+  Starttags. Das Bündel D+1 verwirft ihn wegen des fremden Datums, also wird nichts doppelt
+  gezählt. So greift die bestehende Vorankündigungs-Paarung am Starttag. Erzeugt
   eine solche Meldung allein, ohne Starttag-NOTAMs, einen Start, verhält sie sich wie im
   Tagesbetrieb.
 - **USA-Filter nach der Erkennung:** Die Analyse läuft unverändert mit allen sechs Nationen.
@@ -109,6 +113,12 @@ Festlegungen:
   - *kein Flug:* kein Treffer. Hinweis „kein Flug in GCAT", etwa ein verschobener Startversuch.
   - *Seestart* (`site_from_geometry`): Paarung nur über Nation und Zeitfenster, nie eindeutig.
   - *kein Abgleich:* GCAT nicht verfügbar.
+- **Trägersysteme:** Der GCAT-Name wird zuerst über die neue Referenz
+  `gcat_traegersysteme.csv` (Schreibweisen, z. B. `PSLV-XL` → `PSLV`, `Cheonlima-1` →
+  `Chollima-1`) und dann über Name, Alternativname und Kürzel aus
+  `traegersysteme_updated.csv` aufgelöst. 13 aktive Träger, die dort fehlen (u. a. Lijian-1,
+  Chang Zheng 8A, Zhuque-2E), werden als neue Zeilen vorgeschlagen und erst nach Freigabe
+  übernommen.
 - **Plausibilitätsprüfung (nur Warnung):** Weicht NOLAs Inklination oder Azimut um mehr als
   10° von GCAT ab, wird der Kandidat als *Abweichung* markiert. Der Vergleich findet nur
   statt, wenn beide Seiten einen Wert haben. NOLAs eigene Werte werden **nie** überschrieben;
@@ -145,8 +155,18 @@ Start hinzu, ändert sich dessen `archive_key`. Der neue Kandidat erhält dann d
 *aktualisiert*. Bestätigst du ihn, ersetzt er die alte Archivzeile, statt eine zweite
 anzulegen. Erkannt wird das an einer gemeinsamen NOTAM-Kennung.
 
-**Öffentliche Fassung:** Der Reiter wird auf Streamlit Cloud ausgeblendet, solange der
-Demo-Modus fehlt. Erkannt wird das über die Umgebung, wie beim Demo-Modus vorgesehen.
+**Neuauswertung nach Änderungen an NOLA:** Der Importzustand merkt sich einen
+Erkennungsstand, einen Hash über `app.py` und die Referenzen für Startplätze, FIRs und
+Trägersysteme. Weicht er ab, zeigt der Reiter einen Hinweis und den Knopf „Re-analyse all
+days" mit Fortschrittsbalken. Gerechnet wird erst nach dem Klick (gemessen etwa 0,02–0,2 s je
+Tag, insgesamt 1–2 Minuten). Bestätigte Starts, deren NOTAMs danach in keinem Kandidaten mehr
+stehen, erscheinen unter „No longer recognised" mit „Keep" und „Remove from archive".
+Gelöscht wird nie automatisch.
+
+**Öffentliche Fassung (fail-closed):** Der Reiter erscheint nur, wenn die App nicht unter
+`/mount/src` läuft **und** der `Host`-Header der Anfrage `localhost`, `127.0.0.1` oder
+`[::1]` ist (`st.context.headers`). Fehlt der Header oder ist er unklar, bleibt der Reiter
+verborgen. Ein Aufruf über die IP im Heimnetz zeigt ihn bewusst nicht.
 
 ## 4. Speicherung
 
@@ -190,7 +210,7 @@ offenen Punkt „Archivspalten". Deshalb steht die Quelle im Nebenbestand.
 - Größengrenzen: 5 MB je Datei und 200 MB je Stapel.
 - Netzzugriff nur auf die feste GCAT-Adresse. Adressen aus dem Forentext werden nie
   aufgerufen.
-- Auf Streamlit Cloud ist der Reiter ausgeblendet (siehe oben).
+- Der Reiter erscheint nur bei lokalem Aufruf, sonst bleibt er verborgen (fail-closed, siehe oben).
 
 ## 8. Tests (`test_app.py`)
 

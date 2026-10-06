@@ -30,7 +30,8 @@ Streamlit nur im Reiter.
 - Aus GCAT werden nur Rakete und Payload übernommen, nie Inklination, Azimut oder Nation.
 - Ins Archiv wird nur nach Bestätigung geschrieben. Der Spaltensatz `ARCHIVE_COLUMNS` bleibt
   unverändert.
-- Grenzwerte: 5 MB je Datei, 200 MB je Stapel, höchstens 14 Tagesbündel je NOTAM,
+- Grenzwerte: 5 MB je Datei, 200 MB je Stapel, höchstens 14 Tagesbündel je NOTAM plus
+  Nachlauf bis 06:00 UTC des Folgetags,
   ±30 min Spielraum beim Abgleich, Abweichungsschwelle 10°.
 - Netzzugriff nur auf `https://planet4589.org/space/gcat/tsv/launch/launch.tsv`.
 - Forentext erscheint nie über `unsafe_allow_html`.
@@ -51,6 +52,8 @@ Streamlit nur im Reiter.
 |---|---|
 | `archiv_import.py` (neu) | Extraktion, Korpus, Tagesbündel, Tagesanalyse, GCAT, Abgleich, Importzustand |
 | `gcat_startplaetze.csv` (neu) | Referenz: GCAT-Startplatzcode → NOLA-Kürzel und Land |
+| `gcat_traegersysteme.csv` (neu) | Referenz: GCAT-Schreibweise → Trägerkürzel (nur Import) |
+| `traegersysteme_updated.csv` | 13 neue Träger, **nur nach Freigabe** |
 | `app.py` | `is_public_deployment`, Reiter `_archive_import_tab`, Eintrag in `_reference_dialog` |
 | `test_app.py` | Abschnitt `== Archiv-Import ==` |
 | `.gitignore` | drei lokale Dateien |
@@ -162,7 +165,7 @@ import re
 import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -174,6 +177,7 @@ import app
 KORPUS_JSON = app.APP_DIR / "archiv_korpus.json"
 IMPORT_JSON = app.APP_DIR / "archiv_import.json"
 GCAT_SITES_CSV = app.APP_DIR / "gcat_startplaetze.csv"
+GCAT_VEHICLES_CSV = app.APP_DIR / "gcat_traegersysteme.csv"
 GCAT_CACHE = app.APP_DIR / "gcat_launch_cache.tsv"
 GCAT_URL = "https://planet4589.org/space/gcat/tsv/launch/launch.tsv"
 
@@ -190,6 +194,8 @@ MAX_GCAT_BYTES = 50 * 1024 * 1024
 #: Hoechstens so viele Tagesbuendel je NOTAM - Dauer-Sperrgebiete wuerden
 #: sonst hunderte Buendel fuellen.
 MAX_BUNDLE_DAYS = 14
+#: Nachlauf eines Tagesbuendels in den Folgetag (UTC), siehe bundle_days.
+BUNDLE_TAIL = time(6, 0)
 MATCH_SLACK = timedelta(minutes=30)
 DEVIATION_DEG = 10.0
 SOURCE_ARCHIVE = "Archive import"
@@ -589,12 +595,14 @@ gcat_launch_cache.tsv
 
 **Abnahmekriterien:**
 - NOTAMs landen im Bündel jedes Tages ihres `B)`–`C)`-Fensters, höchstens 14 Tage.
-  `C) PERM` oder fehlendes `C)` ergibt nur den `B)`-Tag.
+  `C) PERM` oder fehlendes `C)` ergibt nur den `B)`-Tag. Was vor 06:00 UTC beginnt, liegt
+  zusätzlich im Bündel des Vortags (Nachlauf).
 - Ein Bündel ergibt nur Kandidaten, deren Startdatum der Bündeltag ist.
 - Ein US-Start wird gezählt, nie Kandidat. Ein chinesischer Start am selben Tag bleibt erhalten.
 - Unsichere Fälle in US-FIRs werden gezählt, nicht auf die Prüfliste gesetzt.
 - Ein OK-Fall ohne Startplatz kommt mit Begründung auf die Prüfliste.
-- Automatisch und von Hand ausgeblendete Fälle werden gezählt.
+- Automatisch und von Hand ausgeblendete Fälle werden gezählt, US-Fälle ebenso, aber
+  jeweils nur im Bündel des Tages, an dem sie beginnen. Kein NOTAM zählt doppelt.
 
 - [ ] **Schritt 1: Fehlschlagende Tests schreiben**
 
@@ -674,7 +682,8 @@ def bundle_days(korpus: Dict[str, KorpusNotam]) -> Dict[date, List[KorpusNotam]]
 
     Ein NOTAM gehoert in jedes Buendel eines Tages seines B-C-Fensters, damit
     eine mehrtaegige Vorankuendigung am Starttag neben den kurzen Meldungen
-    liegt - so wie in der taeglichen FNS-Datei. Hoechstens MAX_BUNDLE_DAYS.
+    liegt - so wie in der taeglichen FNS-Datei. Hoechstens MAX_BUNDLE_DAYS,
+    dazu der Nachlauf bis BUNDLE_TAIL des Folgetags.
     """
     buendel: Dict[date, List[KorpusNotam]] = defaultdict(list)
     for n in korpus.values():
@@ -684,6 +693,11 @@ def bundle_days(korpus: Dict[str, KorpusNotam]) -> Dict[date, List[KorpusNotam]]
         start = von.date()
         ende = bis.date() if bis is not None and bis >= von else start
         ende = min(ende, start + timedelta(days=MAX_BUNDLE_DAYS - 1))
+        # Nachlauf: ein Start ueber Mitternacht (UTC) soll im Buendel seines
+        # Starttags vollstaendig liegen. Was vor BUNDLE_TAIL beginnt, gehoert
+        # deshalb auch in das Buendel des Vortags.
+        if von.time() < BUNDLE_TAIL:
+            start -= timedelta(days=1)
         tag = start
         while tag <= ende:
             buendel[tag].append(n)
@@ -738,7 +752,15 @@ def analyze_day(
     weg = {
         e.row_index for e in events if e.auto_hidden_reason or e.key in ausgeblendet
     }
-    ergebnis.ausgeblendet = len(weg)
+
+    def eigener_tag(dt: Optional[datetime]) -> bool:
+        # Gezaehlt wird nur im Buendel des eigenen Tages - mehrtaegige Meldungen
+        # und der Nachlauf legen dasselbe NOTAM in mehrere Buendel.
+        return dt is not None and _utc(dt).date() == tag
+
+    ergebnis.ausgeblendet = sum(
+        1 for e in events if e.row_index in weg and eigener_tag(e.valid_from)
+    )
     tag_text = tag.strftime("%d.%m.%Y")
     belegt: Set[int] = set()
     ohne_platz: Set[int] = set()
@@ -751,7 +773,7 @@ def analyze_day(
         if not ok:
             continue
         if g.nation == EXCLUDED_NATION:
-            ergebnis.usa += 1
+            ergebnis.usa += 1 if eigener_tag(g.window_from) else 0
             belegt |= set(g.row_indices) | set(g.advance_row_indices)
             continue
         if not g.spaceport_code:
@@ -785,7 +807,7 @@ def analyze_day(
         if e.status == "OK" and e.row_index not in ohne_platz:
             continue
         if e.nation == EXCLUDED_NATION or (not e.nation and e.fir_country == EXCLUDED_NATION):
-            ergebnis.usa += 1
+            ergebnis.usa += 1 if eigener_tag(e.valid_from) else 0
             continue
         n = notams[e.row_index]
         grund = e.review_reason
@@ -1044,7 +1066,9 @@ def load_gcat(
 ### Aufgabe 5: Abgleich, Trägersystem-Zuordnung, Plausibilitätsprüfung
 
 **Dateien:**
+- Neu: `gcat_traegersysteme.csv`
 - Ändern: `archiv_import.py`, `test_app.py`
+- Nur nach Freigabe des Benutzers: `traegersysteme_updated.csv`
 
 **Schnittstellen:**
 - Nutzt: Kandidat-dict (Aufgabe 3), `GcatStart`, `load_gcat_sites` (Aufgabe 4)
@@ -1054,7 +1078,8 @@ def load_gcat(
     `STATUS_KEIN_ABGLEICH = "no comparison"`
   - `Abgleich(status: str, treffer: List[GcatStart], warnungen: List[str], hinweise: List[str])`
   - `match_candidate(kand: Dict, gcat: Optional[List[GcatStart]], sites: Dict) -> Abgleich`
-  - `vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame) -> str`
+  - `load_gcat_vehicle_aliases(path: Path = GCAT_VEHICLES_CSV) -> Dict[str, str]`
+  - `vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame, aliases: Optional[Dict[str, str]] = None) -> str`
 
 **Abnahmekriterien:**
 - Genau ein Treffer mit Uhrzeit im Fenster ±30 min am zugeordneten Platz ergibt *unique*.
@@ -1063,7 +1088,9 @@ def load_gcat(
 - Abweichungen bei Inklination oder Azimut über 10° sowie eine abweichende Nation erzeugen
   eine Warnung.
 - Ohne Treffer nennt der Hinweis die GCAT-Starts im Fenster an nicht zugeordneten Plätzen.
-- GCAT-Raketennamen werden auf `Abkürzung` abgebildet. Ohne Entsprechung bleibt das Feld leer.
+- GCAT-Raketennamen werden auf `Abkürzung` abgebildet, zuerst über die Schreibweisen in
+  `gcat_traegersysteme.csv`. Ohne Entsprechung bleibt das Feld leer, auch wenn ein Alias
+  auf ein Kürzel zeigt, das nicht in der Referenz steht.
 
 - [ ] **Schritt 1: Fehlschlagende Tests schreiben**
 
@@ -1093,12 +1120,57 @@ check("Hinweis nennt nicht zugeordnete GCAT-Plaetze im Fenster",
 veh = app.load_vehicles(str(app.VEHICLE_CSV))
 check("Rakete: Chang Zheng 2D/YZ-3 -> CZ-2D", ai.vehicle_code_for("Chang Zheng 2D/YZ-3", veh) == "CZ-2D")
 check("Rakete: Soyuz-2-1A -> Soyuz-2.1a", ai.vehicle_code_for("Soyuz-2-1A", veh) == "Soyuz-2.1a")
-check("Rakete ohne Entsprechung bleibt leer", ai.vehicle_code_for("Cheonlima-1", veh) == "")
+_alias = {ai._norm_name("PSLV-XL"): "PSLV", ai._norm_name("Cheonlima-1"): "Chollima-1",
+          ai._norm_name("Geist-1"): "GEIST"}
+check("Schreibweise: PSLV-XL -> PSLV", ai.vehicle_code_for("PSLV-XL", veh, _alias) == "PSLV")
+check("Schreibweise: Cheonlima-1 -> Chollima-1", ai.vehicle_code_for("Cheonlima-1", veh, _alias) == "Chollima-1")
+check("Alias auf unbekanntes Kuerzel bleibt leer", ai.vehicle_code_for("Geist-1", veh, _alias) == "")
+check("Rakete ohne Entsprechung bleibt leer", ai.vehicle_code_for("NK Kerolox LV", veh, {}) == "")
+_dateialias = ai.load_gcat_vehicle_aliases()
+check("Referenz gcat_traegersysteme.csv: vier Schreibweisen",
+      _dateialias.get(ai._norm_name("Zoljanah")) == "Zuljanah" and len(_dateialias) == 4, _dateialias)
 ```
 
 - [ ] **Schritt 2: Tests laufen lassen, Fehlschlag bestätigen**
 
-- [ ] **Schritt 3: Implementierung**
+- [ ] **Schritt 3a: `gcat_traegersysteme.csv` anlegen** (Schreibweisen, nur für den Import)
+
+```
+GCAT,Abkürzung
+PSLV-XL,PSLV
+PSLV-DL,PSLV
+Cheonlima-1,Chollima-1
+Zoljanah,Zuljanah
+```
+
+- [ ] **Schritt 3b: Fehlende Träger dem Benutzer vorlegen. Übernehmen erst nach Freigabe.**
+
+Diese Zeilen sind ein **Vorschlag** für `traegersysteme_updated.csv`. Sie stammen aus den
+GCAT-Starts 2020–2026 der fünf Nationen, für die die Referenz keinen Eintrag hat. Vor dem
+Schreiben dem Benutzer zeigen und auf ein ausdrückliches Ja warten. Ohne Freigabe weiter
+ohne sie: Der Abgleich lässt das Feld dann leer, und nichts bricht.
+
+```
+China,Lijian-1,Kinetica-1,LJ-1
+China,Lijian-2,Kinetica-2,LJ-2
+China,Chang Zheng 8A,Long March 8A,CZ-8A
+China,Chang Zheng 6C,Long March 6C,CZ-6C
+China,Chang Zheng 10B,Long March 10B,CZ-10B
+China,Chang Zheng 12A,Long March 12A,CZ-12A
+China,Chang Zheng 12B,Long March 12B,CZ-12B
+China,Zhuque-2E,Vermilion Bird 2E,ZQ-2E
+China,Zhuque-3,Vermilion Bird 3,ZQ-3
+China,Tianlong-2,Tianlong-2,TL-2
+China,Tianlong-3,Tianlong-3,TL-3
+China,Gushenxing-2,Ceres-2,GSX-2
+Indien,Vikram-1,Vikram-1,Vikram-1
+```
+
+`NK Kerolox LV` ist in GCAT eine Sammelbezeichnung und bekommt bewusst keinen Eintrag. Nach
+der Übernahme prüfen, dass keines der neuen Kürzel schon vorkommt. Der vorhandene Test
+„keine Zeile bildet ein Traegersystem auf ein Platzkuerzel ab" muss weiter bestehen.
+
+- [ ] **Schritt 3c: Implementierung**
 
 ```python
 # --------------------------------------------------------------------------- #
@@ -1195,16 +1267,37 @@ def _norm_name(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
-def vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame) -> str:
+def load_gcat_vehicle_aliases(path: Path = GCAT_VEHICLES_CSV) -> Dict[str, str]:
+    """GCAT-Schreibweise -> Kuerzel (nur fuer den Import). Fehlt die Datei, ist sie leer."""
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path, dtype=str, encoding="utf-8-sig").fillna("")
+    return {
+        _norm_name(r["GCAT"]): r["Abk\u00fcrzung"].strip()
+        for _, r in df.iterrows()
+        if r["GCAT"].strip() and r["Abk\u00fcrzung"].strip()
+    }
+
+
+def vehicle_code_for(
+    gcat_rakete: str, vehicles: pd.DataFrame, aliases: Optional[Dict[str, str]] = None
+) -> str:
     """
     GCAT-Raketenname -> Kuerzel aus traegersysteme_updated.csv.
 
-    Die Oberstufe hinter '/' zaehlt nicht. Ohne Entsprechung bleibt es leer -
-    ein unbekannter Wert wuerde das Dropdown des Tagesbetriebs unterlaufen.
+    Die Oberstufe hinter '/' zaehlt nicht. Erst die Schreibweisen aus
+    gcat_traegersysteme.csv, dann Name, Alternativname und Kuerzel der
+    Referenz. Ohne Entsprechung - auch wenn ein Alias auf ein Kuerzel zeigt,
+    das nicht (mehr) in der Referenz steht - bleibt es leer: ein unbekannter
+    Wert wuerde das Dropdown des Tagesbetriebs unterlaufen.
     """
     basis = _norm_name(gcat_rakete.split("/")[0])
     if not basis or vehicles is None or vehicles.empty:
         return ""
+    codes = [str(c) for c in vehicles["Abk\u00fcrzung"]]
+    alias = (aliases if aliases is not None else load_gcat_vehicle_aliases()).get(basis)
+    if alias:
+        return alias if alias in codes else ""
     for _, v in vehicles.iterrows():
         namen = {_norm_name(v["Name"]), _norm_name(v["Alternativname englisch"]), _norm_name(v["Abkürzung"])}
         if basis in namen:
@@ -1239,6 +1332,10 @@ def vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame) -> str:
   - `review_launch(state, korpus, event_key, tag_iso, spaceports, firs) -> None`,
     `review_hide(state, event_key) -> None`
   - `totals(state) -> Dict[str, int]` (`usa`, `ausgeblendet`)
+  - `detection_stamp(paths=...) -> str`, `is_stale(state, stamp=None) -> bool`
+  - `reevaluate(..., alle: bool = False, fortschritt=None)` (Rückruf `fortschritt(erledigt, gesamt)`)
+  - `orphans(state) -> List[Tuple[str, Dict]]`, `keep_orphan(state, key)`,
+    `remove_orphan(state, key, archiv=app.ARCHIVE_CSV)`
 
 **Abnahmekriterien:**
 - Ein zweiter Durchlauf mit unverändertem Korpus wertet keinen Tag neu aus und ändert keine Datei.
@@ -1253,6 +1350,10 @@ def vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame) -> str:
   entfernt ihn. Ein mehrtägiger Fall steht nur einmal da.
 - `archiv_import.py` greift weder auf `manual_notams` noch auf `WORKSPACE_FILE` oder
   `save_workspace` zu.
+- Der Erkennungsstand (Hash über `app.py` und die drei Referenzen) wird nur bei einem
+  vollständigen oder dem ersten Lauf gesetzt. Weicht er ab, ist `is_stale` wahr.
+- Bestätigte Starts, deren NOTAMs in keinem Kandidaten mehr stehen, liefert `orphans`.
+  Gelöscht wird nur über `remove_orphan`, nie automatisch.
 
 - [ ] **Schritt 1: Fehlschlagende Tests schreiben**
 
@@ -1260,7 +1361,7 @@ def vehicle_code_for(gcat_rakete: str, vehicles: pd.DataFrame) -> str:
 zst = ai.load_state(_tmp / "s.json")
 kx = {}
 ai.merge_korpus(kx, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG]), "seite1.html#msg_1")[0])
-check("Neuauswertung: ein Tag", ai.reevaluate(kx, zst, sp, fir) == 1)
+check("Neuauswertung: zwei Tage (20.09. und Nachlauf im 19.09.)", ai.reevaluate(kx, zst, sp, fir) == 2)
 check("  ... zweiter Lauf wertet nichts neu aus", ai.reevaluate(kx, zst, sp, fir) == 0)
 kl = ai.candidates(zst)
 check("Kandidatenliste: ein Start", len(kl) == 1 and kl[0]["entscheidung"] is None, kl)
@@ -1297,6 +1398,36 @@ check("  ... ersetzt die alte Archivzeile statt einer zweiten", len(a2) == 1 and
 
 # Bestaetigen wirkt auch fuer einen frueher entfernten Schluessel
 check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8"))
+
+MITTERNACHT = [AI_CN[1].replace("B)2609200354 C)2609200415", "B)2609192350 C)2609200011"),
+               AI_CN[2].replace("B)2609200356 C)2609200435", "B)2609200002 C)2609200041")]
+km = {}
+ai.merge_korpus(km, ai.extract_notams("\n\n".join(MITTERNACHT), "m")[0])
+zm = ai.load_state(_tmp / "m.json")
+ai.reevaluate(km, zm, sp, fir)
+check("Start ueber Mitternacht: ein Kandidat mit beiden Zonen",
+      [k["notam_ids"] for k in ai.candidates(zm)] == [["A4631/26", "A4632/26"]],
+      [k["notam_ids"] for k in ai.candidates(zm)])
+check("  ... mit dem Datum des ersten Tages",
+      ai.candidates(zm)[0]["row"]["Startdatum"] == "19.09.2026")
+
+# Erkennungsstand und nicht mehr erkannte Starts
+check("Erkennungsstand nach dem ersten Lauf gesetzt", not ai.is_stale(zst), zst.get("erkennungsstand"))
+check("  ... anderer Stand -> Neuauswertung faellig", ai.is_stale(zst, stamp="anders"))
+_schritte = []
+check("alle Tage neu ausgewertet", ai.reevaluate(kx, zst, sp, fir, alle=True,
+      fortschritt=lambda n, g: _schritte.append((n, g))) == len(_schritte) and _schritte[-1][0] == _schritte[-1][1])
+check("keine verwaisten Starts, solange sie erkannt werden", ai.orphans(zst) == [], ai.orphans(zst))
+_tage_vorher = zst["tage"]
+zst["tage"] = {iso: dict(t, kandidaten=[]) for iso, t in _tage_vorher.items()}
+_waisen = ai.orphans(zst)
+check("nicht mehr erkannt -> 'No longer recognised'", [k for k, _ in _waisen] == [neu_k[0]["key"]], _waisen)
+ai.keep_orphan(zst, neu_k[0]["key"])
+check("  ... Keep nimmt ihn von der Liste, Archiv bleibt", ai.orphans(zst) == [] and len(app.load_archive(archiv_t)) == 1)
+zst["entscheidungen"][neu_k[0]["key"]].pop("behalten")
+ai.remove_orphan(zst, neu_k[0]["key"], archiv_t)
+check("  ... Remove loescht die Archivzeile", app.load_archive(archiv_t).empty)
+zst["tage"] = _tage_vorher
 
 # Pruefliste: reine Zustandsfunktionen, mit einem synthetischen Tag geprueft
 zp = ai.load_state(_tmp / "p.json")
@@ -1340,11 +1471,30 @@ def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
         "entscheidungen": data.get("entscheidungen", {}),
         "review_bestaetigt": list(data.get("review_bestaetigt", [])),
         "review_ausgeblendet": list(data.get("review_ausgeblendet", [])),
+        "erkennungsstand": data.get("erkennungsstand", ""),
     }
 
 
 def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
     write_json_atomic(path, state)
+
+
+def detection_stamp(
+    paths: Sequence[Path] = (
+        app.APP_DIR / "app.py", app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV
+    ),
+) -> str:
+    """Erkennungsstand: aendert sich mit der Pipeline oder einer ihrer Referenzen."""
+    h = hashlib.sha256()
+    for path in paths:
+        h.update(path.name.encode("utf-8"))
+        h.update(path.read_bytes() if path.exists() else b"-")
+    return h.hexdigest()[:16]
+
+
+def is_stale(state: Dict[str, Any], stamp: Optional[str] = None) -> bool:
+    """Wurde zuletzt mit einem anderen Erkennungsstand ausgewertet?"""
+    return bool(state["tage"]) and state.get("erkennungsstand") != (stamp or detection_stamp())
 
 
 def reevaluate(
@@ -1353,17 +1503,29 @@ def reevaluate(
     spaceports: pd.DataFrame,
     firs: pd.DataFrame,
     erzwingen: Iterable[str] = (),
+    alle: bool = False,
+    fortschritt: Optional[Any] = None,
 ) -> int:
-    """Wertet nur Tage neu aus, deren NOTAM-Bestand sich geaendert hat (oder erzwungen)."""
+    """
+    Wertet Tage neu aus, deren NOTAM-Bestand sich geaendert hat, die erzwungen
+    sind, oder - mit alle=True - jeden Tag. Nur ein vollstaendiger Lauf (oder
+    der allererste) setzt den Erkennungsstand; nach einem Teillauf mit neuem
+    Code bleibt der Hinweis auf die faellige Neuauswertung also stehen.
+    `fortschritt(erledigt, gesamt)` wird je Tag aufgerufen.
+    """
     erzwingen = set(erzwingen)
     bestaetigt = set(state["review_bestaetigt"])
     ausgeblendet = set(state["review_ausgeblendet"])
+    erster_lauf = not state["tage"]
+    buendel = sorted(bundle_days(korpus).items())
     neu = 0
-    for tag, notams in sorted(bundle_days(korpus).items()):
+    for nr, (tag, notams) in enumerate(buendel, 1):
+        if fortschritt is not None:
+            fortschritt(nr, len(buendel))
         iso = tag.isoformat()
         fp = day_fingerprint(notams)
         alt = state["tage"].get(iso)
-        if alt and alt.get("fingerprint") == fp and iso not in erzwingen:
+        if alt and alt.get("fingerprint") == fp and iso not in erzwingen and not alle:
             continue
         ergebnis = analyze_day(tag, notams, spaceports, firs, bestaetigt, ausgeblendet)
         state["tage"][iso] = {
@@ -1374,7 +1536,43 @@ def reevaluate(
             "ausgeblendet": ergebnis.ausgeblendet,
         }
         neu += 1
+    if alle or erster_lauf:
+        state["erkennungsstand"] = detection_stamp()
     return neu
+
+
+def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Bestaetigte Starts, von deren NOTAMs keiner mehr in einem Kandidaten steht.
+
+    Nach einer Neuauswertung mit geaenderter Erkennung belegt NOLA solche
+    Archivzeilen nicht mehr. Geloescht wird nie automatisch - der Benutzer
+    entscheidet (keep_orphan / remove_orphan).
+    """
+    aktuelle_ids = {
+        i for t in state["tage"].values() for k in t["kandidaten"] for i in k["notam_ids"]
+    }
+    return [
+        (key, e)
+        for key, e in sorted(state["entscheidungen"].items())
+        if e.get("status") == "confirmed"
+        and not e.get("behalten")
+        and not set(e.get("notam_ids", [])) & aktuelle_ids
+    ]
+
+
+def keep_orphan(state: Dict[str, Any], key: str) -> None:
+    state["entscheidungen"][key]["behalten"] = True
+
+
+def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CSV) -> None:
+    bestand = app.load_archive(archiv)
+    if not bestand.empty:
+        bestand = bestand[
+            [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
+        ].reset_index(drop=True)
+        app.persist_archive(archiv, bestand)
+    state["entscheidungen"][key] = {"status": "removed"}
 
 
 def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1526,14 +1724,18 @@ def review_hide(state: Dict[str, Any], event_key: str) -> None:
 **Schnittstellen:**
 - Nutzt: alle öffentlichen Funktionen aus `archiv_import.py`, `vehicle_options`,
   `vehicle_label`, `nation_label`
-- Liefert: `is_public_deployment(app_dir: Path = APP_DIR) -> bool`
+- Liefert: `is_public_deployment(app_dir: Path = APP_DIR) -> bool`,
+  `is_local_request(host: Optional[str]) -> bool`, `archive_import_allowed() -> bool`
 
 **Abnahmekriterien:**
-- Lokal erscheint ein sechster Reiter „Archive Import". Unter `/mount/src/…` (Streamlit
-  Community Cloud) fehlt er.
+- Ein sechster Reiter „Archive Import" erscheint nur, wenn die App nicht unter `/mount/src`
+  läuft **und** der `Host`-Header `localhost`, `127.0.0.1` oder `[::1]` ist. Fehlt der
+  Header oder ist er unklar, bleibt der Reiter verborgen (fail-closed).
 - Der Reiter importiert `archiv_import` erst beim Aufruf.
 - Kein `unsafe_allow_html` im Reiter. NOTAM-Texte erscheinen über `st.code`.
 - Eine `ImportStateError` wird angezeigt, ohne dass eine Datei geschrieben wird.
+- Bei abweichendem Erkennungsstand erscheinen ein Hinweis und der Knopf „Re-analyse all days"
+  mit Fortschrittsbalken. Die Liste „No longer recognised" zeigt „Keep" und „Remove from archive".
 - Ein Upload mit mehreren Dateien, Bericht, Kandidaten je Jahr, Sammelbestätigung,
   Einzelbestätigung (Treffer, Rakete, Payload), Verwerfen und Prüfliste mit
   „Space Launch" und „Hide" funktionieren.
@@ -1549,13 +1751,18 @@ tab_src = _inspect.getsource(app._archive_import_tab)
 check("Reiter ohne unsafe_allow_html", "unsafe_allow_html" not in tab_src)
 check("Reiter importiert das Modul erst beim Aufruf",
       "import archiv_import" in tab_src and "\nimport archiv_import" not in quelle_app)
-check("Reiter nur ausserhalb der oeffentlichen Fassung",
-      "is_public_deployment()" in _inspect.getsource(app._reference_dialog))
+check("Reiter nur bei erlaubtem Import",
+      "archive_import_allowed()" in _inspect.getsource(app._reference_dialog))
+for _host, _soll in (("localhost:8501", True), ("127.0.0.1:8501", True), ("[::1]:8501", True),
+                     ("LOCALHOST", True), ("notam-space-analyzer.streamlit.app", False),
+                     ("192.168.1.20:8501", False), ("localhost.evil.com", False), ("", False), (None, False)):
+    check("Host {!r} -> lokal {}".format(_host, _soll), app.is_local_request(_host) == _soll)
+check("ohne Streamlit-Kontext verborgen (fail-closed)", app.archive_import_allowed() is False)
 ```
 
 - [ ] **Schritt 2: Tests laufen lassen, Fehlschlag bestätigen**
 
-- [ ] **Schritt 3: `is_public_deployment` in `app.py` neben `ARCHIVE_CSV` einfügen**
+- [ ] **Schritt 3: `is_public_deployment`, `is_local_request` und `archive_import_allowed` in `app.py` neben `ARCHIVE_CSV` einfügen**
 
 ```python
 def is_public_deployment(app_dir: Path = APP_DIR) -> bool:
@@ -1566,6 +1773,34 @@ def is_public_deployment(app_dir: Path = APP_DIR) -> bool:
     darf der Archiv-Import nicht erscheinen, solange es keinen Demo-Modus gibt.
     """
     return Path(app_dir).resolve().parts[:3] == ("/", "mount", "src")
+
+
+def is_local_request(host: Optional[str]) -> bool:
+    """
+    Kommt die Anfrage nachweislich vom eigenen Rechner?
+
+    Fail-closed: fehlt der Host-Header oder ist er unklar, gilt sie als nicht
+    lokal. Ein Aufruf ueber die IP im Heimnetz zaehlt bewusst nicht dazu.
+    """
+    if not host:
+        return False
+    host = host.strip().lower()
+    if host.startswith("["):
+        name = host[1:].split("]", 1)[0]
+    else:
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    return name in ("localhost", "127.0.0.1", "::1")
+
+
+def archive_import_allowed() -> bool:
+    """Reiter nur lokal: nicht unter /mount/src UND Aufruf von localhost."""
+    if is_public_deployment():
+        return False
+    try:
+        host = st.context.headers.get("Host")
+    except Exception:  # ohne Laufzeit/Kontext: verborgen
+        return False
+    return is_local_request(host)
 ```
 
 - [ ] **Schritt 4: `_reference_dialog` erweitern**
@@ -1582,7 +1817,7 @@ Liste und die `with`-Blöcke durch:
         "Launch Archive ({})".format(len(load_archive(ARCHIVE_CSV))),
         "Sea Launches ({})".format(len(load_sea_launches(SEA_LAUNCH_CSV))),
     ]
-    mit_import = not is_public_deployment()
+    mit_import = archive_import_allowed()
     if mit_import:
         titel.append("Archive Import")
     reiter = st.tabs(titel)
@@ -1636,7 +1871,12 @@ def _archive_import_tab(
         los = st.form_submit_button("Import", type="primary")
     if los:
         bericht = ai.ingest(korpus, [(d.name, d.getvalue()) for d in dateien or []], text or "")
-        bericht.tage_ausgewertet = ai.reevaluate(korpus, zustand, spaceports, firs)
+        balken = st.progress(0.0, text="Analysing days …")
+        bericht.tage_ausgewertet = ai.reevaluate(
+            korpus, zustand, spaceports, firs,
+            fortschritt=lambda n, g: balken.progress(n / g, text="Analysing day {} of {}".format(n, g)),
+        )
+        balken.empty()
         ai.save_korpus(korpus)
         ai.save_state(zustand)
         st.session_state["archiv_import_bericht"] = bericht
@@ -1652,6 +1892,39 @@ def _archive_import_tab(
         )
         for fehler in bericht.fehler:
             st.warning(fehler)
+
+    if ai.is_stale(zustand):
+        st.warning(
+            "NOLA's detection changed since the last analysis ({} days). Re-analyse "
+            "them so the candidates reflect the current rules.".format(len(zustand["tage"]))
+        )
+        if st.button("Re-analyse all days"):
+            balken = st.progress(0.0)
+            ai.reevaluate(
+                korpus, zustand, spaceports, firs, alle=True,
+                fortschritt=lambda n, g: balken.progress(n / g, text="Day {} of {}".format(n, g)),
+            )
+            ai.save_state(zustand)
+            st.rerun(scope="app")
+
+    waisen = ai.orphans(zustand)
+    if waisen:
+        st.subheader("No longer recognised ({})".format(len(waisen)))
+        st.caption(
+            "Confirmed launches whose NOTAMs no longer form a launch with the current "
+            "detection. They are still in the archive until you decide."
+        )
+        for key, e in waisen[:40]:
+            a, b, c = st.columns([3, 1, 1])
+            a.text("{} · {} · {}".format(key, e.get("rakete", ""), e.get("payload", "")))
+            if b.button("Keep", key="ai_keep_" + key):
+                ai.keep_orphan(zustand, key)
+                ai.save_state(zustand)
+                st.rerun(scope="app")
+            if c.button("Remove from archive", key="ai_rm_" + key):
+                ai.remove_orphan(zustand, key)
+                ai.save_state(zustand)
+                st.rerun(scope="app")
 
     links, rechts = st.columns([3, 1])
     gcat, gcat_status = ai.load_gcat(refresh=rechts.button("Refresh launch list"))
@@ -1828,7 +2101,8 @@ Erwartet: `ERGEBNIS: ALLE TESTS BESTANDEN`. Neue Testzahl notieren:
     (Stapelimport von NSF-Seiten, Tagesbündel, GCAT-Vorschläge, Sammelbestätigung, USA
     ausgenommen, lokal). Unter „Bekannte Grenzen": NSF nicht automatisch abrufbar
     (Cloudflare), kopierter Text kann zitierte NOTAMs enthalten (entdoppelt, aber nicht
-    erkannt).
+    erkannt), zwei gleichzeitig offene Tabs können sich beim Schreiben des Archivs
+    überschreiben.
   - `README.md`: kurzer Abschnitt „Archive Import" mit Ablauf in vier Schritten (Seiten
     speichern → hochladen → eindeutige bestätigen → Prüfliste) und GCAT-Quellenvermerk.
 
@@ -1854,12 +2128,15 @@ Erwartet: `ERGEBNIS: ALLE TESTS BESTANDEN`. Neue Testzahl notieren:
 | NOTAMR/NOTAMC wie im Tagesbetrieb | 3 (Durchreichen an `analyze_notams`, keine eigene Logik) |
 | GCAT-Cache, Knopf, Quellenvermerk, `.gitignore` | 2, 4, 7 |
 | `gcat_startplaetze.csv`, Hinweis bei unbekanntem Platz | 4, 5 |
+| Trägerlücken: `gcat_traegersysteme.csv`, Vorschlag neuer Träger mit Freigabe (Stresstest) | 5 |
 | Paarung ±30 min, nur Tagesdatum, Seestart, kein Flug | 5 |
 | Abweichung > 10°, Nation, keine Übernahme von Bahnwerten | 5 |
 | Bedienung: Mehrfach-Upload, Bericht, Jahrestabelle, Sammel- und Einzelbestätigung, Rakete gegen Referenz, Prüfliste | 7 |
 | Bestätigen trotz `archiv_removed` | 6 |
 | Wiederaufnahme, „aktualisiert" ersetzt die alte Zeile | 6 |
-| Reiter in der öffentlichen Fassung ausgeblendet | 7 |
+| Erkennungsstand, Neuauswertung nach Klick, „No longer recognised" (Stresstest) | 6, 7 |
+| Nachlauf über Mitternacht, keine Doppelzählung (Stresstest) | 3, 6 |
+| Reiter in der öffentlichen Fassung ausgeblendet, fail-closed über Host-Header (Stresstest) | 7 |
 | Speicherung lokal, atomar, unlesbare JSON bleibt unangetastet | 2 |
 | Code-Aufbau: eigenes Modul, kein Zirkelimport | 1, 7 |
 | Sicherheit: nur lesen, kein `unsafe_allow_html`, Größengrenzen, feste URL | 1, 2, 4, 7 |
@@ -1956,3 +2233,57 @@ Geprüft werden muss dabei:
 Das ändert die Semantik von `merge_archive` und ist deshalb eine Entscheidung des Benutzers,
 keine Nacharbeit. Bis sie getroffen ist, bleibt der Defekt bestehen — benannt im Docstring
 von `archive_key` und in `STATUS.md`.
+
+## Ergebnisse des Gegentests: Archiv-Import
+
+Durchgeführt am 05.10.2026. Jeder Befund wurde am Code nachgestellt oder gemessen, bevor er
+vorgelegt wurde. Die Plan-Tests der Aufgaben 1–6 laufen im Scratchpad gegen die echte
+Erkennung. Offen ist dort nur der `.gitignore`-Test, den erst die Umsetzung erfüllt.
+
+### Entscheidungen
+- **Start über Mitternacht (UTC):** Nachgewiesen war, dass ein Start mit Zonen am 19.09. 23:50
+  und 20.09. 00:02 nur mit einer Zone im Archiv gelandet wäre. Lösung: Ein Tagesbündel hat
+  einen Nachlauf bis 06:00 UTC des Folgetags (`BUNDLE_TAIL`). Angenommen.
+- **Laufzeit und Neuauswertung:** Gemessen wurden 0,02–0,2 s je Tagesbündel, also 1–2 Minuten
+  für eine volle Auswertung. Die Lücke: Nach einer Änderung an NOLA wären alte Tage nie neu
+  ausgewertet worden. Lösung: Ein Erkennungsstand (Hash über `app.py` und drei Referenzen)
+  löst einen Hinweis aus, neu ausgewertet wird erst nach Klick, mit Fortschrittsbalken.
+  Bestätigte Starts, die nicht mehr erkannt werden, erscheinen unter „No longer recognised"
+  mit „Keep" oder „Remove". Gelöscht wird nie automatisch. Geändert.
+- **Öffentliche Fassung:** Die Ausschlussliste über `/mount/src` hätte fail-open reagiert.
+  Lösung: fail-closed. Der Reiter erscheint nur ohne `/mount/src` **und** bei Host
+  `localhost`, `127.0.0.1` oder `[::1]`. Geändert.
+- **Trägerlücken:** 60 von 624 GCAT-Starts hätten kein Trägersystem bekommen. Lösung:
+  Schreibweisen über `gcat_traegersysteme.csv`, 13 fehlende Träger als Vorschlag für
+  `traegersysteme_updated.csv`, übernommen nur nach Freigabe. Angenommen.
+
+### Änderungen
+- Aufgabe 3: `BUNDLE_TAIL`. US- und ausgeblendete Fälle zählen nur im Bündel ihres eigenen
+  Tages. Ohne diese Korrektur hätte der Nachlauf sie doppelt gezählt, und das betraf vorher
+  schon mehrtägige Meldungen.
+- Aufgabe 3: US-Testfälle an die echte Logik angepasst. Ohne Beleg in einer US-FIR gilt der
+  Fall als US-Start und wird gezählt. In einer unbekannten FIR gehört er laut Spec auf die
+  Prüfliste.
+- Aufgabe 5: `gcat_traegersysteme.csv`, `load_gcat_vehicle_aliases`, Vorschlagsliste mit
+  Freigabeschritt.
+- Aufgabe 6: `detection_stamp`, `is_stale`, `reevaluate(alle, fortschritt)`, `orphans`,
+  `keep_orphan`, `remove_orphan`, dazu Tests für Mitternacht und verwaiste Starts.
+- Aufgabe 7: `is_local_request`, `archive_import_allowed`, Hinweis „Re-analyse", Liste
+  „No longer recognised", Fortschrittsbalken.
+- Spec entsprechend nachgezogen.
+
+### Zurückgestellt
+- **Zwei Browser-Tabs gleichzeitig:** Tagesbetrieb und Import schreiben beide
+  `startarchiv_updated.csv`, jeweils als Lesen-Ändern-Schreiben. Bei einem Benutzer und einem
+  Tab tritt kein Konflikt auf. Bei zwei parallel offenen Tabs könnte eine Änderung verloren
+  gehen. Bewusst nicht abgesichert (kein Dateisperrmechanismus im Projekt); unter „Bekannte
+  Grenzen" in `STATUS.md` aufnehmen.
+- **Echte NSF-Seite als Testfixture:** Die HTML-Extraktion ist nur gegen nachgebautes
+  SMF-Markup geprüft. Sobald eine Seite gespeichert ist, als Fixture ergänzen. Steht schon
+  unter „Offene Punkte" in Aufgabe 8.
+
+### Einschätzung
+- Gesamt: **hoch.** Die Kernlogik ist im Probelauf gegen die echte Erkennung und die echte
+  GCAT-Liste bestätigt; der Start vom 20.09. paart eindeutig mit `2026-220`.
+- Bedenken: Die HTML-Struktur der echten NSF-Seiten ist noch unbestätigt. Die Oberfläche
+  (Aufgabe 7) ist erst nach der Umsetzung in der App prüfbar.
