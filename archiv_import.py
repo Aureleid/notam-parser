@@ -871,3 +871,273 @@ def vehicle_code_for(
     if alias:
         return alias if alias in codes else ""
     return _vehicle_name_lookup(vehicles).get(basis, "")
+
+
+# --------------------------------------------------------------------------- #
+# Importzustand
+# --------------------------------------------------------------------------- #
+_STATE_TYPEN = (
+    ("tage", dict),
+    ("entscheidungen", dict),
+    ("review_bestaetigt", list),
+    ("review_ausgeblendet", list),
+)
+
+
+def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
+    """
+    Liest den Importzustand. Wie load_korpus: eine Datei mit unerwarteter
+    Struktur bricht ab (ImportStateError) und wird nie ueberschrieben.
+    """
+    data = read_json(path)
+    for name, typ in _STATE_TYPEN:
+        if name in data and not isinstance(data[name], typ):
+            raise ImportStateError(
+                "{} has an unexpected structure ({} is not a {}). It is left untouched - "
+                "please check it.".format(path.name, name, typ.__name__)
+            )
+    return {
+        "version": 1,
+        "tage": data.get("tage", {}),
+        "entscheidungen": data.get("entscheidungen", {}),
+        "review_bestaetigt": list(data.get("review_bestaetigt", [])),
+        "review_ausgeblendet": list(data.get("review_ausgeblendet", [])),
+        "erkennungsstand": data.get("erkennungsstand", ""),
+    }
+
+
+def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
+    write_json_atomic(path, state)
+
+
+def detection_stamp(
+    paths: Sequence[Path] = (
+        app.APP_DIR / "app.py", app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV
+    ),
+) -> str:
+    """Erkennungsstand: aendert sich mit der Pipeline oder einer ihrer Referenzen."""
+    h = hashlib.sha256()
+    for path in paths:
+        h.update(path.name.encode("utf-8"))
+        h.update(path.read_bytes() if path.exists() else b"-")
+    return h.hexdigest()[:16]
+
+
+def is_stale(state: Dict[str, Any], stamp: Optional[str] = None) -> bool:
+    """Wurde zuletzt mit einem anderen Erkennungsstand ausgewertet?"""
+    return bool(state["tage"]) and state.get("erkennungsstand") != (stamp or detection_stamp())
+
+
+def reevaluate(
+    korpus: Dict[str, KorpusNotam],
+    state: Dict[str, Any],
+    spaceports: pd.DataFrame,
+    firs: pd.DataFrame,
+    erzwingen: Iterable[str] = (),
+    alle: bool = False,
+    fortschritt: Optional[Any] = None,
+) -> int:
+    """
+    Wertet Tage neu aus, deren NOTAM-Bestand sich geaendert hat, die erzwungen
+    sind, oder - mit alle=True - jeden Tag. Nur ein vollstaendiger Lauf (oder
+    der allererste) setzt den Erkennungsstand; nach einem Teillauf mit neuem
+    Code bleibt der Hinweis auf die faellige Neuauswertung also stehen.
+    `fortschritt(erledigt, gesamt)` wird je Tag aufgerufen.
+    """
+    erzwingen = set(erzwingen)
+    bestaetigt = set(state["review_bestaetigt"])
+    ausgeblendet = set(state["review_ausgeblendet"])
+    erster_lauf = not state["tage"]
+    buendel = sorted(bundle_days(korpus).items())
+    neu = 0
+    for nr, (tag, notams) in enumerate(buendel, 1):
+        if fortschritt is not None:
+            fortschritt(nr, len(buendel))
+        iso = tag.isoformat()
+        fp = day_fingerprint(notams)
+        alt = state["tage"].get(iso)
+        if alt and alt.get("fingerprint") == fp and iso not in erzwingen and not alle:
+            continue
+        ergebnis = analyze_day(tag, notams, spaceports, firs, bestaetigt, ausgeblendet)
+        state["tage"][iso] = {
+            "fingerprint": fp,
+            "kandidaten": ergebnis.kandidaten,
+            "pruefliste": ergebnis.pruefliste,
+            "usa": ergebnis.usa,
+            "ausgeblendet": ergebnis.ausgeblendet,
+        }
+        neu += 1
+    if alle or erster_lauf:
+        state["erkennungsstand"] = detection_stamp()
+    return neu
+
+
+def orphans(state: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    Bestaetigte Starts, von deren NOTAMs keiner mehr in einem Kandidaten steht.
+
+    Nach einer Neuauswertung mit geaenderter Erkennung belegt NOLA solche
+    Archivzeilen nicht mehr. Geloescht wird nie automatisch - der Benutzer
+    entscheidet (keep_orphan / remove_orphan).
+    """
+    aktuelle_ids = {
+        i for t in state["tage"].values() for k in t["kandidaten"] for i in k["notam_ids"]
+    }
+    return [
+        (key, e)
+        for key, e in sorted(state["entscheidungen"].items())
+        if e.get("status") == "confirmed"
+        and not e.get("behalten")
+        and not set(e.get("notam_ids", [])) & aktuelle_ids
+    ]
+
+
+def keep_orphan(state: Dict[str, Any], key: str) -> None:
+    state["entscheidungen"][key]["behalten"] = True
+
+
+def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CSV) -> None:
+    """Die einzige Stelle, an der der Import eine Archivzeile loescht - nur auf Anweisung."""
+    bestand = app.load_archive(archiv)
+    if not bestand.empty:
+        bestand = bestand[
+            [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
+        ].reset_index(drop=True)
+        app.persist_archive(archiv, bestand)
+    state["entscheidungen"][key] = {"status": "removed"}
+
+
+def candidates(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Alle Kandidaten, je Schluessel einmal, mit Entscheidung und Ersatzvermerk."""
+    entscheidungen = state["entscheidungen"]
+    bestaetigte_ids = {
+        key: set(e.get("notam_ids", []))
+        for key, e in entscheidungen.items()
+        if e.get("status") == "confirmed"
+    }
+    gesehen: Dict[str, Dict[str, Any]] = {}
+    alle = [k for iso in sorted(state["tage"]) for k in state["tage"][iso]["kandidaten"]]
+    # Bruchstuecke (Nachlauf ueber Mitternacht, mehrtaegige Meldungen) verwerfen,
+    # siehe drop_subsumed.
+    for k in drop_subsumed(alle):
+        if k["key"] in gesehen:
+            continue
+        eintrag = dict(k)
+        eintrag["entscheidung"] = entscheidungen.get(k["key"])
+        eintrag["ersetzt"] = None
+        if eintrag["entscheidung"] is None:
+            for alt_key, ids in bestaetigte_ids.items():
+                if alt_key != k["key"] and ids & set(k["notam_ids"]):
+                    eintrag["ersetzt"] = alt_key
+                    break
+        gesehen[k["key"]] = eintrag
+    return list(gesehen.values())
+
+
+def review_items(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Offene Prueffaelle, je NOTAM einmal (mehrtaegige stehen sonst mehrfach da)."""
+    ausgeblendet = set(state["review_ausgeblendet"])
+    bestaetigt = set(state["review_bestaetigt"])
+    gesehen: Dict[str, Dict[str, Any]] = {}
+    for iso in sorted(state["tage"]):
+        for p in state["tage"][iso]["pruefliste"]:
+            if p["event_key"] in ausgeblendet or p["schluessel"] in gesehen:
+                continue
+            # Bestaetigt, aber ohne Startplatz zurueckgekommen: bleibt sichtbar.
+            if p["event_key"] in bestaetigt and p["grund"] != GRUND_OHNE_PLATZ:
+                continue
+            gesehen[p["schluessel"]] = p
+    return list(gesehen.values())
+
+
+def totals(state: Dict[str, Any]) -> Dict[str, int]:
+    return {
+        "usa": sum(t.get("usa", 0) for t in state["tage"].values()),
+        "ausgeblendet": sum(t.get("ausgeblendet", 0) for t in state["tage"].values()),
+    }
+
+
+def confirm_many(
+    state: Dict[str, Any],
+    auswahl: Sequence[Tuple[Dict[str, Any], str, str, Optional[GcatStart]]],
+    archiv: Path = app.ARCHIVE_CSV,
+) -> int:
+    """
+    Schreibt bestaetigte Kandidaten ins Startarchiv - in einem Schreibvorgang.
+
+    Bestaetigen ist eine ausdrueckliche Handlung: ein frueher im Optionsmenue
+    entfernter Schluessel wird deshalb nicht gefiltert (entfernt=set()).
+    Ein 'aktualisierter' Kandidat ersetzt die Zeile seines Vorgaengers.
+    """
+    if not auswahl:
+        return 0
+    bestand = app.load_archive(archiv)
+    ersetzt = {k["ersetzt"] for k, _, _, _ in auswahl if k.get("ersetzt")}
+    if ersetzt and not bestand.empty:
+        bestand = bestand[
+            [app.archive_key(dict(r)) not in ersetzt for _, r in bestand.iterrows()]
+        ].reset_index(drop=True)
+    zeilen = []
+    for kand, rakete, payload, treffer in auswahl:
+        row = dict(kand["row"])
+        row["Trägersystem"] = rakete
+        row["Payload"] = payload
+        zeilen.append(row)
+        state["entscheidungen"][kand["key"]] = {
+            "status": "confirmed",
+            "rakete": rakete,
+            "payload": payload,
+            "gcat": treffer.tag if treffer else "",
+            "notam_ids": list(kand["notam_ids"]),
+            "quellen": list(kand["quellen"]),
+        }
+        if kand.get("ersetzt"):
+            state["entscheidungen"][kand["ersetzt"]] = {"status": "replaced", "durch": kand["key"]}
+    app.persist_archive(archiv, app.merge_archive(bestand, zeilen, entfernt=set()))
+    return len(zeilen)
+
+
+def reject(state: Dict[str, Any], key: str) -> None:
+    state["entscheidungen"][key] = {"status": "discarded"}
+
+
+def bulk_candidates(
+    kandidaten: Sequence[Dict[str, Any]],
+    gcat: Optional[List[GcatStart]],
+    sites: Dict[str, Tuple[List[str], str]],
+    vehicles: pd.DataFrame,
+) -> List[Tuple[Dict[str, Any], str, str, GcatStart]]:
+    """Nur unentschiedene, eindeutige Kandidaten ohne Warnung und ohne Ersatzvermerk."""
+    auswahl = []
+    for k in kandidaten:
+        if k["entscheidung"] is not None or k["ersetzt"]:
+            continue
+        abgleich = match_candidate(k, gcat, sites)
+        if abgleich.status != STATUS_EINDEUTIG or abgleich.warnungen:
+            continue
+        s = abgleich.treffer[0]
+        auswahl.append((k, vehicle_code_for(s.rakete, vehicles), s.nutzlast, s))
+    return auswahl
+
+
+def review_launch(
+    state: Dict[str, Any],
+    korpus: Dict[str, KorpusNotam],
+    event_key: str,
+    tag_iso: str,
+    spaceports: pd.DataFrame,
+    firs: pd.DataFrame,
+) -> None:
+    """'Space Launch' aus der Pruefliste: der Tag wird mit der Bestaetigung neu ausgewertet."""
+    if event_key not in state["review_bestaetigt"]:
+        state["review_bestaetigt"].append(event_key)
+    reevaluate(korpus, state, spaceports, firs, erzwingen=[tag_iso])
+
+
+def review_hide(state: Dict[str, Any], event_key: str) -> None:
+    if event_key not in state["review_ausgeblendet"]:
+        state["review_ausgeblendet"].append(event_key)
+    for tag in state["tage"].values():
+        vorher = len(tag["pruefliste"])
+        tag["pruefliste"] = [p for p in tag["pruefliste"] if p["event_key"] != event_key]
+        tag["ausgeblendet"] = tag.get("ausgeblendet", 0) + (vorher - len(tag["pruefliste"]))

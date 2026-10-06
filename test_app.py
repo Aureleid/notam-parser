@@ -3489,6 +3489,154 @@ except Exception as exc:
 check("kaputte Alias-CSV: ImportStateError mit Datei und Spalte",
       _fehler is not None and "alias_kaputt.csv" in _fehler and "Abkürzung" in _fehler, _fehler)
 
+# Aufgabe 6: Importzustand, Wiederaufnahme, Bestaetigen, Sammelbestaetigung
+zst = ai.load_state(_tmp / "s.json")
+kx = {}
+ai.merge_korpus(kx, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG]), "seite1.html#msg_1")[0])
+check("Neuauswertung: zwei Tage (20.09. und Nachlauf im 19.09.)", ai.reevaluate(kx, zst, sp, fir) == 2)
+_stand_json = _json.dumps(zst, sort_keys=True, default=str)
+check("  ... zweiter Lauf wertet nichts neu aus", ai.reevaluate(kx, zst, sp, fir) == 0)
+check("  ... und aendert den Zustand nicht", _json.dumps(zst, sort_keys=True, default=str) == _stand_json)
+kl = ai.candidates(zst)
+check("Kandidatenliste: ein Start", len(kl) == 1 and kl[0]["entscheidung"] is None, kl)
+check("  ... US gezaehlt", ai.totals(zst)["usa"] == 1, ai.totals(zst))
+sammel = ai.bulk_candidates(kl, gs, sites, veh)
+check("Sammelbestaetigung waehlt den eindeutigen", [(k["key"], r, p) for k, r, p, _ in sammel]
+      == [(kl[0]["key"], "CZ-2D", "Yaogan 45")], [(r, p) for _, r, p, _ in sammel])
+check("  ... nicht mit Warnung", ai.bulk_candidates([dict(kl[0], inklination=60.0)], gs, sites, veh) == [])
+check("  ... nicht mehrdeutig", ai.bulk_candidates(kl, [_treffer0, _zweit], sites, veh) == [])
+archiv_t = _tmp / "archiv.csv"
+check("Bestaetigen schreibt eine Zeile", ai.confirm_many(zst, sammel, archiv_t) == 1)
+a1 = app.load_archive(archiv_t)
+check("  ... mit Rakete und Payload", (a1.iloc[0]["Trägersystem"], a1.iloc[0]["Payload"]) == ("CZ-2D", "Yaogan 45"),
+      a1.iloc[0].to_dict())
+check("  ... Quelle im Nebenbestand", zst["entscheidungen"][kl[0]["key"]]["quellen"] == ["seite1.html#msg_1"])
+check("  ... danach nicht mehr in der Sammelauswahl", ai.bulk_candidates(ai.candidates(zst), gs, sites, veh) == [])
+ai.save_state(zst, _tmp / "s.json")
+check("Zustand speichern und laden", ai.load_state(_tmp / "s.json")["entscheidungen"] == zst["entscheidungen"])
+check("leere Auswahl schreibt nichts", ai.confirm_many(zst, [], _tmp / "nie.csv") == 0 and not (_tmp / "nie.csv").exists())
+
+# Kaputte Zustandsdatei (gueltiges JSON, falsche Typen): Abbruch, Datei bleibt unberuehrt
+for _nm, _inhalt in (("st_a.json", '{"tage": []}'), ("st_b.json", '{"entscheidungen": 5}'),
+                     ("st_c.json", '{"review_bestaetigt": "abc"}'), ("st_d.json", '{"review_ausgeblendet": {"x": 1}}')):
+    (_tmp / _nm).write_text(_inhalt, encoding="utf-8")
+    try:
+        ai.load_state(_tmp / _nm)
+        check("Zustand mit kaputter Struktur bricht ab: " + _inhalt, False)
+    except ai.ImportStateError as _e:
+        check("Zustand mit kaputter Struktur bricht ab: " + _inhalt,
+              _nm in str(_e) and (_tmp / _nm).read_text(encoding="utf-8") == _inhalt, str(_e))
+    except Exception as _e:
+        check("Zustand mit kaputter Struktur bricht ab: " + _inhalt, False, repr(_e))
+
+# Eine weitere Zone desselben Starts kommt spaeter dazu -> aktualisiert, ersetzt die alte Zeile
+dritte = AI_CN[2].replace("A4632/26", "A4640/26").replace(
+    "N293700E0980200-N293400E0983400-N284400E0982700-N284800E0975500",
+    "N281000E0974500-N280800E0981500-N274000E0981000-N274200E0974000")
+ai.merge_korpus(kx, ai.extract_notams(dritte, "seite2.html#msg_9")[0])
+ai.reevaluate(kx, zst, sp, fir)
+neu_k = [k for k in ai.candidates(zst) if k["entscheidung"] is None]
+check("weitere Zone: Kandidat 'aktualisiert'",
+      len(neu_k) == 1 and neu_k[0]["ersetzt"] == kl[0]["key"], [(k["key"], k["ersetzt"]) for k in neu_k])
+check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(neu_k, gs, sites, veh) == [])
+ai.confirm_many(zst, [(neu_k[0], "CZ-2D", "Yaogan 45", None)], archiv_t)
+a2 = app.load_archive(archiv_t)
+check("  ... ersetzt die alte Archivzeile statt einer zweiten", len(a2) == 1 and "A4640/26" in a2.iloc[0]["NOTAM"],
+      a2["NOTAM"].tolist())
+check("  ... alter Schluessel als ersetzt vermerkt",
+      zst["entscheidungen"][kl[0]["key"]] == {"status": "replaced", "durch": neu_k[0]["key"]})
+
+# Bestaetigen wirkt auch fuer einen frueher entfernten Schluessel
+check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8"))
+
+# Verwerfen
+zr = ai.load_state(_tmp / "r.json")
+ai.reevaluate(kx, zr, sp, fir)
+_kr = ai.candidates(zr)[0]["key"]
+ai.reject(zr, _kr)
+check("Verwerfen: Entscheidung gesetzt, nicht in der Sammelauswahl",
+      ai.candidates(zr)[0]["entscheidung"] == {"status": "discarded"}
+      and ai.bulk_candidates(ai.candidates(zr), gs, sites, veh) == [])
+
+MITTERNACHT = [AI_CN[1].replace("B)2609200354 C)2609200415", "B)2609192350 C)2609200011"),
+               AI_CN[2].replace("B)2609200356 C)2609200435", "B)2609200002 C)2609200041")]
+km = {}
+ai.merge_korpus(km, ai.extract_notams("\n\n".join(MITTERNACHT), "m")[0])
+zm = ai.load_state(_tmp / "m.json")
+ai.reevaluate(km, zm, sp, fir)
+check("Start ueber Mitternacht: ein Kandidat mit beiden Zonen",
+      [k["notam_ids"] for k in ai.candidates(zm)] == [["A4631/26", "A4632/26"]],
+      [k["notam_ids"] for k in ai.candidates(zm)])
+check("  ... mit dem Datum des ersten Tages",
+      ai.candidates(zm)[0]["row"]["Startdatum"] == "19.09.2026")
+# Bruchstueck aus einem anderen Tag wird ueber drop_subsumed verworfen
+_kmn = ai.candidates(zm)[0]
+zm2 = {"tage": {"2026-09-19": {"kandidaten": [dict(_kmn, notam_ids=["A1/26", "A2/26"], key="v1")]},
+                "2026-09-20": {"kandidaten": [dict(_kmn, notam_ids=["A2/26"], key="v2")]}},
+       "entscheidungen": {}}
+check("candidates: Bruchstueck verworfen", [k["key"] for k in ai.candidates(zm2)] == ["v1"],
+      [k["key"] for k in ai.candidates(zm2)])
+
+# Erkennungsstand und nicht mehr erkannte Starts
+check("Erkennungsstand nach dem ersten Lauf gesetzt", not ai.is_stale(zst), zst.get("erkennungsstand"))
+check("  ... anderer Stand -> Neuauswertung faellig", ai.is_stale(zst, stamp="anders"))
+check("  ... leerer Zustand ist nie veraltet", not ai.is_stale(ai.load_state(_tmp / "leer.json"), stamp="anders"))
+_ref = _tmp / "ref.csv"
+_ref.write_text("a", encoding="utf-8")
+_st1 = ai.detection_stamp([_ref])
+_ref.write_text("b", encoding="utf-8")
+check("Erkennungsstand folgt dem Inhalt der Referenzen", ai.detection_stamp([_ref]) != _st1)
+zst["erkennungsstand"] = "alt"
+ai.reevaluate(kx, zst, sp, fir, erzwingen=["2026-09-20"])
+check("  ... Teillauf setzt ihn nicht", zst["erkennungsstand"] == "alt")
+_schritte = []
+check("alle Tage neu ausgewertet", ai.reevaluate(kx, zst, sp, fir, alle=True,
+      fortschritt=lambda n, g: _schritte.append((n, g))) == len(_schritte) and _schritte[-1][0] == _schritte[-1][1],
+      _schritte)
+check("  ... vollstaendiger Lauf setzt ihn", not ai.is_stale(zst), zst["erkennungsstand"])
+check("keine verwaisten Starts, solange sie erkannt werden", ai.orphans(zst) == [], ai.orphans(zst))
+_tage_vorher = zst["tage"]
+zst["tage"] = {iso: dict(t, kandidaten=[]) for iso, t in _tage_vorher.items()}
+_waisen = ai.orphans(zst)
+check("nicht mehr erkannt -> 'No longer recognised'", [k for k, _ in _waisen] == [neu_k[0]["key"]], _waisen)
+check("  ... Archiv bleibt ohne Entscheidung unberuehrt", len(app.load_archive(archiv_t)) == 1)
+ai.keep_orphan(zst, neu_k[0]["key"])
+check("  ... Keep nimmt ihn von der Liste, Archiv bleibt", ai.orphans(zst) == [] and len(app.load_archive(archiv_t)) == 1)
+zst["entscheidungen"][neu_k[0]["key"]].pop("behalten")
+ai.remove_orphan(zst, neu_k[0]["key"], archiv_t)
+check("  ... Remove loescht die Archivzeile", app.load_archive(archiv_t).empty)
+check("  ... und vermerkt es", zst["entscheidungen"][neu_k[0]["key"]] == {"status": "removed"})
+zst["tage"] = _tage_vorher
+
+# Pruefliste: reine Zustandsfunktionen, mit einem synthetischen Tag geprueft
+zp = ai.load_state(_tmp / "p.json")
+_p = {"event_key": "ek1", "schluessel": "X1/26|2609200000", "notam_id": "X1/26", "tag": "2026-09-20",
+      "grund": "Foreign airspace without evidence.", "text": "X1/26 ...", "quellen": ["p"]}
+zp["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [], "pruefliste": [_p], "usa": 0, "ausgeblendet": 0}
+zp["tage"]["2026-09-21"] = {"fingerprint": "g", "kandidaten": [], "pruefliste": [dict(_p, tag="2026-09-21")],
+                            "usa": 0, "ausgeblendet": 0}
+check("Pruefliste: mehrtaegiger Fall nur einmal", len(ai.review_items(zp)) == 1, ai.review_items(zp))
+zp["review_bestaetigt"].append("ek1")
+check("  ... bestaetigt verschwindet", ai.review_items(zp) == [])
+zp["tage"]["2026-09-20"]["pruefliste"] = [dict(_p, grund=ai.GRUND_OHNE_PLATZ)]
+check("  ... bestaetigt ohne Startplatz bleibt sichtbar", len(ai.review_items(zp)) == 1)
+ai.review_hide(zp, "ek1")
+check("  ... Ausblenden entfernt ihn", ai.review_items(zp) == [], ai.review_items(zp))
+check("  ... und zaehlt ihn als ausgeblendet", ai.totals(zp)["ausgeblendet"] == 2, ai.totals(zp))
+
+# Space Launch aus der Pruefliste: Bestaetigung gemerkt, Tag erzwungen neu ausgewertet
+zl = ai.load_state(_tmp / "l.json")
+ai.reevaluate(kx, zl, sp, fir)
+zl["tage"]["2026-09-20"]["kandidaten"] = []
+ai.review_launch(zl, kx, "ek9", "2026-09-20", sp, fir)
+check("Space Launch: Bestaetigung gemerkt, Tag trotz gleichem Fingerabdruck neu ausgewertet",
+      zl["review_bestaetigt"] == ["ek9"] and len(zl["tage"]["2026-09-20"]["kandidaten"]) == 1,
+      (zl["review_bestaetigt"], zl["tage"]["2026-09-20"]["kandidaten"]))
+
+quelle_ai = (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8")
+check("Archiv-Import fasst die Tageslage nicht an",
+      all(w not in quelle_ai for w in ("manual_notams", "WORKSPACE_FILE", "save_workspace", "session_state")))
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
