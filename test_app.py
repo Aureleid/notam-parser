@@ -5168,6 +5168,24 @@ finally:
 check("Pasted: leere Liste zeichnet nichts", _s4.aufrufe("expander") == [])
 check("Pasted: Eintraege werden nicht veraendert", _eintraege == _eintraege_kopie)
 
+import glob as _gv
+_fns_v = sorted(_gv.glob(str(_Pv(app.APP_DIR) / "fnsNotams_*.xls")))
+if _fns_v:
+    _df_v = app.read_notam_table(_fns_v[-1], _fns_v[-1])
+    _ev_v, _st_v = app.analyze_notams(_df_v, sp, fir, min_confidence="MEDIUM")
+    _gr_v = [g for g in _st_v["groups"] if g.spaceport_code]
+    _keys_v = {app.archive_key(app.archive_row(g, _ev_v)) for g in _gr_v}
+    _enden = [app.latest_end([e for e in _ev_v if e.row_index in g.row_indices]) for g in _gr_v]
+    _enden = [x for x in _enden if x is not None]
+    _spaet = max(_enden) + _td(days=30)
+    _frueh = min(_enden) - _td(days=30)
+    _alle = app.past_launch_rows(_st_v["groups"], _ev_v, _keys_v, _spaet)
+    check("Echtbestand: spaeter Zeitpunkt -> archivierte Starts vergangen", len(_alle) > 0, len(_alle))
+    check("Echtbestand: frueher Zeitpunkt -> nichts vergangen",
+          app.past_launch_rows(_st_v["groups"], _ev_v, _keys_v, _frueh) == set())
+else:
+    print("  SKIP  Echtbestand vergangene Starts (keine FNS-Datei)")
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
