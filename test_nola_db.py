@@ -68,6 +68,31 @@ except db.DbFehler as e:
     check("Breite -12.5 angenommen", False, e.ursache)
 db.ersetze_tabelle(_c, "startplaetze", _sp().iloc[0:0], None)
 
+def _fir(code):
+    zeile = {k: "x" for k in db.FACHTABELLEN["firs"]}
+    zeile.update({"ICAO Code": code, "Latitude": "32.1", "Longitude": "-106.2"})
+    return pd.DataFrame([zeile])
+try:
+    db.ersetze_tabelle(_c, "firs", _fir("ZAB"), None)
+    check("FIR-Code ZAB (3 Zeichen) angenommen", db.zaehle(_c, "firs") == 1)
+except db.DbFehler as e:
+    check("FIR-Code ZAB (3 Zeichen) angenommen", False, e.ursache)
+for _code in ("ZB", "ZBPEX"):
+    try:
+        db.ersetze_tabelle(_c, "firs", _fir(_code), None); check("FIR-Code " + _code + " abgelehnt", False)
+    except db.DbFehler as e:
+        check("FIR-Code " + _code + " abgelehnt", e.ursache == "constraint failed", e.ursache)
+db.ersetze_tabelle(_c, "firs", _fir("ZAB").iloc[0:0], None)
+_pfad_echt, _c_echt = neue_db()
+for _tab, _csv in [("startplaetze", app.SPACEPORT_CSV), ("firs", app.FIR_CSV), ("traegersysteme", app.VEHICLE_CSV)]:
+    _df = app._read_csv_any(_csv)[list(db.FACHTABELLEN[_tab])]
+    try:
+        db.ersetze_tabelle(_c_echt, _tab, _df, None)
+        check("Echtdaten " + _tab + ": Zeilenzahl gleich", db.zaehle(_c_echt, _tab) == len(_df), len(_df))
+    except db.DbFehler as e:
+        check("Echtdaten " + _tab + ": Zeilenzahl gleich", False, e.ursache)
+_c_echt.close()
+
 print("== 4. Lesen, Stand, Konflikt ==")
 _stand1 = db.ersetze_tabelle(_c, "startplaetze", _sp(), None)
 _df = db.lese_tabelle(_c, "startplaetze")

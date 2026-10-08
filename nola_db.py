@@ -182,7 +182,7 @@ CREATE TABLE archiv_import_review (
             "Longitude": _zahl("Longitude", -180, 180),
         }),
         fir=spalten("firs", {
-            "ICAO Code": "NOT NULL CHECK (length(trim(\"ICAO Code\")) = 4)",
+            "ICAO Code": "NOT NULL CHECK (length(trim(\"ICAO Code\")) BETWEEN 3 AND 4)",
             "Latitude": _zahl("Latitude", -90, 90), "Longitude": _zahl("Longitude", -180, 180),
         }),
         tr=spalten("traegersysteme", {"Abkürzung": _voll("Abkürzung"), "Name": _voll("Name")}),
