@@ -43,3 +43,9 @@ archiv_import.json
 gcat_launch_cache.tsv
 *.json.*.tmp
 gcat_launch_cache.tsv.*.tmp
+
+# Lokale Datenbank (WAL-Nebendateien, temporaere Umzugsdatei) und Export
+nola.db-wal
+nola.db-shm
+nola.db.*.tmp
+export/
