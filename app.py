@@ -2114,6 +2114,18 @@ def archive_import_allowed() -> bool:
     except Exception:  # ohne Laufzeit/Kontext: verborgen
         return False
     return import_gate(APP_DIR, host, peer_lokal)
+
+
+def local_admin_allowed() -> bool:
+    """Speicher-Aktionen (Wiederherstellen, Neuaufbau, Export): gleiche Freigabe wie der Archiv-Import."""
+    return archive_import_allowed()
+
+
+def server_address_is_loopback(adresse: Optional[str]) -> bool:
+    """Lauscht der Server nur auf dem eigenen Rechner? Leer/None heisst: alle Schnittstellen."""
+    return (adresse or "").strip().lower() in ("127.0.0.1", "localhost", "::1")
+
+
 #: Protokoll der Starts von beweglichen Seeplattformen. Wie das Archiv von der
 #: Anwendung geschrieben, nicht eingelesen.
 SEA_LAUNCH_CSV = APP_DIR / "seestarts_updated.csv"
@@ -6187,6 +6199,8 @@ def _reference_dialog(
                 "Undone: {}".format(zurueck) if zurueck else "Nothing to undo."
             )
         st.rerun(scope="app")
+    with a:
+        _export_knopf()
     b.download_button(
         "Download launch sites",
         data=reference_to_csv(spaceports, SPACEPORT_EXPORT_COLUMNS),
@@ -7268,6 +7282,102 @@ def _reference_status(label: str, tabelle: str) -> Tuple[Optional[pd.DataFrame],
     return df, "{} {}: {} entries".format(glyph(GLYPH_OK, COLOR_OK, 0.85), label, len(df))
 
 
+@st.cache_resource(show_spinner="Preparing the database ...")
+def _datenbank_bereit() -> Tuple["nola_umzug.Startzustand", str]:
+    """Einmal je Serverprozess: pruefen, umziehen oder zur Wahl stellen; dann Startsicherung."""
+    import nola_umzug  # erst hier - nola_umzug importiert app
+    if not DB_PATH.exists() and not is_public_deployment() and os.environ.get("NOLA_DB") != "1":
+        # Uebergangssperre bis Aufgabe 9: keine halbfertige Datenbank anlegen.
+        return nola_umzug.Startzustand(
+            "fehlgeschlagen", grund="Database not enabled yet \u2013 set NOLA_DB=1 to move the data."
+        ), ""
+    jetzt = datetime.now()
+    zustand = nola_umzug.stelle_bereit(DB_PATH, nola_umzug.altdateien_im(APP_DIR), BACKUP_DIR, jetzt)
+    warnung = ""
+    if zustand.art in ("bereit", "umgezogen") and not is_public_deployment():
+        try:
+            with _db() as conn:
+                nola_db.sichere(conn, BACKUP_DIR, jetzt)
+        except nola_db.DbFehler as exc:
+            warnung = "Backup at start failed: {}".format(exc)
+    return zustand, warnung
+
+
+def _taegliche_sicherung() -> Optional[str]:
+    """Beim ersten Durchlauf eines neuen Tages eine Sicherung; Fehler als Warnung zurueck."""
+    if is_public_deployment() or not nola_db.sicherung_faellig(BACKUP_DIR, datetime.now().date()):
+        return None
+    try:
+        with _db() as conn:
+            nola_db.sichere(conn, BACKUP_DIR, datetime.now())
+    except nola_db.DbFehler as exc:
+        return "Daily backup failed: {}".format(exc)
+    return None
+
+
+def _wiederherstellen_auswahl() -> None:
+    """nola.db fehlt, Sicherungen gibt es: nichts still neu aufbauen - der Benutzer waehlt."""
+    import nola_umzug
+    st.error("The database nola.db is missing. NOLA does not rebuild it silently.")
+    if not local_admin_allowed():
+        st.info("Restore is only possible on the local machine (http://localhost:8501).")
+        st.stop()
+    sicherungen = nola_db.liste_sicherungen(BACKUP_DIR)
+    zeilen = [(p,) + nola_db.pruefe_sicherung(p) for p in sicherungen]
+    heil = [i for i, (_, status, _z) in enumerate(zeilen) if status == "ok"]
+
+    def beschriftung(i: int) -> str:
+        p, status, z = zeilen[i]
+        if status == "in_cloud":
+            return "{} - in iCloud only, download it in Finder first".format(p.name)
+        if status != "ok":
+            return "{} - corrupt".format(p.name)
+        return "{} - {} archive rows, {} launch sites, {} pasted NOTAMs".format(
+            p.name, z["startarchiv"], z["startplaetze"], z["manuelle_notams"])
+
+    wahl = None
+    if zeilen:
+        wahl = st.radio("Backups", list(range(len(zeilen))), index=heil[0] if heil else 0,
+                        format_func=beschriftung)
+    else:
+        # zwischen Startentscheidung und Anzeige verschwunden - nur Neuaufbau bleibt
+        st.warning("No backups found in {}.".format(BACKUP_DIR))
+    a, b = st.columns(2)
+    if a.button("Restore backup", type="primary", disabled=wahl is None or zeilen[wahl][1] != "ok"):
+        try:
+            nola_db.stelle_wieder_her(zeilen[wahl][0], DB_PATH)
+        except nola_db.DbFehler as exc:
+            st.error(str(exc))
+            st.stop()
+        _datenbank_bereit.clear()
+        st.rerun()
+    if b.button("Rebuild from old files"):
+        try:
+            nola_umzug.umziehen(DB_PATH, nola_umzug.altdateien_im(APP_DIR))
+        except nola_umzug.UmzugFehler as exc:
+            st.error(str(exc))
+            st.stop()
+        _datenbank_bereit.clear()
+        st.rerun()
+    st.stop()
+
+
+def _export_knopf() -> None:
+    """Rueckweg: alle Tabellen in die bisherigen Formate (nur lokal)."""
+    if not local_admin_allowed():
+        return
+    if st.button("Export to files", use_container_width=True,
+                 help="Writes all tables in the old CSV/JSON formats to export/<time>/."):
+        import nola_umzug
+        ziel = APP_DIR / "export" / datetime.now().strftime("%Y-%m-%d-%H%M")
+        try:
+            nola_umzug.exportieren(DB_PATH, ziel)
+        except (nola_db.DbFehler, OSError) as exc:
+            st.error("Export failed: {}".format(exc))
+        else:
+            st.success("Exported to {}".format(ziel))
+
+
 def main() -> None:
     st.set_page_config(
         page_title="NOLA",
@@ -7276,7 +7386,37 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    _arbeitsstand_laden()
+    zustand, start_warnung = _datenbank_bereit()
+    if zustand.art == "fehlgeschlagen":
+        st.error(zustand.grund)
+        st.stop()
+    if zustand.art == "fehlt_mit_sicherungen":
+        _wiederherstellen_auswahl()
+    try:
+        with _db():
+            pass
+    except nola_db.DateiFehlt:
+        # Datei im Betrieb verschwunden - neu entscheiden, nie still leer anlegen.
+        _datenbank_bereit.clear()
+        st.rerun()
+    except nola_db.DbFehler as exc:
+        st.error(str(exc))
+        st.stop()
+    if zustand.art == "umgezogen" and not st.session_state.get("umzug_gemeldet"):
+        st.session_state["umzug_gemeldet"] = True
+        st.success("Data moved to nola.db ({}). The old files were left untouched.".format(
+            ", ".join("{} {}".format(v, k) for k, v in zustand.zaehlung.items())))
+    tages_warnung = _taegliche_sicherung()
+
+    try:
+        _arbeitsstand_laden()
+    except nola_db.DateiFehlt:
+        _datenbank_bereit.clear()
+        st.rerun()
+    except nola_db.DbFehler as exc:
+        # z. B. defekte Datenbank: Meldung statt Absturz der Seite
+        st.error(str(exc))
+        st.stop()
     st.session_state.setdefault("manual_feedback", None)
     st.session_state.setdefault("focus_rows", [])
     st.session_state.setdefault("goto_notam_data", False)
@@ -7305,6 +7445,11 @@ def main() -> None:
             key="ref_edit",
         ):
             st.session_state["ref_dialog_open"] = True
+        for warnung in (start_warnung, tages_warnung):
+            if warnung:
+                st.warning(warnung)
+        if not is_public_deployment() and not server_address_is_loopback(st.get_option("server.address")):
+            st.warning("NOLA is reachable from the network. Start it with --server.address 127.0.0.1.")
 
         spaceports, sp_msg = _reference_status("Weltraumbahnhoefe", "startplaetze")
         firs, fir_msg = _reference_status("ICAO FIR/ACC", "firs")

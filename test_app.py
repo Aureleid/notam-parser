@@ -5783,6 +5783,36 @@ finally:
 check("Fix3: Kommentar zum zweiten Konflikt in Folge",
       all("naechste Durchlauf" in _ins_n.getsource(f) for f in (app._update_archive, app._update_sea_launches)))
 
+print("== Lokale Datenbank: Start und Sicherheit ==")
+check("Loopback-Adressen", all(app.server_address_is_loopback(a) for a in ("127.0.0.1", "localhost", "::1")))
+check("keine Loopback-Adressen", not any(app.server_address_is_loopback(a) for a in (None, "", "0.0.0.0", "192.168.1.20")))
+check("Admin-Freigabe = Import-Freigabe", app.local_admin_allowed() == app.archive_import_allowed())
+_src_main = _ins_w.getsource(app.main)
+check("main nutzt _datenbank_bereit", "_datenbank_bereit()" in _src_main)
+check("main behandelt DateiFehlt", "DateiFehlt" in _src_main and "_datenbank_bereit.clear()" in _src_main)
+check("Wiederherstellen nur lokal", "local_admin_allowed()" in _ins_w.getsource(app._wiederherstellen_auswahl))
+check("Export nur lokal", "local_admin_allowed()" in _ins_w.getsource(app._export_knopf))
+check("Uebergangssperre NOLA_DB", "NOLA_DB" in _ins_w.getsource(app._datenbank_bereit))
+check("Netz-Hinweis nicht in der Cloud", "is_public_deployment()" in _src_main and "server_address_is_loopback(" in _src_main)
+_i_bereit = _src_main.find("_datenbank_bereit()")
+_i_laden = _src_main.find("_arbeitsstand_laden()")
+check("main: _datenbank_bereit vor _arbeitsstand_laden", 0 <= _i_bereit < _i_laden)
+check("main: DbFehler beim Laden des Arbeitsstands stoppt mit Meldung",
+      "except nola_db.DbFehler" in _src_main[_i_laden:] and "st.stop()" in _src_main[_i_laden:])
+_src_app_l = (app.APP_DIR / "app.py").read_text(encoding="utf-8")
+_dlg_l = _src_app_l[_src_app_l.find("def _reference_dialog("):]
+_dlg_l = _dlg_l[:_dlg_l.find("\ndef ", 1)]
+check("Export-Knopf im Optionsdialog unter dem Undo-Knopf",
+      "_export_knopf()" in _dlg_l and _dlg_l.find("Undo last change") < _dlg_l.find("_export_knopf()"))
+import json as _json_l
+_launch = app.APP_DIR / ".claude" / "launch.json"
+if _launch.exists():
+    _args = _json_l.loads(_launch.read_text(encoding="utf-8"))["configurations"][0]["runtimeArgs"]
+    check("launch.json bindet an 127.0.0.1", "--server.address" in _args
+          and _args[_args.index("--server.address") + 1] == "127.0.0.1")
+else:
+    print("  SKIP  launch.json (nicht vorhanden)")
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
