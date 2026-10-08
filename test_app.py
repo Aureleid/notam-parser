@@ -9,6 +9,29 @@ import nola_umzug as _um_db
 # die echte nola.db sperrt nola_db.verbinde unter NOLA_TEST.
 app.DB_PATH = _P_db(_tf_db.mkdtemp()) / "nola.db"
 _um_db.umziehen(app.DB_PATH, _um_db.altdateien_im(app.APP_DIR))
+import shutil as _sh_db
+
+
+def _temp_db(archiv_csv=None):
+    """
+    Eigene Temp-Datenbank: die drei Referenz-CSVs als Kopie, das Startarchiv
+    optional aus einer Temp-CSV (als startarchiv_updated.csv); ohne CSV leer.
+    """
+    _ordner = _P_db(_tf_db.mkdtemp())
+    for _p in (app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV):
+        _sh_db.copy(_p, _ordner / _p.name)
+    if archiv_csv is not None:
+        _sh_db.copy(archiv_csv, _ordner / app.ARCHIVE_CSV.name)
+    _ziel = _P_db(_tf_db.mkdtemp()) / "nola.db"
+    _um_db.umziehen(_ziel, _um_db.altdateien_im(_ordner))
+    return _ziel
+
+
+def _kaputte_db(name="kaputt.db"):
+    """Vorhandene, aber unlesbare Datenbankdatei (kein SQLite-Kopf)."""
+    _pfad = _P_db(_tf_db.mkdtemp()) / name
+    _pfad.write_bytes(b"Startdatum,NOTAM\n01.01.2026,A1/26\x00\x00\n")
+    return _pfad
 
 ok = True
 def check(label, cond, extra=""):
@@ -3048,7 +3071,7 @@ check("die Pad-Wahl greift vor Tabelle und Archiv",
       quelle_x.index("apply_launch_site_assignments(")
       < quelle_x.index("table = events_to_dataframe(visible_events, vehicles)"))
 check("das Archiv wird einmal je Durchlauf gelesen, nicht je Zeile",
-      quelle_x.count("pad_historie = load_archive(ARCHIVE_CSV)") == 1
+      quelle_x.count("pad_historie = archiv_anzeigen()") == 1
       and quelle_x.count("pad_historie, group_keys") == 2)
 
 print("== 89. Archivschluessel: Identitaet statt Momentaufnahme ==")
@@ -3151,8 +3174,8 @@ check("strikt lesen: fehlende Datei -> leeres Archiv",
 check("Anzeige: load_archive liefert fuer die unlesbare Datei weiter leer",
       app.load_archive(_kaputt_u).empty)
 
-# Tagesbetrieb: _update_archive mit Stub-st und Ersatz-Archivpfad
-_orig_u = (app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace)
+# Tagesbetrieb: _update_archive mit Stub-st und Ersatz-Datenbank
+_orig_u = (app.st, app.DB_PATH, app.archive_row, app._persist_workspace)
 _meld_u, _ws_u = [], []
 def _st_u():
     ns = _types_u.SimpleNamespace(session_state={})
@@ -3161,29 +3184,29 @@ def _st_u():
     return ns
 _grp_u = [_types_u.SimpleNamespace(spaceport_code="JSLC", row_indices=[0])]
 _tab_u = pd.DataFrame({"Status": ["OK"], "_row": [0]})
-_zeile_u = {"Startdatum": "02.01.2026", "NOTAM": "A9/26", "Weltraumbahnhof": "JSLC"}
+_zeile_u = {"Startdatum": "02.01.2026", "NOTAM": "A9/26", "Weltraumbahnhof": "JSLC", "Nation": "China"}
+_kaputt_db_u = _kaputte_db()
+_kaputt_db_inhalt = _kaputt_db_u.read_bytes()
 try:
     app.st = _st_u()
     app.archive_row = lambda g, ev: dict(_zeile_u)
     app._persist_workspace = lambda *a, **k: _ws_u.append(1)
-    app.ARCHIVE_CSV = _kaputt_u
+    app.DB_PATH = _kaputt_db_u
     _r, _e = None, None
     try:
         app._update_archive([], _grp_u, _tab_u)
     except Exception as exc:  # noqa: BLE001
         _e = exc
     check("Tagesbetrieb: unlesbares Archiv wird nicht geschrieben (byte-gleich)",
-          _e is None and _kaputt_u.read_bytes() == _kaputt_inhalt, repr(_e))
-    check("  ... mit Warnung, die die Datei nennt",
-          any(n == "warning" and "could not be read" in t and _kaputt_u.name in t
+          _e is None and _kaputt_db_u.read_bytes() == _kaputt_db_inhalt, repr(_e))
+    check("  ... mit Warnung, die die Datenbank nennt",
+          any(n == "warning" and "could not be read" in t and "database" in t
               for n, t in _meld_u), _meld_u)
-    _kaputt_u.write_bytes(_kaputt_inhalt)
     _meld_u.clear()
     _platz_u = _types_u.SimpleNamespace(markdown=lambda *a, **k: _meld_u.append(("markdown", a[0])))
     app._show_archive_status(_platz_u)
     check("Seitenleiste: Archivstatus meldet 'unreadable'",
           any("unreadable" in t for _, t in _meld_u), _meld_u)
-    _kaputt_u.write_bytes(_kaputt_inhalt)
     _meld_u.clear()
     _e = None
     try:
@@ -3191,23 +3214,23 @@ try:
     except Exception as exc:  # noqa: BLE001
         _e = exc
     check("Archiv-Editor: Entfernen verweigert, Datei byte-gleich, Arbeitsstand unberuehrt",
-          _e is None and _kaputt_u.read_bytes() == _kaputt_inhalt and not _ws_u
+          _e is None and _kaputt_db_u.read_bytes() == _kaputt_db_inhalt and not _ws_u
           and "archiv_removed" not in app.st.session_state
           and not app.st.session_state.get("ref_undo"), (repr(_e), _ws_u, app.st.session_state))
     check("  ... mit Meldung", any("could not be read" in t for _, t in _meld_u)
           or "could not be read" in str(app.st.session_state.get("ref_flash", "")),
           (_meld_u, app.st.session_state))
-    # Fehlende Datei: wie bisher, das Archiv entsteht
+    # Leeres Archiv: wie bisher, die erste Zeile entsteht
     app.st = _st_u()
     _meld_u.clear()
-    app.ARCHIVE_CSV = _fehlt_u
+    app.DB_PATH = _temp_db()
     app._update_archive([], _grp_u, _tab_u)
-    _neu_u = app.load_archive(_fehlt_u)
-    check("Tagesbetrieb: fehlende Datei wird wie bisher angelegt",
-          _fehlt_u.exists() and len(_neu_u) == 1 and _neu_u["NOTAM"].iloc[0] == "A9/26"
+    _neu_u = app.archiv_anzeigen()
+    check("Tagesbetrieb: leeres Archiv bekommt wie bisher die Zeile",
+          len(_neu_u) == 1 and _neu_u["NOTAM"].iloc[0] == "A9/26"
           and not any(n == "warning" for n, _ in _meld_u), (_neu_u.to_dict("records"), _meld_u))
 finally:
-    app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace = _orig_u
+    app.st, app.DB_PATH, app.archive_row, app._persist_workspace = _orig_u
 
 print("== Archiv-Import ==")
 import archiv_import as ai
@@ -3628,8 +3651,8 @@ check("kaputte Alias-CSV: ImportStateError mit Datei und Spalte",
 
 # Aufgabe 6: Importzustand, Wiederaufnahme, Bestaetigen, Sammelbestaetigung
 zst = ai.load_state(_tmp / "s.json")
-archiv_t = _tmp / "archiv.csv"
-_kein_archiv = _tmp / "kein_archiv.csv"  # nie geschrieben: Kandidaten ohne Archivbezug
+archiv_t = _temp_db()  # Temp-Datenbank mit leerem Startarchiv
+_kein_archiv = _temp_db()  # nie geschrieben: Kandidaten ohne Archivbezug
 kx = {}
 ai.merge_korpus(kx, ai.extract_notams("\n\n".join(AI_CN[1:] + [VB_GLEICHER_TAG]), "seite1.html#msg_1")[0])
 check("Neuauswertung: zwei Tage (20.09. und Nachlauf im 19.09.)", ai.reevaluate(kx, zst, sp, fir) == 2)
@@ -3645,14 +3668,14 @@ check("Sammelbestaetigung waehlt den eindeutigen", [(k["key"], r, p) for k, r, p
 check("  ... nicht mit Warnung", ai.bulk_candidates([dict(kl[0], inklination=60.0)], gs, sites, veh) == [])
 check("  ... nicht mehrdeutig", ai.bulk_candidates(kl, [_treffer0, _zweit], sites, veh) == [])
 check("Bestaetigen schreibt eine Zeile", ai.confirm_many(zst, sammel, archiv_t) == 1)
-a1 = app.load_archive(archiv_t)
+a1 = app.archiv_anzeigen(archiv_t)
 check("  ... mit Rakete und Payload", (a1.iloc[0]["Trägersystem"], a1.iloc[0]["Payload"]) == ("CZ-2D", "Yaogan 45"),
       a1.iloc[0].to_dict())
 check("  ... Quelle im Nebenbestand", zst["entscheidungen"][kl[0]["key"]]["quellen"] == ["seite1.html#msg_1"])
 check("  ... danach nicht mehr in der Sammelauswahl", ai.bulk_candidates(ai.candidates(zst, archiv_t), gs, sites, veh) == [])
 ai.save_state(zst, _tmp / "s.json")
 check("Zustand speichern und laden", ai.load_state(_tmp / "s.json")["entscheidungen"] == zst["entscheidungen"])
-check("leere Auswahl schreibt nichts", ai.confirm_many(zst, [], _tmp / "nie.csv") == 0 and not (_tmp / "nie.csv").exists())
+check("leere Auswahl schreibt nichts", ai.confirm_many(zst, [], _tmp / "nie.db") == 0 and not (_tmp / "nie.db").exists())
 
 # Kaputte Zustandsdatei (gueltiges JSON, falsche Typen): Abbruch, Datei bleibt unberuehrt
 for _nm, _inhalt in (("st_a.json", '{"tage": []}'), ("st_b.json", '{"entscheidungen": 5}'),
@@ -3681,7 +3704,7 @@ check("weitere Zone: Kandidat 'aktualisiert'",
       len(neu_k) == 1 and neu_k[0]["ersetzt"] == [kl[0]["key"]], [(k["key"], k["ersetzt"]) for k in neu_k])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(neu_k, gs, sites, veh) == [])
 ai.confirm_many(zst, [(neu_k[0], "CZ-2D", "Yaogan 45", None)], archiv_t)
-a2 = app.load_archive(archiv_t)
+a2 = app.archiv_anzeigen(archiv_t)
 check("  ... ersetzt die alte Archivzeile statt einer zweiten", len(a2) == 1 and "A4640/26" in a2.iloc[0]["NOTAM"],
       a2["NOTAM"].tolist())
 # Schlusspruefung (Wichtig 2): die ersetzte Entscheidung behaelt zusaetzlich ihre Werte
@@ -3702,8 +3725,7 @@ check("Sammelbestaetigung: GCAT-Rakete ohne Kuerzel -> einzeln bestaetigen",
       ai.bulk_candidates(kfl, [dataclasses.replace(_treffer0, rakete="Unbekannte Rakete XQ")], sites, veh) == [],
       [(r, p) for _, r, p, _ in ai.bulk_candidates(
           kfl, [dataclasses.replace(_treffer0, rakete="Unbekannte Rakete XQ")], sites, veh)])
-_ord = _tmp / "archiv_ist_ordner"
-_ord.mkdir()
+_ord = _kaputte_db("archiv_kaputt.db")
 _vorher = _copy.deepcopy(zf["entscheidungen"])
 try:
     ai.confirm_many(zf, [(kf, "CZ-2D", "Yaogan 45", None)], _ord)
@@ -3712,8 +3734,8 @@ except ai.ImportStateError as exc:
     _fehler = str(exc)
 except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
-check("Bestaetigen: Archiv nicht geschrieben -> ImportStateError mit Dateiname",
-      _fehler is not None and _ord.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
+check("Bestaetigen: Archiv nicht geschrieben -> ImportStateError, nennt die Datenbank",
+      _fehler is not None and "database" in _fehler and not _fehler.startswith("wrong type"), _fehler)
 check("  ... Zustand unveraendert", zf["entscheidungen"] == _vorher, zf["entscheidungen"])
 check("  ... kein Kandidat entschieden", all(k["entscheidung"] is None for k in ai.candidates(zf, _kein_archiv)))
 _entfernt_args = []
@@ -3721,16 +3743,16 @@ _merge_orig = app.merge_archive
 def _merge_spion(bestand, neue, entfernt=None):
     _entfernt_args.append(entfernt)
     return _merge_orig(bestand, neue, entfernt=entfernt)
-archiv_f = _tmp / "archiv_f.csv"
+archiv_f = _temp_db()
 app.merge_archive = _merge_spion
 try:
     ai.confirm_many(zf, [(kf, "CZ-2D", "Yaogan 45", None)], archiv_f)
 finally:
     app.merge_archive = _merge_orig
 check("Bestaetigen uebergibt merge_archive kein archiv_removed", _entfernt_args == [set()], _entfernt_args)
-_persist_orig = app.persist_archive
+_schreiben_orig = app.archiv_schreiben
 _vorher = _copy.deepcopy(zf["entscheidungen"])
-app.persist_archive = lambda path, df: None
+app.archiv_schreiben = lambda neu, vorher, db=None: "x"
 try:
     ai.remove_orphan(zf, kf["key"], archiv_f)
     _fehler = None
@@ -3739,11 +3761,11 @@ except ai.ImportStateError as exc:
 except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
 finally:
-    app.persist_archive = _persist_orig
-check("Remove: Archiv nicht geschrieben -> ImportStateError mit Dateiname",
-      _fehler is not None and archiv_f.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
+    app.archiv_schreiben = _schreiben_orig
+check("Remove: Archiv nicht geschrieben -> ImportStateError, nennt die Datenbank",
+      _fehler is not None and "nola.db" in _fehler and not _fehler.startswith("wrong type"), _fehler)
 check("  ... Zustand unveraendert, Zeile noch da",
-      zf["entscheidungen"] == _vorher and len(app.load_archive(archiv_f)) == 1, zf["entscheidungen"])
+      zf["entscheidungen"] == _vorher and len(app.archiv_anzeigen(archiv_f)) == 1, zf["entscheidungen"])
 try:
     ai.keep_orphan(zf, "gibt-es-nicht")
     _fehler = None
@@ -3770,6 +3792,7 @@ _r2 = dict(_roh["row"], NOTAM=_roh["notam_ids"][1])
 _k1, _k2 = app.archive_key(_r1), app.archive_key(_r2)
 archiv_z = _tmp / "archiv_z.csv"
 app.persist_archive(archiv_z, app.merge_archive(None, [_r1, _r2]))
+archiv_z = _temp_db(archiv_z)
 zz = ai.load_state(_tmp / "z.json")
 zz["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [_roh], "pruefliste": [], "usa": 0, "ausgeblendet": 0}
 for _k, _r in ((_k1, _r1), (_k2, _r2)):
@@ -3780,7 +3803,7 @@ check("zwei Vorgaenger: beide im Ersatzvermerk",
       len(_kz) == 1 and _kz[0]["ersetzt"] == sorted([_k1, _k2]), [k["ersetzt"] for k in _kz])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kz, gs, sites, veh) == [])
 ai.confirm_many(zz, [(_kz[0], "CZ-2D", "Yaogan 45", None)], archiv_z)
-_az = app.load_archive(archiv_z)
+_az = app.archiv_anzeigen(archiv_z)
 check("  ... beide Zeilen durch eine ersetzt",
       [app.archive_key(dict(r)) for _, r in _az.iterrows()] == [_roh["key"]], _az["NOTAM"].tolist())
 check("  ... beide als ersetzt vermerkt",
@@ -3838,12 +3861,12 @@ _tage_vorher = zst["tage"]
 zst["tage"] = {iso: dict(t, kandidaten=[]) for iso, t in _tage_vorher.items()}
 _waisen = ai.orphans(zst)
 check("nicht mehr erkannt -> 'No longer recognised'", [k for k, _ in _waisen] == [neu_k[0]["key"]], _waisen)
-check("  ... Archiv bleibt ohne Entscheidung unberuehrt", len(app.load_archive(archiv_t)) == 1)
+check("  ... Archiv bleibt ohne Entscheidung unberuehrt", len(app.archiv_anzeigen(archiv_t)) == 1)
 ai.keep_orphan(zst, neu_k[0]["key"])
-check("  ... Keep nimmt ihn von der Liste, Archiv bleibt", ai.orphans(zst) == [] and len(app.load_archive(archiv_t)) == 1)
+check("  ... Keep nimmt ihn von der Liste, Archiv bleibt", ai.orphans(zst) == [] and len(app.archiv_anzeigen(archiv_t)) == 1)
 zst["entscheidungen"][neu_k[0]["key"]].pop("behalten")
 ai.remove_orphan(zst, neu_k[0]["key"], archiv_t)
-check("  ... Remove loescht die Archivzeile", app.load_archive(archiv_t).empty)
+check("  ... Remove loescht die Archivzeile", app.archiv_anzeigen(archiv_t).empty)
 check("  ... und vermerkt es", zst["entscheidungen"][neu_k[0]["key"]] == {"status": "removed"})
 zst["tage"] = _tage_vorher
 
@@ -3935,21 +3958,21 @@ def _ungeschuetzte_aufrufe(src, namen):
     return fehlend, gefunden
 
 
-_kritisch = ("confirm_many", "remove_orphan", "keep_orphan", "save_state", "save_korpus",
-             "load_korpus", "load_state")
+_kritisch = ("confirm_many", "remove_orphan", "keep_orphan", "zustand_speichern", "korpus_speichern",
+             "korpus_laden", "zustand_laden")
 _f1, _g1 = _ungeschuetzte_aufrufe(tab_src, _kritisch)
 _f2, _g2 = _ungeschuetzte_aufrufe(kand_src, _kritisch)
 check("Reiter: alle kritischen Aufrufe fangen ImportStateError",
-      not _f1 and {"confirm_many", "remove_orphan", "keep_orphan", "save_state", "save_korpus",
-                   "load_korpus", "load_state"} <= set(_g1), (_f1, sorted(set(_g1))))
+      not _f1 and {"confirm_many", "remove_orphan", "keep_orphan", "zustand_speichern", "korpus_speichern",
+                   "korpus_laden", "zustand_laden"} <= set(_g1), (_f1, sorted(set(_g1))))
 check("Kandidat: alle kritischen Aufrufe fangen ImportStateError",
-      not _f2 and {"confirm_many", "save_state"} <= set(_g2), (_f2, sorted(set(_g2))))
+      not _f2 and {"confirm_many", "zustand_speichern"} <= set(_g2), (_f2, sorted(set(_g2))))
 
 # Verhalten: kaputter Zustand -> Fehlermeldung, nichts geschrieben, keine Ausnahme
 import archiv_import as _ai7
 import types as _types
 _meldungen, _geschrieben = [], []
-_orig = (app.st, _ai7.load_state, _ai7.save_state, _ai7.save_korpus, _ai7.load_korpus)
+_orig = (app.st, _ai7.zustand_laden, _ai7.zustand_speichern, _ai7.korpus_speichern, _ai7.korpus_laden)
 
 
 def _kaputt(*a, **k):
@@ -3958,17 +3981,17 @@ def _kaputt(*a, **k):
 
 try:
     app.st = _types.SimpleNamespace(error=_meldungen.append)
-    _ai7.load_korpus = lambda *a, **k: {}
-    _ai7.load_state = _kaputt
-    _ai7.save_state = lambda *a, **k: _geschrieben.append("state")
-    _ai7.save_korpus = lambda *a, **k: _geschrieben.append("korpus")
+    _ai7.korpus_laden = lambda *a, **k: {}
+    _ai7.zustand_laden = _kaputt
+    _ai7.zustand_speichern = lambda *a, **k: _geschrieben.append("state")
+    _ai7.korpus_speichern = lambda *a, **k: _geschrieben.append("korpus")
     _ausnahme = None
     try:
         app._archive_import_tab(sp, fir, app.load_vehicles(str(app.VEHICLE_CSV)))
     except Exception as exc:  # noqa: BLE001
         _ausnahme = exc
 finally:
-    app.st, _ai7.load_state, _ai7.save_state, _ai7.save_korpus, _ai7.load_korpus = _orig
+    app.st, _ai7.zustand_laden, _ai7.zustand_speichern, _ai7.korpus_speichern, _ai7.korpus_laden = _orig
 check("ImportStateError beim Laden: angezeigt, nichts geschrieben",
       _ausnahme is None and _meldungen == [app._md_plain("archiv_import.json is unreadable (test).")]
       and not _geschrieben, (_ausnahme, _meldungen, _geschrieben))
@@ -4082,8 +4105,8 @@ def _tab_lauf(stub, **ersatz):
         return [_g1, _g2], "GCAT " + _BOESE
 
     basis = dict(
-        load_korpus=lambda *a, **k: {}, load_state=lambda *a, **k: {"tage": {}},
-        save_state=lambda *a, **k: None, save_korpus=lambda *a, **k: None,
+        korpus_laden=lambda *a, **k: {}, zustand_laden=lambda *a, **k: {"tage": {}},
+        zustand_speichern=lambda *a, **k: None, korpus_speichern=lambda *a, **k: None,
         is_stale=lambda z: False, orphans=lambda z: [], keep_orphan=lambda z, key: None,
         load_gcat=_gcat, load_gcat_sites=lambda *a, **k: {},
         candidates=lambda z: [dict(k) for k in _kands], match_candidate=_match,
@@ -4163,12 +4186,12 @@ ai.merge_korpus(_kd, ai.extract_notams("\n\n".join(AI_CN[1:3]), "seite_d.html#ms
 
 
 def _dub_zustand(name, zeilen):
-    """Frischer Zustand aus AI_CN[1]/AI_CN[2] und ein Temp-Archiv mit den gegebenen Zeilen."""
+    """Frischer Zustand aus AI_CN[1]/AI_CN[2] und eine Temp-Datenbank mit den gegebenen Archivzeilen."""
     pfad = _tmp / ("dub_" + name + ".csv")
     app.persist_archive(pfad, app.merge_archive(None, zeilen))
     z = ai.load_state(_tmp / ("dub_" + name + ".json"))
     ai.reevaluate(_kd, z, sp, fir)
-    return z, pfad
+    return z, _temp_db(pfad)
 
 
 def _ohne(row, *spalten):
@@ -4181,9 +4204,9 @@ check("20.09.: Kandidat aus A4631/A4632 ist schon archiviert",
       len(_kd_l) == 1 and _kd_l[0]["im_archiv"] == [_TAG_KEY] and _kd_l[0]["ersetzt"] == [],
       [(k["key"], k.get("im_archiv"), k["ersetzt"]) for k in _kd_l])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kd_l, gs, sites, veh) == [])
-_vorher_d = app.load_archive(archiv_d)
+_vorher_d = app.archiv_anzeigen(archiv_d)
 ai.confirm_many(zd, [(_kd_l[0], "CZ-2D", "Pengcheng", None)], archiv_d)
-_nach_d = app.load_archive(archiv_d)
+_nach_d = app.archiv_anzeigen(archiv_d)
 check("  ... Bestaetigen legt keine zweite Zeile an", len(_nach_d) == 1, _nach_d["NOTAM"].tolist())
 check("  ... Traegersystem und Payload eingetragen",
       (_nach_d.iloc[0]["Trägersystem"], _nach_d.iloc[0]["Payload"]) == ("CZ-2D", "Pengcheng"),
@@ -4218,7 +4241,7 @@ check("ohne Ueberschneidung: im_archiv leer", len(_kn) == 1 and _kn[0]["im_archi
       [k.get("im_archiv") for k in _kn])
 check("  ... in der Sammelauswahl", len(ai.bulk_candidates(_kn, gs, sites, veh)) == 1)
 ai.confirm_many(zn, [(_kn[0], "CZ-2D", "Pengcheng", None)], archiv_n)
-_an = app.load_archive(archiv_n)
+_an = app.archiv_anzeigen(archiv_n)
 check("  ... Bestaetigen legt eine neue Zeile an",
       sorted(app.archive_key(dict(r)) for _, r in _an.iterrows()) == sorted([app.archive_key(_fremd), _kn[0]["key"]]),
       _an["NOTAM"].tolist())
@@ -4239,13 +4262,13 @@ _neu_row = dict(_kg["row"], NOTAM="C0001/26", Startdatum="21.09.2026")
 _kg_neu = dict(_kg, key=app.archive_key(_neu_row), row=_neu_row, notam_ids=["C0001/26"],
                im_archiv=[], ersetzt=[])
 _schreib = []
-_persist_orig = app.persist_archive
-app.persist_archive = lambda path, df: (_schreib.append(path), _persist_orig(path, df))
+_schreiben_orig = app.archiv_schreiben
+app.archiv_schreiben = lambda neu, vorher, db=None: (_schreib.append(db), _schreiben_orig(neu, vorher, db=db))[1]
 try:
     _zahl = ai.confirm_many(zg, [(_kg, "CZ-2D", "Pengcheng", None), (_kg_neu, "CZ-4C", "Yaogan 50", None)], archiv_g)
 finally:
-    app.persist_archive = _persist_orig
-_ag = app.load_archive(archiv_g)
+    app.archiv_schreiben = _schreiben_orig
+_ag = app.archiv_anzeigen(archiv_g)
 check("gemischt: ein Schreibvorgang", _schreib == [archiv_g], _schreib)
 check("  ... zwei Zeilen: ergaenzte und neue",
       len(_ag) == 2 and sorted(app.archive_key(dict(r)) for _, r in _ag.iterrows()) == sorted([_TAG_KEY, _kg_neu["key"]]),
@@ -4261,7 +4284,7 @@ check("  ... beide entschieden", _zahl == 2 and zg["entscheidungen"][_kg["key"]]
 # Leere Payload loescht keinen vorhandenen Eintrag
 zp2, archiv_p2 = _dub_zustand("payload", [dict(_TAG_ROW, Payload="Pengcheng")])
 ai.confirm_many(zp2, [(ai.candidates(zp2, archiv_p2)[0], "CZ-2D", "", None)], archiv_p2)
-_ap2 = app.load_archive(archiv_p2)
+_ap2 = app.archiv_anzeigen(archiv_p2)
 check("Ergaenzen mit leerer Payload behaelt die vorhandene",
       len(_ap2) == 1 and (_ap2.iloc[0]["Trägersystem"], _ap2.iloc[0]["Payload"]) == ("CZ-2D", "Pengcheng"),
       _ap2.to_dict("records"))
@@ -4270,8 +4293,8 @@ check("Ergaenzen mit leerer Payload behaelt die vorhandene",
 zv, archiv_v = _dub_zustand("fehl", [_TAG_ROW])
 _kv = ai.candidates(zv, archiv_v)[0]
 _vorher_v = _copy.deepcopy(zv["entscheidungen"])
-_inhalt_v = archiv_v.read_bytes()
-app.persist_archive = lambda path, df: None
+_inhalt_v = app.archiv_lesen(archiv_v).attrs["nola_stand"]
+app.archiv_schreiben = lambda neu, vorher, db=None: "x"
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -4280,15 +4303,16 @@ except ai.ImportStateError as exc:
 except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
 finally:
-    app.persist_archive = _persist_orig
-check("Ergaenzen nicht geschrieben -> ImportStateError mit Dateiname",
-      _fehler is not None and archiv_v.name in _fehler and not _fehler.startswith("wrong type"), _fehler)
+    app.archiv_schreiben = _schreiben_orig
+check("Ergaenzen nicht geschrieben -> ImportStateError, nennt die Datenbank",
+      _fehler is not None and "nola.db" in _fehler and not _fehler.startswith("wrong type"), _fehler)
 check("  ... Zustand und Archiv unveraendert",
-      zv["entscheidungen"] == _vorher_v and archiv_v.read_bytes() == _inhalt_v, zv["entscheidungen"])
+      zv["entscheidungen"] == _vorher_v and app.archiv_lesen(archiv_v).attrs["nola_stand"] == _inhalt_v,
+      zv["entscheidungen"])
 # Zeile inzwischen verschwunden: nichts schreiben, nichts vermerken
-# (Archiv nur mit Kopfzeile - eine 0-Byte-Datei waere "unlesbar", nicht "Zeile fehlt")
-app.persist_archive(archiv_v, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)))
-_leer_v = archiv_v.read_bytes()
+_vor_leer_v = app.archiv_lesen(archiv_v)
+app.archiv_schreiben(pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)), vorher=_vor_leer_v, db=archiv_v)
+_leer_v = app.archiv_lesen(archiv_v).attrs["nola_stand"]
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -4298,7 +4322,7 @@ except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
 check("Ergaenzen: Zeile nicht mehr im Archiv -> ImportStateError, nichts geschrieben",
       _fehler is not None and not _fehler.startswith("wrong type") and zv["entscheidungen"] == _vorher_v
-      and "no longer in" in _fehler and archiv_v.read_bytes() == _leer_v, _fehler)
+      and "no longer in" in _fehler and app.archiv_lesen(archiv_v).attrs["nola_stand"] == _leer_v, _fehler)
 
 # Aktualisiert UND schon im Tagesbetrieb: keine Dublette, kein Datenverlust
 _imp_row = dict(_TAG_ROW, NOTAM="A4631/26", Trägersystem="CZ-2D", Payload="alt")
@@ -4312,7 +4336,7 @@ check("aktualisiert und schon archiviert: beide Vermerke",
       [(k["ersetzt"], k.get("im_archiv")) for k in _kb])
 check("  ... nicht in der Sammelauswahl", ai.bulk_candidates(_kb, gs, sites, veh) == [])
 ai.confirm_many(zb, [(_kb[0], "CZ-2D", "Pengcheng", None)], archiv_b)
-_ab = app.load_archive(archiv_b)
+_ab = app.archiv_anzeigen(archiv_b)
 check("  ... keine neue Zeile, keine geloescht",
       sorted(app.archive_key(dict(r)) for _, r in _ab.iterrows()) == sorted([_TAG_KEY, _imp_key]),
       _ab["NOTAM"].tolist())
@@ -4342,14 +4366,14 @@ _kw = ai.candidates(zw, archiv_w)[0]
 check("candidates: aktuelle Werte der Zielzeile im Kandidaten",
       _kw.get("archiv_werte") == [{"key": _TAG_KEY, "Trägersystem": "CZ-4C", "Payload": "Yaogan 50"}],
       _kw.get("archiv_werte"))
-_inhalt_w = app.load_archive(archiv_w).to_dict("records")
+_inhalt_w = app.archiv_anzeigen(archiv_w).to_dict("records")
 ai.confirm_many(zw, [(_kw, "CZ-4C", "Yaogan 50", None)], archiv_w)
 check("Bestaetigen mit den vorhandenen Werten laesst die Zeile unveraendert",
-      app.load_archive(archiv_w).to_dict("records") == _inhalt_w, app.load_archive(archiv_w).to_dict("records"))
+      app.archiv_anzeigen(archiv_w).to_dict("records") == _inhalt_w, app.archiv_anzeigen(archiv_w).to_dict("records"))
 zw2, archiv_w2 = _dub_zustand("werte2", [_TAG_GEPFLEGT])
 _kw2 = ai.candidates(zw2, archiv_w2)[0]
 ai.confirm_many(zw2, [(_kw2, "CZ-2D", "X", None)], archiv_w2)
-_aw2 = app.load_archive(archiv_w2)
+_aw2 = app.archiv_anzeigen(archiv_w2)
 check("Bestaetigen mit anderen Werten schreibt sie",
       len(_aw2) == 1 and (_aw2.iloc[0]["Trägersystem"], _aw2.iloc[0]["Payload"]) == ("CZ-2D", "X"),
       _aw2.to_dict("records"))
@@ -4448,29 +4472,29 @@ check("Referenz: Beschriftung Lijian-1 (LJ-1)", app.vehicle_label("LJ-1", _veh_n
 # Import: unlesbares Archiv (nola-3dq.11) - kein Schreiben, ImportStateError, Zustand gleich
 _st_k = {"tage": {}, "entscheidungen": {"alt": {"status": "confirmed", "notam_ids": ["A1/26"]}}}
 _st_k_vorher = _copy.deepcopy(_st_k)
-_kand_k = {"key": "neu", "row": {"Startdatum": "03.01.2026", "NOTAM": "A7/26"},
+_kand_k = {"key": "neu", "row": {"Startdatum": "03.01.2026", "NOTAM": "A7/26", "Nation": "China"},
            "notam_ids": ["A7/26"], "quellen": []}
 for _name_k, _fn_k in (
-    ("confirm_many", lambda: ai.confirm_many(_st_k, [(_kand_k, "CZ-2D", "P", None)], _kaputt_u)),
-    ("remove_orphan", lambda: ai.remove_orphan(_st_k, "alt", _kaputt_u)),
-    ("candidates", lambda: ai.candidates(_st_k, _kaputt_u)),
+    ("confirm_many", lambda: ai.confirm_many(_st_k, [(_kand_k, "CZ-2D", "P", None)], _kaputt_db_u)),
+    ("remove_orphan", lambda: ai.remove_orphan(_st_k, "alt", _kaputt_db_u)),
+    ("candidates", lambda: ai.candidates(_st_k, _kaputt_db_u)),
 ):
     _st_k.clear()
     _st_k.update(_copy.deepcopy(_st_k_vorher))
-    _kaputt_u.write_bytes(_kaputt_inhalt)
+    _kaputt_db_u.write_bytes(_kaputt_db_inhalt)
     _r, _e = _versuch(_fn_k)
-    check("Import: {} bei unlesbarem Archiv -> ImportStateError mit Dateiname".format(_name_k),
-          isinstance(_e, ai.ImportStateError) and _kaputt_u.name in str(_e)
+    check("Import: {} bei unlesbarem Archiv -> ImportStateError, nennt die Datenbank".format(_name_k),
+          isinstance(_e, ai.ImportStateError) and "database" in str(_e)
           and "could not be read" in str(_e), repr(_e))
     check("  ... {}: Datei byte-gleich, Zustand unveraendert".format(_name_k),
-          _kaputt_u.read_bytes() == _kaputt_inhalt and _st_k == _st_k_vorher, _st_k)
-_fehlt_k = _tmp_u / "fehlt_import.csv"
+          _kaputt_db_u.read_bytes() == _kaputt_db_inhalt and _st_k == _st_k_vorher, _st_k)
+_fehlt_k = _temp_db()  # leeres Startarchiv
 _r, _e = _versuch(lambda: ai.candidates({"tage": {}, "entscheidungen": {}}, _fehlt_k))
-check("Import: fehlendes Archiv -> candidates wie bisher leer", _e is None and _r == [], repr(_e))
+check("Import: leeres Archiv -> candidates wie bisher leer", _e is None and _r == [], repr(_e))
 _st_m = {"tage": {}, "entscheidungen": {}}
 _r, _e = _versuch(lambda: ai.confirm_many(_st_m, [(_kand_k, "CZ-2D", "P", None)], _fehlt_k))
-check("Import: fehlendes Archiv -> confirm_many legt es an",
-      _e is None and _r == 1 and len(app.load_archive(_fehlt_k)) == 1, repr(_e))
+check("Import: leeres Archiv -> confirm_many legt die Zeile an",
+      _e is None and _r == 1 and len(app.archiv_anzeigen(_fehlt_k)) == 1, repr(_e))
 
 print("== Startarchiv: Spaltenpruefung und atomares Schreiben (nola-3dq.11, Nachbesserung 1) ==")
 _kopf_ok = ",".join(app.ARCHIVE_COLUMNS)
@@ -4491,23 +4515,32 @@ _r, _e = _strikt(_fremd)
 check("Spalten: fremde Kopfzeile -> ArchiveUnreadable mit Datei und fehlenden Spalten",
       isinstance(_e, app.ArchiveUnreadable) and _fremd.name in str(_e)
       and "NOTAM" in str(_e) and "Startdatum" in str(_e), repr(_e))
-_orig_f = (app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace)
+# Gegenstueck in der Datenbank: eine lesbare SQLite-Datei ohne Startarchiv
+import sqlite3 as _sqlite_f
+_fremd_db = _P_db(_tf_db.mkdtemp()) / "fremd.db"
+_c_f = _sqlite_f.connect(str(_fremd_db))
+_c_f.execute("CREATE TABLE foo (bar TEXT)")
+_c_f.execute("INSERT INTO foo VALUES ('1')")
+_c_f.commit()
+_c_f.close()
+_fremd_db_inhalt = _fremd_db.read_bytes()
+_orig_f = (app.st, app.DB_PATH, app.archive_row, app._persist_workspace)
 _meld_f = []
 try:
     app.st = _st_u()
     app.archive_row = lambda g, ev: dict(_zeile_u)
     app._persist_workspace = lambda *a, **k: None
-    app.ARCHIVE_CSV = _fremd
+    app.DB_PATH = _fremd_db
     _meld_u.clear()
     _r, _e = _versuch(lambda: app._update_archive([], _grp_u, _tab_u))
     check("Spalten: Tagesbetrieb laesst die fremde Datei byte-gleich",
-          _e is None and _fremd.read_bytes() == _fremd_inhalt, repr(_e))
+          _e is None and _fremd_db.read_bytes() == _fremd_db_inhalt, repr(_e))
 finally:
-    app.st, app.ARCHIVE_CSV, app.archive_row, app._persist_workspace = _orig_f
+    app.st, app.DB_PATH, app.archive_row, app._persist_workspace = _orig_f
 _r, _e = _versuch(lambda: ai.confirm_many({"tage": {}, "entscheidungen": {}},
-                                          [(_kand_k, "CZ-2D", "P", None)], _fremd))
+                                          [(_kand_k, "CZ-2D", "P", None)], _fremd_db))
 check("Spalten: confirm_many -> ImportStateError, fremde Datei byte-gleich",
-      isinstance(_e, ai.ImportStateError) and _fremd.read_bytes() == _fremd_inhalt, repr(_e))
+      isinstance(_e, ai.ImportStateError) and _fremd_db.read_bytes() == _fremd_db_inhalt, repr(_e))
 
 # Doppelt kodierte Kopfzeile: die Traegersystem-Spalte wuerde still geleert
 _verhunzt = _tmp_u / "verhunzt.csv"
@@ -4632,32 +4665,33 @@ class _StubSt:
         return False
 
 
-_orig_e = (app.st, app.ARCHIVE_CSV)
+_orig_e = (app.st, app.DB_PATH)
 try:
-    for _p_e in (_kaputt_u, _fremd):
+    for _p_e in (_kaputt_db_u, _fremd_db):
         app.st = _StubSt()
-        app.ARCHIVE_CSV = _p_e
+        app.DB_PATH = _p_e
         _r, _e = _versuch(app._archive_editor)
         _namen_e = [n for n, _ in app.st.aufrufe]
-        check("Archiv-Editor ({}): st.error mit Dateiname, keine Remove-Knoepfe".format(_p_e.name),
-              _e is None and any(n == "error" and _p_e.name in t for n, t in app.st.aufrufe)
+        check("Archiv-Editor ({}): st.error nennt die Datenbank, keine Remove-Knoepfe".format(_p_e.name),
+              _e is None and any(n == "error" and "database" in t for n, t in app.st.aufrufe)
               and "button" not in _namen_e and "columns" not in _namen_e, (repr(_e), app.st.aufrufe))
 finally:
-    app.st, app.ARCHIVE_CSV = _orig_e
+    app.st, app.DB_PATH = _orig_e
 
 # Einzelkandidat: Confirm ruft confirm_many; unlesbares Archiv -> st.error, nichts gespeichert
 _veh_k = app.load_vehicles(str(app.VEHICLE_CSV))
 _kand_e = {"key": "einzel", "row": {"Startdatum": "05.01.2026", "Startzeit": "10:00",
-                                     "Weltraumbahnhof": "JSLC", "Orbit": "SSO", "NOTAM": "A8/26"},
+                                     "Weltraumbahnhof": "JSLC", "Orbit": "SSO", "NOTAM": "A8/26",
+                                     "Nation": "China"},
            "nation": "China", "quellen": ["Forum"], "ersetzt": [], "notam_ids": ["A8/26"]}
 _abgl_e = _types_u.SimpleNamespace(status="no match", warnungen=[], hinweise=[], treffer=[])
-for _p_k, _soll_ok in ((_kaputt_u, False), (_fremd, False), (_tmp_u / "einzel_neu.csv", True)):
+for _p_k, _soll_ok in ((_kaputt_db_u, False), (_fremd_db, False), (_temp_db(), True)):
     _gesp, _bytes_vor = [], (_p_k.read_bytes() if _p_k.exists() else None)
     _ai_stub = _types_u.SimpleNamespace(
         ImportStateError=ai.ImportStateError, STATUS_EINDEUTIG=ai.STATUS_EINDEUTIG,
         vehicle_code_for=ai.vehicle_code_for, reject=ai.reject,
         confirm_many=lambda z, sel, _p=_p_k: ai.confirm_many(z, sel, _p),
-        save_state=lambda z: _gesp.append(1),
+        zustand_speichern=lambda z: _gesp.append(1),
     )
     _zst_e = {"tage": {}, "entscheidungen": {}}
     _orig_k = app.st
@@ -4670,13 +4704,13 @@ for _p_k, _soll_ok in ((_kaputt_u, False), (_fremd, False), (_tmp_u / "einzel_ne
     if _soll_ok:
         check("Einzelkandidat: Confirm schreibt ueber confirm_many, speichert, laedt neu",
               _e is None and _gesp == [1] and any(n == "rerun" for n, _ in _auf)
-              and len(app.load_archive(_p_k)) == 1
+              and len(app.archiv_anzeigen(_p_k)) == 1
               and _zst_e["entscheidungen"].get("einzel", {}).get("status") == "confirmed",
               (repr(_e), _auf))
     else:
         check("Einzelkandidat ({}): st.error, nichts gespeichert, Datei byte-gleich".format(_p_k.name),
               _e is None and not _gesp and not any(n == "rerun" for n, _ in _auf)
-              and any(n == "error" and app._md_plain(_p_k.name) in t for n, t in _auf)
+              and any(n == "error" and "database" in t for n, t in _auf)
               and _p_k.read_bytes() == _bytes_vor and not _zst_e["entscheidungen"],
               (repr(_e), _auf))
 _shutil_u.rmtree(_tmp_u, ignore_errors=True)
@@ -4730,9 +4764,10 @@ def _s_zustand(kandidaten):
 
 
 def _s_archiv(name, zeilen):
+    """Temp-Datenbank mit den gegebenen Archivzeilen (ueber eine Temp-CSV migriert)."""
     pfad = _tmp_s / (name + ".csv")
     app.persist_archive(pfad, app.merge_archive(None, zeilen))
-    return pfad
+    return _temp_db(pfad)
 
 
 # Kritisch 1: Kennungen allein sind nicht eindeutig (China Feb. / Russland Nov., A0500/24)
@@ -4749,7 +4784,7 @@ check("Kollision: russischer Kandidat ersetzt die chinesische Februarzeile nicht
       len(_ks) == 1 and _ks[0]["ersetzt"] == [] and _ks[0]["im_archiv"] == [],
       [(k["key"], k["ersetzt"], k["im_archiv"]) for k in _ks])
 _r, _e = _versuch(lambda: ai.confirm_many(_zs, [(_ks[0], "Soyuz-2.1a", "Nov payload", None)], _as))
-_a = app.load_archive(_as)
+_a = app.archiv_anzeigen(_as)
 check("  ... Bestaetigen legt eine Zeile an, die chinesische bleibt unberuehrt",
       _e is None and len(_a) == 2
       and _a[_a["NOTAM"] == "A0500/24"].iloc[0].to_dict() == app.merge_archive(None, [_cn_row]).iloc[0].to_dict()
@@ -4779,12 +4814,12 @@ _ks4 = ai.candidates(_zs4, _as4)
 check("aktualisiert (gleicher Tag, gleiche Nation): Ersatzvermerk", _ks4[0]["ersetzt"] == [_cn_key],
       _ks4[0]["ersetzt"])
 ai.confirm_many(_zs4, [(_ks4[0], "CZ-2D", "Feb payload", None)], _as4)
-_a4 = app.load_archive(_as4)
+_a4 = app.archiv_anzeigen(_as4)
 check("  ... aktuelle Werte des Vorgaengers im Kandidaten (ersetzt_werte)",
       _ks4[0].get("ersetzt_werte") == [{"key": _cn_key, "Trägersystem": "CZ-2D", "Payload": "Feb payload"}],
       _ks4[0].get("ersetzt_werte"))
 ai.confirm_many(_zs4, [(_ks4[0], "CZ-2D", "Feb payload", None)], _as4)
-_a4 = app.load_archive(_as4)
+_a4 = app.archiv_anzeigen(_as4)
 check("  ... ersetzt die alte Zeile", [app.archive_key(dict(r)) for _, r in _a4.iterrows()] == [_upd["key"]],
       _a4["NOTAM"].tolist())
 # Reiter: jede zu ersetzende Importzeile als reiner Text, mit ihren Werten
@@ -4829,18 +4864,18 @@ check("merge_archive: vorhandenes Traegersystem bleibt bei leerem neuem Wert",
 _m2 = app.merge_archive(_mb, [_s_row("03.02.2024", "A0500/24", "China", "CZ-2D", "")])
 check("  ... ein neuer nicht leerer Wert ueberschreibt", _m2["Trägersystem"].iloc[0] == "CZ-2D",
       _m2.to_dict("records"))
-_orig_t = (app.st, app.ARCHIVE_CSV, app.archive_row)
+_orig_t = (app.st, app.DB_PATH, app.archive_row)
 try:
     app.st = _types.SimpleNamespace(session_state={}, warning=lambda *a, **k: None)
-    app.ARCHIVE_CSV = _s_archiv("tagesbetrieb", [_s_row("03.02.2024", "A0500/24", "China", "CZ-4C", "Yaogan")])
+    app.DB_PATH = _s_archiv("tagesbetrieb", [_s_row("03.02.2024", "A0500/24", "China", "CZ-4C", "Yaogan")])
     app.archive_row = lambda g, ev: _s_row("03.02.2024", "A0500/24", "China", "", "")
     app._update_archive([], [_types.SimpleNamespace(spaceport_code="JSLC", row_indices=[0])],
                         pd.DataFrame({"Status": ["OK"], "_row": [0]}))
-    _at = app.load_archive(app.ARCHIVE_CSV)
+    _at = app.archiv_anzeigen()
     check("  ... _update_archive (Tageslauf) setzt CZ-4C nicht zurueck",
           (_at["Trägersystem"].iloc[0], _at["Payload"].iloc[0]) == ("CZ-4C", "Yaogan"), _at.to_dict("records"))
 finally:
-    app.st, app.ARCHIVE_CSV, app.archive_row = _orig_t
+    app.st, app.DB_PATH, app.archive_row = _orig_t
 
 # Wichtig 3: Rueckgaengig im Startarchiv nur, solange es seit der Aktion unveraendert ist
 
@@ -4852,47 +4887,49 @@ def _undo_lauf():
         return None, exc
 
 
-_orig_r = (app.st, app.ARCHIVE_CSV, app._persist_workspace, app._write_bytes_atomic)
-_atomar_r = []
+_orig_r = (app.st, app.DB_PATH, app._persist_workspace)
 try:
     app._persist_workspace = lambda *a, **k: None
-    app._write_bytes_atomic = lambda p, d, _w=_orig_r[3]: (_atomar_r.append(p), _w(p, d))[1]
     _zwei = [_s_row("03.02.2024", "A0500/24", "China", "CZ-2D", "P"),
              _s_row("04.02.2024", "A0600/24", "China", "CZ-4C", "Q")]
-    # a) unveraendert seit der Aktion -> wiederhergestellt, atomar
+    # a) unveraendert seit der Aktion -> wiederhergestellt
     app.st = _types.SimpleNamespace(session_state={}, error=lambda *a, **k: None)
-    app.ARCHIVE_CSV = _s_archiv("undo_a", _zwei)
-    _vor_r = app.ARCHIVE_CSV.read_bytes()
+    app.DB_PATH = _s_archiv("undo_a", _zwei)
+    _vor_r = app.archiv_lesen()
     app._remove_archive_row("03.02.2024|A0500/24")
-    _atomar_r.clear()
     _r, _e = _undo_lauf()
-    check("Undo Archiv: unveraendert seit dem Entfernen -> Zeile wieder da (byte-gleich)",
-          _e is None and _r and app.ARCHIVE_CSV.read_bytes() == _vor_r, (repr(_e), _r))
-    check("  ... ueber _write_bytes_atomic geschrieben", _atomar_r == [app.ARCHIVE_CSV], _atomar_r)
-    # b) Archiv seither geaendert -> verweigert, Datei byte-gleich
+    _nach_r = app.archiv_lesen()
+    check("Undo Archiv: unveraendert seit dem Entfernen -> Zeile wieder da (inhaltsgleich)",
+          _e is None and _r and _nach_r.to_dict("records") == _vor_r.to_dict("records"), (repr(_e), _r))
+    check("  ... ueber die Datenbank geschrieben (Stand wie vor dem Entfernen)",
+          _nach_r.attrs["nola_stand"] == _vor_r.attrs["nola_stand"],
+          (_nach_r.attrs["nola_stand"], _vor_r.attrs["nola_stand"]))
+    # b) Archiv seither geaendert -> verweigert, Archiv unveraendert
     app.st = _types.SimpleNamespace(session_state={}, error=lambda *a, **k: None)
-    app.ARCHIVE_CSV = _s_archiv("undo_b", _zwei)
+    app.DB_PATH = _s_archiv("undo_b", _zwei)
     app._remove_archive_row("03.02.2024|A0500/24")
-    app.persist_archive(app.ARCHIVE_CSV, app.merge_archive(app.read_archive_strict(app.ARCHIVE_CSV),
-                                                           [_s_row("05.02.2024", "A0700/24", "China")]))
-    _neu_r = app.ARCHIVE_CSV.read_bytes()
+    _jetzt_r = app.archiv_lesen()
+    app.archiv_schreiben(app.merge_archive(_jetzt_r, [_s_row("05.02.2024", "A0700/24", "China")]),
+                         vorher=_jetzt_r)
+    _neu_r = app.archiv_lesen().attrs["nola_stand"]
     _r, _e = _undo_lauf()
-    check("Undo Archiv: seither geaendert -> verweigert mit Meldung, Datei byte-gleich",
+    check("Undo Archiv: seither geaendert -> verweigert mit Meldung, Archiv unveraendert",
           type(_e).__name__ == "UndoRefused" and "changed since this action" in str(_e)
-          and app.ARCHIVE_CSV.read_bytes() == _neu_r, (repr(_e), _r))
+          and app.archiv_lesen().attrs["nola_stand"] == _neu_r, (repr(_e), _r))
     check("  ... der veraltete Eintrag ist vom Stapel", not app.st.session_state.get("ref_undo"),
           app.st.session_state.get("ref_undo"))
     # c) Archiv unlesbar -> verweigert, Datei byte-gleich
     app.st = _types.SimpleNamespace(session_state={}, error=lambda *a, **k: None)
-    app.ARCHIVE_CSV = _s_archiv("undo_c", _zwei)
+    app.DB_PATH = _s_archiv("undo_c", _zwei)
     app._remove_archive_row("03.02.2024|A0500/24")
-    app.ARCHIVE_CSV.write_bytes(b"\x00\x01kaputt")
+    app.DB_PATH.write_bytes(b"\x00\x01kaputt")
     _r, _e = _undo_lauf()
     check("Undo Archiv: unlesbar -> verweigert, Datei byte-gleich",
-          type(_e).__name__ == "UndoRefused" and app.ARCHIVE_CSV.read_bytes() == b"\x00\x01kaputt",
+          type(_e).__name__ == "UndoRefused" and str(_e) == app.ARCHIVE_UNDO_UNREADABLE
+          and app.DB_PATH.read_bytes() == b"\x00\x01kaputt",
           (repr(_e), _r))
 finally:
-    app.st, app.ARCHIVE_CSV, app._persist_workspace, app._write_bytes_atomic = _orig_r
+    app.st, app.DB_PATH, app._persist_workspace = _orig_r
 
 # Wichtig 2: ein 'aktualisierter' Kandidat uebernimmt die Werte seines Vorgaengers
 _alt_k = _s_kand("03.02.2024", ["A0500/24"], "China")
@@ -4941,7 +4978,7 @@ check("gemischt: Vermerke wie erwartet",
       _ku["ersetzt"] == [app.archive_key(_m_alt)] and _kt["im_archiv"] == ["04.02.2024|A0600/24"],
       (_ku["ersetzt"], _kt["im_archiv"]))
 _r, _e = _versuch(lambda: ai.confirm_many(_zm, [(_ku, "CZ-2D", "P", None), (_kt, "CZ-4C", "Q", None)], _am))
-_amd = app.load_archive(_am)
+_amd = app.archiv_anzeigen(_am)
 check("  ... ein Aufruf: Vorgaenger ersetzt, Tageszeile ergaenzt, beide entschieden",
       _e is None and _r == 2
       and sorted(app.archive_key(dict(r)) for _, r in _amd.iterrows()) == sorted([_ku["key"], _kt["im_archiv"][0]])
@@ -5004,7 +5041,7 @@ def _boese_zustand(*a, **k):
     raise ai.ImportStateError(_BOESE)
 
 
-for _name7, _ers7 in (("load_state", {"load_state": _boese_zustand}),
+for _name7, _ers7 in (("zustand_laden", {"zustand_laden": _boese_zustand}),
                       ("unerwartet", {"candidates": lambda z: (_ for _ in ()).throw(RuntimeError(_BOESE))})):
     _stub = _StStub()
     _r, _e = _versuch(_tab_lauf, _stub, **_ers7)
@@ -5377,6 +5414,208 @@ finally:
 import inspect as _ins_w
 _main_q = _ins_w.getsource(app.main)
 check("kein workspace_loaded-Schalter mehr", "workspace_loaded" not in _main_q and "_arbeitsstand_laden()" in _main_q)
+
+print("== Lokale Datenbank: Archiv und Seestarts ==")
+import pandas as _pd_a
+_st_orig_a = app.st; app.st = _StR()
+try:
+    _a0 = app.archiv_lesen()
+    check("Archiv aus DB mit Stand", "nola_stand" in _a0.attrs)
+    _zeile = {s: "" for s in app.ARCHIVE_COLUMNS}
+    _zeile.update({"NOTAM": "Z9999/26", "Startdatum": "07.10.2026", "Startzeit": "01:00", "Nation": "China"})
+    _neu_a = app.merge_archive(_a0, [_zeile], set())
+    app.archiv_schreiben(_neu_a, vorher=_a0)
+    check("geschrieben", "Z9999/26" in set(app.archiv_lesen()["NOTAM"]))
+    try:
+        app.archiv_schreiben(_neu_a, vorher=_a0); check("veraltete Vorlage -> Konflikt", False)
+    except _ndb.Konflikt:
+        check("veraltete Vorlage -> Konflikt", True)
+    _vor_rm = app.archiv_lesen()
+    app._remove_archive_row(app.archive_key(_zeile))
+    check("Zeile entfernt", "Z9999/26" not in set(app.archiv_lesen()["NOTAM"]))
+    check("Schluessel gemerkt", app.archive_key(_zeile) in app.st.session_state.get("archiv_removed", set()))
+    app._undo_reference()
+    check("Undo stellt Zeile wieder her", "Z9999/26" in set(app.archiv_lesen()["NOTAM"]))
+    # Undo verweigert, wenn das Archiv sich danach geaendert hat
+    app._remove_archive_row(app.archive_key(_zeile))
+    _jetzt = app.archiv_lesen()
+    _z2 = dict(_zeile); _z2["NOTAM"] = "Z9998/26"
+    app.archiv_schreiben(app.merge_archive(_jetzt, [_z2], set()), vorher=_jetzt)
+    try:
+        app._undo_reference(); check("Archiv-Undo nach Aenderung verweigert", False)
+    except app.UndoRefused as e:
+        check("Archiv-Undo nach Aenderung verweigert", str(e) == app.ARCHIVE_UNDO_REFUSED)
+    # DB-Lesefehler beim Fortschreiben -> Warnung, kein Abbruch
+    _db_echt = app.DB_PATH
+    app.DB_PATH = _P_db(_tf_db.mkdtemp()) / "fehlt.db"
+    try:
+        _wk = len(app.st.session_state.get("_w", []))
+        _tab = _pd_a.DataFrame({"Status": ["OK"], "_row": [0]})
+        class _G: spaceport_code = "JSLC"; row_indices = [0]
+        app._update_archive([], [_G()], _tab)
+        check("Lesefehler -> Warnung", len(app.st.session_state.get("_w", [])) == _wk + 1)
+    finally:
+        app.DB_PATH = _db_echt
+    _s0 = app.seestarts_lesen()
+    _s0b = _s0.copy(); _s0b.attrs = {}
+    check("Seestarts aus DB = load_sea_launches(CSV)", _s0b.reset_index(drop=True).equals(
+        app.load_sea_launches(app.SEA_LAUNCH_CSV).reset_index(drop=True)))
+    check("Seestarts aus DB, Text-Spalten", all(_s0[c].map(lambda v: isinstance(v, str)).all() for c in _s0.columns))
+finally:
+    app.st = _st_orig_a
+check("app.py schreibt keine Archiv-CSV mehr",
+      "persist_archive(ARCHIVE_CSV" not in open(app.__file__, encoding="utf-8").read()
+      and "persist_sea_launches(SEA_LAUNCH_CSV" not in open(app.__file__, encoding="utf-8").read())
+
+print("== Lokale Datenbank: Archiv und Seestarts, Fortschreiben und Import ==")
+import types as _types_n, copy as _copy_n
+_orig_n = (app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben, app.merge_archive)
+try:
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    _zeile_n = {s: "" for s in app.ARCHIVE_COLUMNS}
+    _zeile_n.update({"NOTAM": "Z7777/26", "Startdatum": "06.10.2026", "Nation": "China"})
+    app.archive_row = lambda g, ev: dict(_zeile_n)
+    _grp_n = [_types_n.SimpleNamespace(spaceport_code="JSLC", row_indices=[0], site_from_geometry=True)]
+    _tab_n = _pd_a.DataFrame({"Status": ["OK"], "_row": [0]})
+    # Zwei Laeufe mit derselben veralteten Ausgangslage: der andere schreibt zwischen Lesen und Schreiben
+    _schreiben_echt = _orig_n[4]
+    _aufrufe_n = []
+    def _schreiben_mit_vorlauf(neu, vorher, db=None):
+        _aufrufe_n.append(1)
+        if len(_aufrufe_n) == 1:
+            _schreiben_echt(neu, vorher=vorher, db=db)  # der parallele Lauf gewinnt
+        return _schreiben_echt(neu, vorher=vorher, db=db)
+    app.archiv_schreiben = _schreiben_mit_vorlauf
+    app._update_archive([], _grp_n, _tab_n)
+    app.archiv_schreiben = _schreiben_echt
+    _an = app.archiv_lesen()
+    check("Fortschreiben: Konflikt -> neu gelesen, genau eine Zeile",
+          list(_an["NOTAM"]).count("Z7777/26") == 1 and len(_an) == 1, _an["NOTAM"].tolist())
+    check("  ... ohne Warnung", not app.st.session_state.get("_w"), app.st.session_state.get("_w"))
+    # Seestarts: automatisches Fortschreiben
+    _see_n = {s: "" for s in app.SEA_LAUNCH_COLUMNS}
+    _see_n.update({"Datum": "06.10.2026", "Zeit": "02:00", "Nation": "China", "Breite": "21.0",
+                   "Länge": "112.0", "NOTAM": "Z7778/26"})
+    app.sea_launch_row = lambda g, ev, sp: dict(_see_n)
+    app._update_sea_launches([], _grp_n, _tab_n, None)
+    _sn = app.seestarts_lesen()
+    check("Seestarts: Fortschreiben schreibt in die DB", list(_sn["NOTAM"]) == ["Z7778/26"], _sn.to_dict("records"))
+    app._update_sea_launches([], _grp_n, _tab_n, None)
+    check("  ... zweiter Lauf ohne Dublette", len(app.seestarts_lesen()) == 1)
+    # Seestart entfernen und Undo
+    _sk = app.sea_launch_key(_see_n)
+    app._remove_sea_launch_row(_sk)
+    check("Seestart entfernen: Zeile weg", app.seestarts_lesen().empty)
+    check("  ... Schluessel gemerkt", _sk in app.st.session_state.get("seestarts_removed", set()))
+    app._update_sea_launches([], _grp_n, _tab_n, None)
+    check("  ... Fortschreiben legt ihn nicht wieder an", app.seestarts_lesen().empty)
+    app._undo_reference()
+    check("  ... Undo stellt ihn wieder her", list(app.seestarts_lesen()["NOTAM"]) == ["Z7778/26"])
+    # Seestarts: DB-Lesefehler -> Warnung, kein Abbruch
+    app.DB_PATH = _P_db(_tf_db.mkdtemp()) / "fehlt.db"
+    _wn = len(app.st.session_state.get("_w", []))
+    _r, _e = None, None
+    try:
+        app._update_sea_launches([], _grp_n, _tab_n, None)
+    except Exception as exc:  # noqa: BLE001
+        _e = exc
+    check("Seestarts: Lesefehler -> Warnung, kein Abbruch",
+          _e is None and len(app.st.session_state.get("_w", [])) == _wn + 1, repr(_e))
+    _r, _e = None, None
+    try:
+        app._remove_sea_launch_row(_sk)
+    except Exception as exc:  # noqa: BLE001
+        _e = exc
+    check("Seestart entfernen: Lesefehler -> Meldung, kein Abbruch",
+          _e is None and app.st.session_state.get("db_meldung", ("", ""))[0] == "error", repr(_e))
+    # Schluessel oder Grund
+    _kdb = _temp_db()
+    check("archiv_schluessel_oder_grund: leeres Archiv -> leere Menge",
+          app.archiv_schluessel_oder_grund(_kdb) == (set(), ""))
+    _k_n, _g_n = app.archiv_schluessel_oder_grund(_kaputte_db())
+    check("archiv_schluessel_oder_grund: unlesbar -> None mit Grund",
+          _k_n is None and "could not be read" in _g_n, _g_n)
+    _k_n, _ = app.archiv_schluessel_oder_grund(_orig_n[1])
+    check("archiv_schluessel_oder_grund: ein Schluessel je Zeile",
+          _k_n is not None and len(_k_n) == len({app.archive_key(dict(r)) for _, r in app.archiv_lesen(_orig_n[1]).iterrows()}))
+    # Archiv-Import: Archiv aendert sich zwischen Lesen und Schreiben -> ImportStateError, nichts geschrieben
+    _idb = _temp_db()
+    _merge_echt = _orig_n[5]
+    def _merge_mit_fremdschreiber(bestand, neue, entfernt=None):
+        _jetzt_i = app.archiv_lesen(_idb)
+        _fremd_i = dict(_zeile_n, NOTAM="Z6666/26")
+        app.archiv_schreiben(_merge_echt(_jetzt_i, [_fremd_i], set()), vorher=_jetzt_i, db=_idb)
+        return _merge_echt(bestand, neue, entfernt=entfernt)
+    app.merge_archive = _merge_mit_fremdschreiber
+    _st_i = {"tage": {}, "entscheidungen": {}}
+    _kand_i = {"key": "konflikt", "row": dict(_zeile_n, NOTAM="Z5555/26"), "notam_ids": ["Z5555/26"], "quellen": []}
+    try:
+        ai.confirm_many(_st_i, [(_kand_i, "CZ-2D", "P", None)], _idb)
+        _fehler_i = None
+    except ai.ImportStateError as exc:
+        _fehler_i = str(exc)
+    finally:
+        app.merge_archive = _merge_echt
+    check("Import: Archiv inzwischen geaendert -> ImportStateError mit Konflikthinweis",
+          _fehler_i is not None and "changed meanwhile" in _fehler_i, _fehler_i)
+    check("  ... nichts geschrieben, nichts vermerkt",
+          list(app.archiv_lesen(_idb)["NOTAM"]) == ["Z6666/26"] and _st_i["entscheidungen"] == {},
+          (app.archiv_lesen(_idb)["NOTAM"].tolist(), _st_i))
+    # remove_orphan mit Konflikt
+    _st_o = {"tage": {}, "entscheidungen": {"x": {"status": "confirmed"}}}
+    _vor_o = app.archiv_lesen(_idb)
+    _lesen_echt = app.archiv_lesen
+    def _lesen_veraltet(db=None):
+        _df = _lesen_echt(db)
+        if db == _idb and not getattr(_lesen_veraltet, "fertig", False):
+            _lesen_veraltet.fertig = True
+            app.archiv_schreiben(_merge_echt(_df, [dict(_zeile_n, NOTAM="Z4444/26")], set()), vorher=_df, db=_idb)
+        return _df
+    app.archiv_lesen = _lesen_veraltet
+    try:
+        ai.remove_orphan(_st_o, app.archive_key(dict(_vor_o.iloc[0])), _idb)
+        _fehler_o = None
+    except ai.ImportStateError as exc:
+        _fehler_o = str(exc)
+    finally:
+        app.archiv_lesen = _lesen_echt
+    check("Import: Remove bei geaendertem Archiv -> ImportStateError, Zeile bleibt",
+          _fehler_o is not None and "changed meanwhile" in _fehler_o
+          and "Z6666/26" in set(app.archiv_lesen(_idb)["NOTAM"]) and _st_o["entscheidungen"]["x"]["status"] == "confirmed",
+          _fehler_o)
+    # Korpus und Zustand ueberleben die Datenbank unveraendert
+    _kx_n = {}
+    ai.merge_korpus(_kx_n, ai.extract_notams("\n\n".join(AI_CN[1:]), "seite_db.html#msg_1")[0])
+    ai.korpus_speichern(_kx_n, _idb)
+    check("Korpus: korpus_speichern/korpus_laden unveraendert", ai.korpus_laden(_idb) == _kx_n and len(_kx_n) > 0)
+    _zs_n = ai.zustand_aus_daten({}, "leer")
+    ai.reevaluate(_kx_n, _zs_n, sp, fir)
+    _zs_n["entscheidungen"]["k1"] = {"status": "confirmed", "rakete": "CZ-2D", "payload": "", "gcat": "",
+                                     "notam_ids": ["A4631/26"], "quellen": ["q"]}
+    _zs_n["review_bestaetigt"] = ["e1"]
+    ai.zustand_speichern(_zs_n, _idb)
+    check("Zustand: zustand_speichern/zustand_laden unveraendert", ai.zustand_laden(_idb) == _zs_n,
+          (ai.zustand_laden(_idb), _zs_n))
+    try:
+        ai.korpus_laden(_P_db(_tf_db.mkdtemp()) / "fehlt.db"); _fk = None
+    except ai.ImportStateError as exc:
+        _fk = str(exc)
+    check("Korpus: DB fehlt -> ImportStateError", _fk is not None and "corpus" in _fk, _fk)
+finally:
+    app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben, app.merge_archive = _orig_n
+import inspect as _ins_n
+_q_tab = _ins_n.getsource(app._archive_import_tab)
+check("Import-Reiter liest und schreibt Korpus und Zustand ueber die Datenbank",
+      "ai.korpus_laden()" in _q_tab and "ai.zustand_laden()" in _q_tab
+      and "ai.load_korpus(" not in _q_tab and "ai.save_state(" not in _q_tab)
+check("Editoren entschaerfen Archiv- und Seestartwerte",
+      "_md_plain(" in _ins_n.getsource(app._archive_editor) and "_md_plain(" in _ins_n.getsource(app._sea_launch_editor))
+_q_dlg = _ins_n.getsource(app._reference_dialog)
+check("Referenz-Dialog nennt nola.db statt Datei", "straight to the file on disk" not in _q_dlg
+      and _q_dlg.count('"nola.db"') == 0 and "`nola.db`" in _q_dlg)
+check("Datei-Undo-Bruecke entfernt", not any(hasattr(app, n) for n in
+      ("_push_undo_datei", "_undo_datei", "_undo_archive", "_file_hash")))
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

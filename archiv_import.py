@@ -321,6 +321,27 @@ def save_korpus(korpus: Dict[str, KorpusNotam], path: Path = KORPUS_JSON) -> Non
     )
 
 
+
+def korpus_laden(db: Optional[Path] = None) -> Dict[str, KorpusNotam]:
+    """Liest den Archiv-Korpus aus der Datenbank; unerwartete Struktur bricht ab."""
+    try:
+        with app._db(db) as conn:
+            eintraege = app.nola_db.lade_korpus(conn)
+    except app.nola_db.DbFehler as exc:
+        raise ImportStateError("The archive corpus could not be read ({}).".format(exc)) from exc
+    return korpus_aus_daten({"notams": eintraege}, "archiv_korpus (nola.db)")
+
+
+def korpus_speichern(korpus: Dict[str, KorpusNotam], db: Optional[Path] = None) -> None:
+    """Schreibt den Archiv-Korpus in die Datenbank."""
+    try:
+        with app._db(db) as conn:
+            app.nola_db.speichere_korpus(conn, [
+                (n.schluessel, {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen})
+                for n in sorted(korpus.values(), key=lambda n: n.schluessel)])
+    except app.nola_db.DbFehler as exc:
+        raise ImportStateError("The archive corpus was not saved ({}).".format(exc)) from exc
+
 @dataclass
 class ImportReport:
     """Was ein Stapel gebracht hat - auch das, was nicht verwertbar war."""
@@ -1007,6 +1028,25 @@ def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
     write_json_atomic(path, state)
 
 
+
+def zustand_laden(db: Optional[Path] = None) -> Dict[str, Any]:
+    """Liest den Importzustand aus der Datenbank; unerwartete Struktur bricht ab."""
+    try:
+        with app._db(db) as conn:
+            roh = app.nola_db.lade_importzustand(conn)
+    except app.nola_db.DbFehler as exc:
+        raise ImportStateError("The import state could not be read ({}).".format(exc)) from exc
+    return zustand_aus_daten(roh, "archiv_import (nola.db)")
+
+
+def zustand_speichern(state: Dict[str, Any], db: Optional[Path] = None) -> None:
+    """Schreibt den Importzustand in die Datenbank."""
+    try:
+        with app._db(db) as conn:
+            app.nola_db.speichere_importzustand(conn, state)
+    except app.nola_db.DbFehler as exc:
+        raise ImportStateError("The import state was not saved ({}).".format(exc)) from exc
+
 def detection_stamp(
     paths: Sequence[Path] = (app.APP_DIR / "app.py", app.APP_DIR / "archiv_import.py"),
     db: Optional[Path] = None,
@@ -1115,27 +1155,38 @@ def keep_orphan(state: Dict[str, Any], key: str) -> None:
     state["entscheidungen"][key]["behalten"] = True
 
 
-def _archiv_lesen(archiv: Path) -> pd.DataFrame:
+def _archiv_lesen(archiv: Optional[Path] = None) -> pd.DataFrame:
     """
-    Liest das Startarchiv strikt: eine vorhandene, aber unlesbare Datei bricht
-    mit ImportStateError ab, statt als leeres Archiv zu gelten - sonst
-    ueberschriebe der naechste Schreibvorgang den ganzen Bestand.
+    Liest das Startarchiv strikt aus der Datenbank: ein Lesefehler bricht mit
+    ImportStateError ab, statt als leeres Archiv zu gelten.
     """
     try:
-        return app.read_archive_strict(archiv)
+        return app.archiv_lesen(archiv)
     except app.ArchiveUnreadable as exc:
         raise ImportStateError(str(exc)) from exc
 
 
+def _archiv_schreiben(archiv: Optional[Path], neu: pd.DataFrame, vorher: pd.DataFrame) -> None:
+    """Schreibt das Archiv nur, wenn es seit dem Lesen von `vorher` unveraendert ist."""
+    try:
+        app.archiv_schreiben(neu, vorher=vorher, db=archiv)
+    except app.nola_db.Konflikt as exc:
+        raise ImportStateError(
+            "The launch archive changed meanwhile - nothing was written, please reload the tab."
+        ) from exc
+    except app.nola_db.DbFehler as exc:
+        raise ImportStateError("The launch archive was not written ({}).".format(exc)) from exc
+
+
 def _archiv_pruefen(
-    archiv: Path,
+    archiv: Optional[Path],
     vorhanden: Set[str],
     fehlend: Set[str],
     werte: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> None:
     """
-    Liest das Archiv nach dem Schreiben zurueck. app.persist_archive schluckt
-    Schreibfehler; erst dieser Abgleich zeigt, ob die Aenderung angekommen ist.
+    Liest das Archiv nach dem Schreiben zurueck; erst dieser Abgleich zeigt,
+    ob die Aenderung angekommen ist.
     `werte`: je Schluessel Spalten, die jede Zeile dieses Schluessels tragen muss.
     """
     zeilen = [(app.archive_key(dict(r)), r) for _, r in _archiv_lesen(archiv).iterrows()]
@@ -1147,19 +1198,19 @@ def _archiv_pruefen(
     )
     if not vorhanden <= keys or fehlend & keys or falsch:
         raise ImportStateError(
-            "{} could not be written. Nothing was recorded - please check the file "
-            "and try again.".format(archiv.name)
+            "The launch archive in nola.db could not be written. Nothing was recorded - "
+            "please check the database and try again."
         )
 
 
-def remove_orphan(state: Dict[str, Any], key: str, archiv: Path = app.ARCHIVE_CSV) -> None:
+def remove_orphan(state: Dict[str, Any], key: str, archiv: Optional[Path] = None) -> None:
     """Die einzige Stelle, an der der Import eine Archivzeile loescht - nur auf Anweisung."""
     bestand = _archiv_lesen(archiv)
     if not bestand.empty:
-        bestand = bestand[
+        gefiltert = bestand[
             [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
         ].reset_index(drop=True)
-        app.persist_archive(archiv, bestand)
+        _archiv_schreiben(archiv, gefiltert, vorher=bestand)
     _archiv_pruefen(archiv, set(), {key})
     state["entscheidungen"][key] = {"status": "removed"}
 
@@ -1205,7 +1256,7 @@ def _werte_des_vorgaengers(
     }
 
 
-def candidates(state: Dict[str, Any], archiv: Path = app.ARCHIVE_CSV) -> List[Dict[str, Any]]:
+def candidates(state: Dict[str, Any], archiv: Optional[Path] = None) -> List[Dict[str, Any]]:
     """
     Alle Kandidaten, je Schluessel einmal, mit Entscheidung und zwei Vermerken:
 
@@ -1307,7 +1358,7 @@ def totals(state: Dict[str, Any]) -> Dict[str, int]:
 def confirm_many(
     state: Dict[str, Any],
     auswahl: Sequence[Tuple[Dict[str, Any], str, str, Optional[GcatStart]]],
-    archiv: Path = app.ARCHIVE_CSV,
+    archiv: Optional[Path] = None,
 ) -> int:
     """
     Schreibt bestaetigte Kandidaten ins Startarchiv - in einem Schreibvorgang.
@@ -1332,6 +1383,7 @@ def confirm_many(
     if not auswahl:
         return 0
     bestand = _archiv_lesen(archiv)
+    gelesen = bestand  # ungefiltert, sein Stand schuetzt den Schreibvorgang
     ergaenzen = [a for a in auswahl if a[0].get("im_archiv")]
     anlegen = [a for a in auswahl if not a[0].get("im_archiv")]
     # Ergaenzen: nur Traegersystem und Payload der vorhandenen Zeile(n)
@@ -1345,8 +1397,8 @@ def confirm_many(
         for ziel in kand["im_archiv"]:
             if ziel not in schluessel:
                 raise ImportStateError(
-                    "The archive row {} is no longer in {}. Nothing was written - "
-                    "please reload the tab.".format(ziel, archiv.name)
+                    "The archive row {} is no longer in the launch archive. Nothing was "
+                    "written - please reload the tab.".format(ziel)
                 )
             for spalte, wert in (("Tr\u00e4gersystem", rakete), ("Payload", payload)):
                 if wert:
@@ -1391,7 +1443,7 @@ def confirm_many(
         if kand.get("im_archiv"):
             neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])
             neu[kand["key"]]["vorher"] = {z: dict(vorher_werte[z]) for z in kand["im_archiv"]}
-    app.persist_archive(archiv, app.merge_archive(bestand, zeilen, entfernt=set()))
+    _archiv_schreiben(archiv, app.merge_archive(bestand, zeilen, entfernt=set()), vorher=gelesen)
     geschrieben = {app.archive_key(r) for r in zeilen}
     _archiv_pruefen(archiv, geschrieben | set(werte), ersetzt - geschrieben, werte)
     state["entscheidungen"].update(neu)

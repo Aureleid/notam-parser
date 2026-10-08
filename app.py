@@ -5191,6 +5191,73 @@ def persist_archive(path: Path, df: pd.DataFrame) -> None:
         pass
 
 
+
+def archiv_lesen(db: Optional[Path] = None) -> pd.DataFrame:
+    """
+    Startarchiv aus der Datenbank fuer jeden Schreibvorgang. Ein Lesefehler wird
+    ArchiveUnreadable - so greifen alle bestehenden Schutzpfade unveraendert.
+    """
+    try:
+        with _db(db) as conn:
+            return nola_db.lese_tabelle(conn, "startarchiv")
+    except nola_db.DbFehler as exc:
+        raise ArchiveUnreadable(
+            "The launch archive could not be read from the database ({}). It was left "
+            "untouched and not updated.".format(exc)
+        ) from exc
+
+
+def archiv_anzeigen(db: Optional[Path] = None) -> pd.DataFrame:
+    """Fuer Anzeige und Zaehlung; bei Fehler leer (wie load_archive)."""
+    try:
+        return archiv_lesen(db)
+    except ArchiveUnreadable:
+        return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
+
+
+def archiv_schluessel_oder_grund(db: Optional[Path] = None) -> Tuple[Optional[Set[str]], str]:
+    """Schluessel des Archivs; bei unlesbarer Datenbank None und der Grund."""
+    try:
+        bestand = archiv_lesen(db)
+    except ArchiveUnreadable as exc:
+        return None, str(exc)
+    return {archive_key(dict(r)) for _, r in bestand.iterrows()}, ""
+
+
+def archiv_schreiben(neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None) -> str:
+    """Ersetzt das Archiv - nur, wenn es noch dem Stand von `vorher` entspricht."""
+    stand = vorher.attrs.get("nola_stand")
+    if not stand:
+        raise ValueError("archiv_schreiben needs `vorher` as read by archiv_lesen")
+    with _db(db) as conn:
+        return nola_db.ersetze_tabelle(conn, "startarchiv", neu[list(ARCHIVE_COLUMNS)], stand)
+
+
+def seestarts_lesen(db: Optional[Path] = None) -> pd.DataFrame:
+    """Seestart-Protokoll aus der Datenbank, Form wie load_sea_launches (Text, leer = '')."""
+    with _db(db) as conn:
+        roh = nola_db.lese_tabelle(conn, "seestarts")
+    df = roh.fillna("").astype(str)
+    df.attrs["nola_stand"] = roh.attrs["nola_stand"]
+    return df
+
+
+def seestarts_schreiben(neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None) -> str:
+    """Ersetzt das Seestart-Protokoll - nur, wenn es noch dem Stand von `vorher` entspricht."""
+    stand = vorher.attrs.get("nola_stand")
+    if not stand:
+        raise ValueError("seestarts_schreiben needs `vorher` as read by seestarts_lesen")
+    with _db(db) as conn:
+        return nola_db.ersetze_tabelle(conn, "seestarts", neu[list(SEA_LAUNCH_COLUMNS)], stand)
+
+
+def _seestarts_anzeigen(db: Optional[Path] = None) -> pd.DataFrame:
+    """Fuer Anzeige und Zaehlung; bei Fehler leer (wie load_sea_launches)."""
+    try:
+        return seestarts_lesen(db)
+    except nola_db.DbFehler:
+        return pd.DataFrame(columns=list(SEA_LAUNCH_COLUMNS))
+
 def group_to_export_dict(g: LaunchGroup) -> Dict[str, Any]:
     """JSON-taugliche Darstellung eines Starts."""
     data = asdict(g)
@@ -5681,25 +5748,6 @@ FIR_EXPORT_COLUMNS = (
 VEHICLE_EXPORT_COLUMNS = ("Land", "Name", "Alternativname englisch", "Abkürzung")
 
 
-def _push_undo_datei(path: Path, label: str) -> Optional[Dict[str, Any]]:
-    """
-    Sichert den Dateistand vor einer Aenderung, damit sie ruecknehmbar bleibt.
-    Rueckgabe: der neue Eintrag (None, wenn die Datei nicht lesbar war).
-
-    Uebergang: nur noch fuer Startarchiv und Seestart-Protokoll, solange diese
-    als Datei gefuehrt werden; Referenzen laufen ueber _push_undo (Datenbank).
-    """
-    try:
-        inhalt = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    stapel = st.session_state.setdefault("ref_undo", [])
-    eintrag = {"pfad": str(path), "inhalt": inhalt, "label": label}
-    stapel.append(eintrag)
-    del stapel[:-UNDO_LIMIT]
-    return eintrag
-
-
 class UndoRefused(Exception):
     """Rueckgaengig wurde verweigert - die Meldung sagt dem Benutzer, warum."""
 
@@ -5710,38 +5758,6 @@ ARCHIVE_UNDO_REFUSED = (
 ARCHIVE_UNDO_UNREADABLE = (
     "Launch archive could not be read - undo refused, the file was left untouched."
 )
-
-
-def _file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _undo_archive(letzter: Dict[str, Any], stapel: List[Dict[str, Any]]) -> Optional[str]:
-    """
-    Nimmt eine Aenderung am Startarchiv zurueck - nur, wenn es seit dieser
-    Aenderung unveraendert ist. Sonst (Import-Bestaetigungen, Tageslauf)
-    wuerde die Ruecknahme neuere Zeilen still mit zuruecksetzen.
-
-    Geaendert: der Eintrag faellt vom Stapel, denn dieser Stand kehrt nicht
-    zurueck - und bliebe er liegen, versperrte er die Ruecknahme aller
-    aelteren Referenzaenderungen darunter. Unlesbar: der Eintrag bleibt, der
-    Benutzer kann die Datei pruefen und es erneut versuchen.
-    """
-    pfad = Path(letzter["pfad"])
-    try:
-        read_archive_strict(pfad)
-        jetzt = _file_hash(pfad) if pfad.exists() else ""
-    except (ArchiveUnreadable, OSError) as exc:
-        raise UndoRefused(ARCHIVE_UNDO_UNREADABLE) from exc
-    stapel.pop()
-    if jetzt != letzter["archiv_nachher"]:
-        raise UndoRefused(ARCHIVE_UNDO_REFUSED)
-    try:
-        # dieselben utf-8-sig-Bytes, die persist_archive vorher geschrieben hatte
-        _write_bytes_atomic(pfad, letzter["roh"])
-    except OSError:
-        return None
-    return letzter["label"]
 
 
 REFERENCE_UNDO_REFUSED = (
@@ -5767,21 +5783,6 @@ def _push_undo(tabelle: str, vorher: pd.DataFrame, nachher_stand: str, label: st
     return eintrag
 
 
-def _undo_datei(letzter: Dict[str, Any], stapel: List[Dict[str, Any]]) -> Optional[str]:
-    """
-    Uebergang: Ruecknahme eines Datei-Eintrags (Startarchiv ueber _undo_archive,
-    Seestart-Protokoll durch Zurueckschreiben des alten Inhalts).
-    """
-    if "archiv_nachher" in letzter:
-        return _undo_archive(letzter, stapel)
-    stapel.pop()
-    try:
-        Path(letzter["pfad"]).write_text(letzter["inhalt"], encoding="utf-8")
-    except OSError:
-        return None
-    return letzter["label"]
-
-
 def _undo_reference() -> Optional[str]:
     """
     Nimmt die letzte Aenderung zurueck - nur, wenn die Tabelle seitdem
@@ -5793,8 +5794,6 @@ def _undo_reference() -> Optional[str]:
     if not stapel:
         return None
     letzter = stapel[-1]
-    if "pfad" in letzter:
-        return _undo_datei(letzter, stapel)
     tabelle = letzter["tabelle"]
     verweigert = ARCHIVE_UNDO_REFUSED if tabelle == "startarchiv" else REFERENCE_UNDO_REFUSED
     try:
@@ -6105,7 +6104,7 @@ def _reference_dialog(
     """Optionsmenue zur Pflege der Startplatz- und FIR-Referenz."""
     st.caption(
         "Removed entries drop out of every calculation, added ones take effect "
-        "immediately. Every change is written straight to the file on disk - "
+        "immediately. Every change is written straight to the database `nola.db` - "
         "use Undo below to take one back."
     )
     flash = st.session_state.pop("ref_flash", None)
@@ -6118,8 +6117,8 @@ def _reference_dialog(
         "Launch Sites ({})".format(len(spaceports)),
         "ICAO FIR / ACC ({})".format(len(firs)),
         "Launch Vehicles ({})".format(len(vehicles)),
-        "Launch Archive ({})".format(len(load_archive(ARCHIVE_CSV))),
-        "Sea Launches ({})".format(len(load_sea_launches(SEA_LAUNCH_CSV))),
+        "Launch Archive ({})".format(len(archiv_anzeigen())),
+        "Sea Launches ({})".format(len(_seestarts_anzeigen())),
     ]
     # Archiv-Import nur lokal (fail-closed), nie in der oeffentlichen Fassung
     mit_import = archive_import_allowed()
@@ -6143,10 +6142,7 @@ def _reference_dialog(
     st.divider()
     stapel = st.session_state.get("ref_undo", [])
     st.caption(
-        "Changes are written to `{}`, `{}`, `{}` and `{}` right away and "
-        "survive a restart.".format(
-            "nola.db", "nola.db", "nola.db", ARCHIVE_CSV.name
-        )
+        "Changes are written to `nola.db` right away and survive a restart."
     )
     a, b, c, d = st.columns(4)
     if a.button(
@@ -6457,7 +6453,7 @@ def _vehicle_picker(
 def _show_archive_status(platzhalter: Any) -> None:
     """Schreibt den Archivstand in die Seitenleiste."""
     try:
-        anzahl = len(read_archive_strict(ARCHIVE_CSV))
+        anzahl = len(archiv_lesen())
     except ArchiveUnreadable:
         platzhalter.markdown(
             "{} Launch archive: unreadable - not updated".format(
@@ -6499,19 +6495,28 @@ def _update_archive(
     ]
     if not kandidaten:
         return
-    try:
-        bestand = read_archive_strict(ARCHIVE_CSV)
-    except ArchiveUnreadable as exc:
-        # Nie ueber eine unlesbare Datei schreiben; die Auswertung laeuft weiter.
-        st.warning("Launch archive: {}".format(exc))
-        return
-    neu = merge_archive(
-        bestand,
-        [archive_row(g, events) for g in kandidaten],
-        set(st.session_state.get("archiv_removed", set())),
-    )
-    if neu.to_csv(index=False) != bestand.to_csv(index=False):
-        persist_archive(ARCHIVE_CSV, neu)
+    for _ in range(2):  # bei Konflikt einmal neu lesen und erneut zusammenfuehren
+        try:
+            bestand = archiv_lesen()
+        except ArchiveUnreadable as exc:
+            # Nie ueber ein unlesbares Archiv schreiben; die Auswertung laeuft weiter.
+            st.warning("Launch archive: {}".format(exc))
+            return
+        neu = merge_archive(
+            bestand,
+            [archive_row(g, events) for g in kandidaten],
+            set(st.session_state.get("archiv_removed", set())),
+        )
+        if neu.to_csv(index=False) == bestand.to_csv(index=False):
+            return
+        try:
+            archiv_schreiben(neu, vorher=bestand)
+            return
+        except nola_db.Konflikt:
+            continue
+        except nola_db.DbFehler as exc:
+            st.warning("Launch archive: not updated ({})".format(exc))
+            return
 
 
 def _update_sea_launches(
@@ -6541,34 +6546,59 @@ def _update_sea_launches(
     ]
     if not kandidaten:
         return
-    bestand = load_sea_launches(SEA_LAUNCH_CSV)
-    neu = merge_sea_launches(
-        bestand,
-        [sea_launch_row(g, events, spaceports) for g in kandidaten],
-        set(st.session_state.get("seestarts_removed", set())),
-    )
-    if neu.to_csv(index=False) != bestand.to_csv(index=False):
-        persist_sea_launches(SEA_LAUNCH_CSV, neu)
+    for _ in range(2):  # bei Konflikt einmal neu lesen und erneut zusammenfuehren
+        try:
+            bestand = seestarts_lesen()
+        except nola_db.DbFehler as exc:
+            # Nie ueber ein unlesbares Protokoll schreiben; die Auswertung laeuft weiter.
+            st.warning("Sea launch log: could not be read ({}) - not updated.".format(exc))
+            return
+        neu = merge_sea_launches(
+            bestand,
+            [sea_launch_row(g, events, spaceports) for g in kandidaten],
+            set(st.session_state.get("seestarts_removed", set())),
+        )
+        if neu.to_csv(index=False) == bestand.to_csv(index=False):
+            return
+        try:
+            seestarts_schreiben(neu, vorher=bestand)
+            return
+        except nola_db.Konflikt:
+            continue
+        except nola_db.DbFehler as exc:
+            st.warning("Sea launch log: not updated ({})".format(exc))
+            return
 
 
 def _remove_sea_launch_row(schluessel: str) -> None:
     """Loescht eine Protokollzeile dauerhaft."""
-    _push_undo_datei(SEA_LAUNCH_CSV, "Sea launch row removed")
+    try:
+        bestand = seestarts_lesen()
+    except nola_db.DbFehler as exc:
+        _melde_db("error", "Sea launch log: {} Nothing was removed.".format(exc))
+        return
+    behalten = bestand[[sea_launch_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
+    try:
+        neu_stand = seestarts_schreiben(behalten, vorher=bestand)
+    except nola_db.Konflikt:
+        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        return
+    except nola_db.DbFehler as exc:
+        _melde_db("error", "Sea launch log: {} Nothing was removed.".format(exc))
+        return
+    _push_undo("seestarts", bestand, neu_stand, "Sea launch row removed")
     st.session_state.setdefault("seestarts_removed", set()).add(schluessel)
-    bestand = load_sea_launches(SEA_LAUNCH_CSV)
-    behalten = [
-        r for _, r in bestand.iterrows() if sea_launch_key(dict(r)) != schluessel
-    ]
-    persist_sea_launches(
-        SEA_LAUNCH_CSV, pd.DataFrame(behalten, columns=list(SEA_LAUNCH_COLUMNS))
-    )
     _persist_workspace()
     st.session_state["ref_flash"] = "Sea launch row removed"
 
 
 def _sea_launch_editor() -> None:
     """Tabelle des Seestart-Protokolls mit Entfernen-Funktion."""
-    liste = load_sea_launches(SEA_LAUNCH_CSV)
+    try:
+        liste = seestarts_lesen()
+    except nola_db.DbFehler as exc:
+        st.error(_md_plain("Sea launch log: could not be read ({}).".format(exc)))
+        return
     st.caption(
         "Launches from mobile platforms. The launch point here does not come "
         "from the launch-site reference but from the geometry of the messages: "
@@ -6579,7 +6609,7 @@ def _sea_launch_editor() -> None:
     if liste.empty:
         st.info(
             "No sea launch recorded yet. As soon as an analysis derives a launch "
-            "point from the geometry, `{}` fills itself.".format(SEA_LAUNCH_CSV.name)
+            "point from the geometry, the sea launch log in `nola.db` fills itself."
         )
         return
     breiten = (1.1, 0.8, 1.0, 1.0, 1.0, 0.9, 0.9, 1.7, 1.3)
@@ -6594,9 +6624,11 @@ def _sea_launch_editor() -> None:
         schluessel = sea_launch_key(dict(r))
         knopf = _reference_row(
             (
-                str(r["Datum"]), str(r["Zeit"]), str(r["Nation"])[:12],
-                str(r["Breite"]), str(r["Länge"]), str(r["Azimut"]),
-                str(r["Inklination"]), str(r["Nächster bekannter Platz"])[:24], "",
+                _md_plain(str(r["Datum"])), _md_plain(str(r["Zeit"])),
+                _md_plain(str(r["Nation"])[:12]),
+                _md_plain(str(r["Breite"])), _md_plain(str(r["Länge"])),
+                _md_plain(str(r["Azimut"])), _md_plain(str(r["Inklination"])),
+                _md_plain(str(r["Nächster bekannter Platz"])[:24]), "",
             ),
             breiten,
         )
@@ -6617,30 +6649,22 @@ def _remove_archive_row(schluessel: str) -> None:
     denselben Start sofort wieder an, solange sein NOTAM in der Tagesdatei steht.
     """
     try:
-        bestand = read_archive_strict(ARCHIVE_CSV)
+        bestand = archiv_lesen()
     except ArchiveUnreadable as exc:
         st.error("Launch archive: {} Nothing was removed.".format(exc))
         return
-    eintrag = _push_undo_datei(ARCHIVE_CSV, "Archivzeile entfernt")
-    if eintrag is not None:
-        try:
-            eintrag["roh"] = ARCHIVE_CSV.read_bytes()
-        except OSError:
-            st.session_state["ref_undo"].remove(eintrag)
-            eintrag = None
+    behalten = bestand[[archive_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
+    try:
+        neu_stand = archiv_schreiben(behalten, vorher=bestand)
+    except nola_db.Konflikt:
+        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        return
+    except nola_db.DbFehler as exc:
+        _melde_db("error", "Launch archive: {} Nothing was removed.".format(exc))
+        return
+    # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
+    _push_undo("startarchiv", bestand, neu_stand, "Archivzeile entfernt")
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
-    behalten = [
-        r for _, r in bestand.iterrows() if archive_key(dict(r)) != schluessel
-    ]
-    persist_archive(
-        ARCHIVE_CSV, pd.DataFrame(behalten, columns=list(ARCHIVE_COLUMNS))
-    )
-    if eintrag is not None:
-        # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
-        try:
-            eintrag["archiv_nachher"] = _file_hash(ARCHIVE_CSV)
-        except OSError:
-            eintrag["archiv_nachher"] = ""
     _persist_workspace()
     st.session_state["ref_flash"] = "Archivzeile entfernt"
 
@@ -6648,12 +6672,12 @@ def _remove_archive_row(schluessel: str) -> None:
 def _archive_editor() -> None:
     """Tabelle des Startarchivs mit Entfernen-Funktion."""
     try:
-        archiv = read_archive_strict(ARCHIVE_CSV)
+        archiv = archiv_lesen()
     except ArchiveUnreadable as exc:
-        st.error("Launch archive: {}".format(exc))
+        st.error(_md_plain("Launch archive: {}".format(exc)))
         return
     st.caption(
-        "This file is written by the application itself: every recognised launch "
+        "This table is written by the application itself: every recognised launch "
         "gets a row, payload or not. You add the payload under *NOTAM Data* - it is "
         "never overwritten by a later run. That is why there is no form to add a "
         "row here, only to remove one."
@@ -6661,7 +6685,7 @@ def _archive_editor() -> None:
     if archiv.empty:
         st.info(
             "No launches archived yet. As soon as a NOTAM file has been "
-            "analysed, `{}` fills itself.".format(ARCHIVE_CSV.name)
+            "analysed, the launch archive in `nola.db` fills itself."
         )
         return
     suche = st.text_input(
@@ -6684,14 +6708,14 @@ def _archive_editor() -> None:
         schluessel = archive_key(dict(r))
         knopf = _reference_row(
             (
-                "`{}`".format(str(r["NOTAM"])[:24]),
-                str(r["Startdatum"]),
-                str(r["Startzeit"]),
-                str(r["Nation"])[:12],
-                str(r["Weltraumbahnhof"]),
-                str(r["Trägersystem"])[:14] or "-",
-                str(r["Payload"])[:16] or "-",
-                str(r["Orbit"]),
+                _md_plain(str(r["NOTAM"])[:24]),
+                _md_plain(str(r["Startdatum"])),
+                _md_plain(str(r["Startzeit"])),
+                _md_plain(str(r["Nation"])[:12]),
+                _md_plain(str(r["Weltraumbahnhof"])),
+                _md_plain(str(r["Trägersystem"])[:14] or "-"),
+                _md_plain(str(r["Payload"])[:16] or "-"),
+                _md_plain(str(r["Orbit"])),
                 "",
             ),
             breiten,
@@ -6742,8 +6766,8 @@ def _archive_import_tab(
         import archiv_import as ai  # erst hier - siehe Modulkopf von archiv_import
 
         try:
-            korpus = ai.load_korpus()
-            zustand = ai.load_state()
+            korpus = ai.korpus_laden()
+            zustand = ai.zustand_laden()
         except (ai.ImportStateError, OSError) as exc:
             st.error(_md_plain(exc))
             return
@@ -6771,8 +6795,8 @@ def _archive_import_tab(
             )
             balken.empty()
             try:
-                ai.save_korpus(korpus)
-                ai.save_state(zustand)
+                ai.korpus_speichern(korpus)
+                ai.zustand_speichern(zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:
@@ -6803,7 +6827,7 @@ def _archive_import_tab(
                     fortschritt=lambda n, g: balken.progress(n / g, text="Day {} of {}".format(n, g)),
                 )
                 try:
-                    ai.save_state(zustand)
+                    ai.zustand_speichern(zustand)
                 except (ai.ImportStateError, OSError) as exc:
                     st.error(_md_plain(exc))
                 else:
@@ -6822,7 +6846,7 @@ def _archive_import_tab(
                 if b.button("Keep", key="ai_keep_" + key):
                     try:
                         ai.keep_orphan(zustand, key)
-                        ai.save_state(zustand)
+                        ai.zustand_speichern(zustand)
                     except (ai.ImportStateError, OSError) as exc:
                         st.error(_md_plain(exc))
                     else:
@@ -6830,7 +6854,7 @@ def _archive_import_tab(
                 if c.button("Remove from archive", key="ai_rm_" + key):
                     try:
                         ai.remove_orphan(zustand, key)
-                        ai.save_state(zustand)
+                        ai.zustand_speichern(zustand)
                     except (ai.ImportStateError, OSError) as exc:
                         st.error(_md_plain(exc))
                     else:
@@ -6856,7 +6880,7 @@ def _archive_import_tab(
         ):
             try:
                 ai.confirm_many(zustand, sammel)
-                ai.save_state(zustand)
+                ai.zustand_speichern(zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:
@@ -6878,7 +6902,7 @@ def _archive_import_tab(
                 if a.button("Space Launch", key="ai_sl_" + p["event_key"]):
                     ai.review_launch(zustand, korpus, p["event_key"], p["tag"], spaceports, firs)
                     try:
-                        ai.save_state(zustand)
+                        ai.zustand_speichern(zustand)
                     except (ai.ImportStateError, OSError) as exc:
                         st.error(_md_plain(exc))
                     else:
@@ -6886,7 +6910,7 @@ def _archive_import_tab(
                 if b.button("Hide", key="ai_hide_" + p["event_key"]):
                     ai.review_hide(zustand, p["event_key"])
                     try:
-                        ai.save_state(zustand)
+                        ai.zustand_speichern(zustand)
                     except (ai.ImportStateError, OSError) as exc:
                         st.error(_md_plain(exc))
                     else:
@@ -7009,7 +7033,7 @@ def _archive_import_candidate(
             wert = "" if rakete == VEHICLE_SEPARATOR else rakete
             try:
                 ai.confirm_many(zustand, [(k, wert, payload.strip(), treffer)])
-                ai.save_state(zustand)
+                ai.zustand_speichern(zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:
@@ -7017,7 +7041,7 @@ def _archive_import_candidate(
         if b.button("Discard", key="ai_no_" + k["key"]):
             ai.reject(zustand, k["key"])
             try:
-                ai.save_state(zustand)
+                ai.zustand_speichern(zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:
@@ -7410,7 +7434,7 @@ def main() -> None:
         )
         # Einmal je Durchlauf gelesen: der Pad-Hinweis rechnet darauf, und je Zeile
         # zu lesen hiesse, dieselbe Datei dutzendfach anzufassen.
-        pad_historie = load_archive(ARCHIVE_CSV)
+        pad_historie = archiv_anzeigen()
         table = events_to_dataframe(visible_events, vehicles)
         _update_archive(events, stats.get("groups", []), table)
         _update_sea_launches(events, stats.get("groups", []), table, spaceports)
@@ -7418,7 +7442,7 @@ def main() -> None:
 
         # Vergangene Starts: erst jetzt, das Archiv ist geschrieben. Ausgeblendet
         # wird nur Archiviertes; geloescht wird nichts.
-        archiv_keys, archiv_grund = archive_keys_or_reason(ARCHIVE_CSV)
+        archiv_keys, archiv_grund = archiv_schluessel_oder_grund()
         entfernt = set(st.session_state.get("archiv_removed", set()))
         jetzt = datetime.now(timezone.utc)
         past_rows = (
