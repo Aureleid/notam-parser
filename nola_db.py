@@ -16,6 +16,7 @@ import math
 import os
 import sqlite3
 import urllib.parse
+from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -426,5 +427,235 @@ def zaehle(conn: sqlite3.Connection, tabelle: str) -> int:
         raise ValueError("unknown table {}".format(tabelle))
     try:
         return int(conn.execute("SELECT count(*) FROM {}".format(_q(tabelle))).fetchone()[0])
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+
+
+ENTSCHEIDUNGS_SCHLUESSEL: Dict[str, str] = {
+    "confirmed_launches": "bestaetigt",
+    "hidden_events": "ausgeblendet",
+    "rejected_launches": "abgelehnt",
+    "restored_events": "wiederhergestellt",
+    "archiv_removed": "archiv_entfernt",
+    "seestarts_removed": "seestart_entfernt",
+}
+ZUWEISUNGS_SCHLUESSEL: Dict[str, str] = {
+    "vehicle_assignments": "traegersystem",
+    "payload_assignments": "payload",
+    "launch_site_assignments": "startplatz",
+}
+
+
+def leerer_arbeitsstand() -> Dict[str, Any]:
+    stand: Dict[str, Any] = {"manual_notams": []}
+    for k in ENTSCHEIDUNGS_SCHLUESSEL:
+        stand[k] = set()
+    for k in ZUWEISUNGS_SCHLUESSEL:
+        stand[k] = {}
+    return stand
+
+
+def lade_arbeitsstand(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Arbeitsstand in der Form des session_state (Mengen, Woerterbuecher, Liste)."""
+    stand = leerer_arbeitsstand()
+    nach_art = {art: k for k, art in ENTSCHEIDUNGS_SCHLUESSEL.items()}
+    nach_feld = {feld: k for k, feld in ZUWEISUNGS_SCHLUESSEL.items()}
+    try:
+        for schluessel, art in conn.execute("SELECT schluessel, art FROM entscheidungen"):
+            stand[nach_art[art]].add(schluessel)
+        for schluessel, feld, wert in conn.execute(
+            "SELECT schluessel, feld, wert FROM zuweisungen"
+        ):
+            stand[nach_feld[feld]][schluessel] = wert
+        stand["manual_notams"] = [
+            {"id": i, "text": t, "added": a or ""}
+            for i, t, a in conn.execute("SELECT id, text, added FROM manuelle_notams ORDER BY id")
+        ]
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    return stand
+
+
+def _je_schluessel(stand: Dict[str, Any]) -> Dict[str, frozenset]:
+    out: Dict[str, set] = defaultdict(set)
+    for k, art in ENTSCHEIDUNGS_SCHLUESSEL.items():
+        for schluessel in stand.get(k, ()) or ():
+            out[str(schluessel)].add(art)
+    return {s: frozenset(a) for s, a in out.items()}
+
+
+def _zuweisungen(stand: Dict[str, Any]) -> Dict[Tuple[str, str], str]:
+    out: Dict[Tuple[str, str], str] = {}
+    for k, feld in ZUWEISUNGS_SCHLUESSEL.items():
+        for schluessel, wert in (stand.get(k) or {}).items():
+            if wert:
+                out[(str(schluessel), feld)] = str(wert)
+    return out
+
+
+def schreibe_unterschiede(
+    conn: sqlite3.Connection, vorher: Dict[str, Any], nachher: Dict[str, Any], jetzt_utc: str
+) -> None:
+    """
+    Schreibt nur, was sich zwischen Momentaufnahme `vorher` und `nachher`
+    geaendert hat - in einer Schreibtransaktion. Fuer jeden beruehrten Schluessel
+    muss die Datenbank noch den Stand von `vorher` haben (oder schon den von
+    `nachher`); sonst Konflikt und nichts wird geschrieben.
+    """
+    vor_e, nach_e = _je_schluessel(vorher), _je_schluessel(nachher)
+    leer: frozenset = frozenset()
+    e_geaendert = [s for s in set(vor_e) | set(nach_e) if vor_e.get(s, leer) != nach_e.get(s, leer)]
+    vor_z, nach_z = _zuweisungen(vorher), _zuweisungen(nachher)
+    z_geaendert = [k for k in set(vor_z) | set(nach_z) if vor_z.get(k) != nach_z.get(k)]
+    vor_ids = {n["id"] for n in vorher.get("manual_notams", []) if n.get("id") is not None}
+    nach_ids = {n["id"] for n in nachher.get("manual_notams", []) if n.get("id") is not None}
+    entfernt = sorted(vor_ids - nach_ids)
+    neue = [n for n in nachher.get("manual_notams", []) if n.get("id") is None]
+    if not (e_geaendert or z_geaendert or entfernt or neue):
+        return
+    try:
+        with _transaktion(conn):
+            schreiben_e = []
+            for s in e_geaendert:
+                ist = frozenset(
+                    a for (a,) in conn.execute(
+                        "SELECT art FROM entscheidungen WHERE schluessel = ?", (s,))
+                )
+                if ist == nach_e.get(s, leer):
+                    continue
+                if ist != vor_e.get(s, leer):
+                    raise Konflikt("changed", KONFLIKT_TEXT)
+                schreiben_e.append(s)
+            schreiben_z = []
+            for s, feld in z_geaendert:
+                zeile = conn.execute(
+                    "SELECT wert FROM zuweisungen WHERE schluessel = ? AND feld = ?", (s, feld)
+                ).fetchone()
+                ist = None if zeile is None else zeile[0]
+                if ist == nach_z.get((s, feld)):
+                    continue
+                if ist != vor_z.get((s, feld)):
+                    raise Konflikt("changed", KONFLIKT_TEXT)
+                schreiben_z.append((s, feld))
+            for s in schreiben_e:
+                conn.execute("DELETE FROM entscheidungen WHERE schluessel = ?", (s,))
+                for art in sorted(nach_e.get(s, leer)):
+                    conn.execute(
+                        "INSERT INTO entscheidungen (schluessel, art, geaendert_utc) VALUES (?, ?, ?)",
+                        (s, art, jetzt_utc),
+                    )
+            for s, feld in schreiben_z:
+                conn.execute("DELETE FROM zuweisungen WHERE schluessel = ? AND feld = ?", (s, feld))
+                if nach_z.get((s, feld)):
+                    conn.execute(
+                        "INSERT INTO zuweisungen (schluessel, feld, wert, geaendert_utc) "
+                        "VALUES (?, ?, ?, ?)",
+                        (s, feld, nach_z[(s, feld)], jetzt_utc),
+                    )
+            conn.executemany("DELETE FROM manuelle_notams WHERE id = ?", [(i,) for i in entfernt])
+            conn.executemany(
+                "INSERT INTO manuelle_notams (text, added, geaendert_utc) VALUES (?, ?, ?)",
+                [(n["text"], n.get("added", ""), jetzt_utc) for n in neue],
+            )
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+
+
+def schreibe_arbeitsstand_neu(conn: sqlite3.Connection, stand: Dict[str, Any], jetzt_utc: str) -> None:
+    """Nur fuer Umzug und Tests: leert den Arbeitsstand und schreibt `stand` vollstaendig."""
+    leer = leerer_arbeitsstand()
+    try:
+        with _transaktion(conn):
+            conn.execute("DELETE FROM entscheidungen")
+            conn.execute("DELETE FROM zuweisungen")
+            conn.execute("DELETE FROM manuelle_notams")
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    ohne_ids = dict(stand)
+    ohne_ids["manual_notams"] = [
+        {"text": n["text"], "added": n.get("added", "")} for n in stand.get("manual_notams", [])
+    ]
+    schreibe_unterschiede(conn, leer, ohne_ids, jetzt_utc)
+
+
+def lade_korpus(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    try:
+        zeilen = conn.execute(
+            "SELECT notam_id, b, text, quellen_json FROM archiv_korpus ORDER BY schluessel"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    return [{"notam_id": n, "b": b, "text": t, "quellen": json.loads(q)} for n, b, t, q in zeilen]
+
+
+def speichere_korpus(conn: sqlite3.Connection, eintraege: Sequence[Tuple[str, Dict[str, Any]]]) -> None:
+    try:
+        with _transaktion(conn):
+            conn.execute("DELETE FROM archiv_korpus")
+            conn.executemany(
+                "INSERT INTO archiv_korpus (schluessel, notam_id, b, text, quellen_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(s, e["notam_id"], e["b"], e["text"], json.dumps(e["quellen"], ensure_ascii=False))
+                 for s, e in eintraege],
+            )
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+
+
+def lade_importzustand(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Rohform wie archiv_import.json - die Strukturpruefung macht archiv_import."""
+    try:
+        tage = {
+            iso: json.loads(inhalt)
+            for iso, inhalt in conn.execute(
+                "SELECT iso, inhalt_json FROM archiv_import_tage ORDER BY iso")
+        }
+        entscheidungen = {
+            k: json.loads(w)
+            for k, w in conn.execute(
+                "SELECT schluessel, wert_json FROM archiv_import_entscheidungen ORDER BY schluessel")
+        }
+        review = {"bestaetigt": [], "ausgeblendet": []}
+        for art, s in conn.execute(
+            "SELECT art, schluessel FROM archiv_import_review ORDER BY art, pos"
+        ):
+            review[art].append(s)
+        stand = lese_meta(conn, "erkennungsstand")
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    if not (tage or entscheidungen or review["bestaetigt"] or review["ausgeblendet"] or stand):
+        return {}
+    return {
+        "version": 1, "tage": tage, "entscheidungen": entscheidungen,
+        "review_bestaetigt": review["bestaetigt"], "review_ausgeblendet": review["ausgeblendet"],
+        "erkennungsstand": stand or "",
+    }
+
+
+def speichere_importzustand(conn: sqlite3.Connection, state: Dict[str, Any]) -> None:
+    try:
+        with _transaktion(conn):
+            for t in ("archiv_import_tage", "archiv_import_entscheidungen", "archiv_import_review"):
+                conn.execute("DELETE FROM {}".format(_q(t)))
+            conn.executemany(
+                "INSERT INTO archiv_import_tage (iso, fingerprint, inhalt_json) VALUES (?, ?, ?)",
+                [(iso, str(tag.get("fingerprint", "")), json.dumps(tag, ensure_ascii=False))
+                 for iso, tag in state.get("tage", {}).items()],
+            )
+            conn.executemany(
+                "INSERT INTO archiv_import_entscheidungen (schluessel, wert_json) VALUES (?, ?)",
+                [(k, json.dumps(w, ensure_ascii=False)) for k, w in state.get("entscheidungen", {}).items()],
+            )
+            for art, liste in (("bestaetigt", state.get("review_bestaetigt", [])),
+                               ("ausgeblendet", state.get("review_ausgeblendet", []))):
+                conn.executemany(
+                    "INSERT INTO archiv_import_review (art, pos, schluessel) VALUES (?, ?, ?)",
+                    [(art, i, s) for i, s in enumerate(liste)],
+                )
+            conn.execute(
+                "INSERT INTO meta (schluessel, wert) VALUES ('erkennungsstand', ?) "
+                "ON CONFLICT(schluessel) DO UPDATE SET wert = excluded.wert",
+                (str(state.get("erkennungsstand", "")),),
+            )
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
