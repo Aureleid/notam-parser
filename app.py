@@ -4205,6 +4205,7 @@ COLUMN_LABELS = {
     "Art": "Type",
     "Start": "Launch",
     "Quelle": "Source",
+    "Archiv": "Archive",
     "Startnation": "Nation",
     "Weltraumbahnhof": "Launch Site",
     "Startfenster (UTC)": "Launch Window (UTC)",
@@ -4510,12 +4511,16 @@ def describe_launch(group: LaunchGroup, events: Sequence[LaunchEvent]) -> str:
 
 
 def groups_to_dataframe(
-    groups: Sequence[LaunchGroup], vehicles: Optional[pd.DataFrame] = None
+    groups: Sequence[LaunchGroup],
+    vehicles: Optional[pd.DataFrame] = None,
+    archiv_hinweis: Optional[Dict[str, str]] = None,
 ) -> pd.DataFrame:
     """
     Ergebnistabelle auf Start-Ebene: eine Zeile je Start statt je NOTAM.
 
     `vehicles` dient allein der Beschriftung der Spalte "Traegersystem".
+    `archiv_hinweis` (je group_id) fuellt die letzte Spalte "Archiv":
+    "past", "removed from archive" oder "-".
     """
     records: List[Dict[str, Any]] = []
     for g in groups:
@@ -4563,6 +4568,7 @@ def groups_to_dataframe(
                 "Konfidenz": g.confidence_level,
                 "Zuverlässigkeit": g.reliability,
                 "Quelle": ", ".join(g.sources),
+                "Archiv": (archiv_hinweis or {}).get(g.group_id, "-"),
             }
         )
     columns = [
@@ -4587,6 +4593,7 @@ def groups_to_dataframe(
         "Konfidenz",
         "Zuverlässigkeit",
         "Quelle",
+        "Archiv",
     ]
     return pd.DataFrame(records, columns=columns)
 
@@ -5147,6 +5154,20 @@ def manual_entries_to_dataframe(
     return pd.DataFrame(rows)
 
 
+def order_pasted_entries(
+    n: int, offset: int, past_rows: Set[int]
+) -> List[Tuple[int, bool]]:
+    """
+    Reihenfolge der eingefuegten Eintraege in der Seitenleiste.
+
+    Eintrag i liegt in Tabellenzeile offset + i (combine_sources haengt die
+    eingefuegten Eintraege hinter die Datei). Vergangene ans Ende, sonst bleibt
+    die Reihenfolge - der Arbeitsstand selbst wird nicht umsortiert.
+    """
+    paare = [(i, (offset + i) in past_rows) for i in range(n)]
+    return [p for p in paare if not p[1]] + [p for p in paare if p[1]]
+
+
 def combine_sources(
     imported: Optional[pd.DataFrame], manual: Optional[pd.DataFrame]
 ) -> pd.DataFrame:
@@ -5484,6 +5505,50 @@ def _remove_manual(index: int) -> None:
         items.pop(index)
     st.session_state["manual_feedback"] = None
     _persist_workspace()
+
+
+def _render_pasted_entries(
+    slot: Any,
+    items: Sequence[Dict[str, Any]],
+    flags: Optional[List[Tuple[int, bool]]] = None,
+) -> None:
+    """
+    Zeichnet "Pasted entries" in den Platzhalter der Seitenleiste.
+
+    `flags` kommt aus order_pasted_entries: (urspruenglicher Index, vergangen).
+    Ohne `flags` unmarkiert in urspruenglicher Reihenfolge. "Remove" bekommt
+    immer den urspruenglichen Index - die Liste im Arbeitsstand bleibt, wie sie ist.
+    """
+    if not items:
+        return
+    if flags is None:
+        flags = [(i, False) for i in range(len(items))]
+    n_past = sum(1 for _, vergangen in flags if vergangen)
+    titel = (
+        "Pasted entries ({} \u00b7 {} past)".format(len(items), n_past)
+        if n_past
+        else "Pasted entries ({})".format(len(items))
+    )
+    with slot:
+        with st.expander(titel, expanded=True):
+            for i, vergangen in flags:
+                entry = items[i]
+                # Eingefuegter Text ist Fremdtext: als Zeichen zeigen, nie als Markdown.
+                preview = re.sub(r"\s+", " ", str(entry.get("text", "")))[:60]
+                st.caption(
+                    "**{}** \u00b7 {} \u2026{}".format(
+                        _md_plain(entry.get("added", "")),
+                        _md_plain(preview),
+                        " (past)" if vergangen else "",
+                    )
+                )
+                st.button(
+                    "Remove",
+                    key="del_manual_{}".format(i),
+                    on_click=_remove_manual,
+                    args=(i,),
+                    use_container_width=True,
+                )
 
 
 def _clear_manual() -> None:
@@ -7080,18 +7145,10 @@ def main() -> None:
             st.warning("Kein auswertbarer Text erkannt.")
 
         manual_items = st.session_state["manual_notams"]
+        # Platzhalter: die Liste wird erst nach der Auswertung gezeichnet, damit
+        # vergangene Starts markiert und ans Ende gestellt werden koennen.
+        pasted_slot = st.container()
         if manual_items:
-            with st.expander("Pasted entries ({})".format(len(manual_items)), expanded=True):
-                for i, entry in enumerate(manual_items):
-                    preview = re.sub(r"\s+", " ", entry["text"])[:60]
-                    st.caption("**{}** · {} …".format(entry["added"], preview))
-                    st.button(
-                        "Remove",
-                        key="del_manual_{}".format(i),
-                        on_click=_remove_manual,
-                        args=(i,),
-                        use_container_width=True,
-                    )
             st.button(
                 "Discard all pasted entries",
                 on_click=_clear_manual,
@@ -7123,6 +7180,8 @@ def main() -> None:
             source_label = uploaded.name
         except Exception as exc:
             st.error("Could not read the upload: {}".format(exc))
+            # Die Liste der eingefuegten Eintraege verschwindet nie.
+            _render_pasted_entries(pasted_slot, manual_items)
             st.stop()
     elif use_demo:
         imported = build_demo_notams()
@@ -7147,6 +7206,7 @@ def main() -> None:
         )
 
     if notams.empty:
+        _render_pasted_entries(pasted_slot, manual_items)
         st.info(
             "Upload a NOTAM file on the left, paste a NOTAM, or switch on the "
             "demo data set to start the analysis."
@@ -7213,6 +7273,38 @@ def main() -> None:
     _update_sea_launches(events, stats.get("groups", []), table, spaceports)
     _show_archive_status(archiv_status)
 
+    # Vergangene Starts: erst jetzt, das Archiv ist geschrieben. Ausgeblendet
+    # wird nur Archiviertes; geloescht wird nichts.
+    try:
+        archiv_keys, archiv_grund = archive_keys_or_reason(ARCHIVE_CSV)
+        entfernt = set(st.session_state.get("archiv_removed", set()))
+        jetzt = datetime.now(timezone.utc)
+        past_rows = (
+            past_launch_rows(
+                stats.get("groups", []), events, archiv_keys, jetzt, entfernt=entfernt
+            )
+            if archiv_keys is not None
+            else set()
+        )
+        past_groups = {
+            g.group_id for g in stats.get("groups", []) if set(g.row_indices) & past_rows
+        }
+        archiv_hinweis = {gid: "past" for gid in past_groups}
+        for g in stats.get("groups", []):
+            if g.spaceport_code and archive_key(archive_row(g, events)) in entfernt:
+                archiv_hinweis[g.group_id] = "removed from archive"
+        # Eingefuegte Eintraege liegen hinter den Zeilen der Datei.
+        pasted_offset = len(imported) if imported is not None and not imported.empty else 0
+        _render_pasted_entries(
+            pasted_slot,
+            manual_items,
+            order_pasted_entries(len(manual_items), pasted_offset, past_rows),
+        )
+    except Exception:
+        # Die Liste bleibt sichtbar (unmarkiert), der Fehler wird nicht verschluckt.
+        _render_pasted_entries(pasted_slot, manual_items)
+        raise
+
     # ----------------------------- Filter --------------------------------- #
     with st.sidebar:
         st.divider()
@@ -7233,8 +7325,30 @@ def main() -> None:
             else sources_available
         )
         show_review = st.checkbox("Show review cases in the table", value=False)
+        # Vorgabe aus, nicht im Arbeitsstand: jede Sitzung beginnt mit der Tageslage.
+        show_past = st.toggle(
+            "Show past launches",
+            value=False,
+            help=(
+                "Launches whose last window ended more than 24 h ago and that are "
+                "in the launch archive. Nothing is deleted."
+            ),
+        )
+        if archiv_keys is None:
+            st.text("Past launches are not hidden: {}".format(archiv_grund))
+        elif past_groups and not show_past:
+            st.caption(
+                "{} past launch(es) hidden \u2013 in the launch archive".format(
+                    len(past_groups)
+                )
+            )
 
-        valid_dates = [d for d in list(table["_from"].dropna()) if d is not None]
+        datums_zeilen = (
+            table
+            if show_past
+            else table[~table["_row"].astype(int).isin(past_rows)]
+        )
+        valid_dates = [d for d in list(datums_zeilen["_from"].dropna()) if d is not None]
         date_filter = None
         if valid_dates:
             min_day = min(valid_dates).date()
@@ -7248,6 +7362,8 @@ def main() -> None:
                 st.caption("Startfenster: alle NOTAMs am {}".format(min_day.strftime("%d.%m.%Y")))
 
     mask = pd.Series(True, index=table.index)
+    if not show_past:
+        mask &= ~table["_row"].astype(int).isin(past_rows)
     if source_filter:
         mask &= table["Quelle"].isin(list(source_filter))
     if nation_filter:
@@ -7288,7 +7404,7 @@ def main() -> None:
         for g in stats.get("groups", [])
         if g.spaceport_code and visible_rows & set(g.row_indices)
     ]
-    group_table = groups_to_dataframe(visible_groups, vehicles)
+    group_table = groups_to_dataframe(visible_groups, vehicles, archiv_hinweis)
 
     # ------------------------------ Tabs ---------------------------------- #
     reiter = [
@@ -7676,11 +7792,17 @@ def main() -> None:
                     else ""
                 )
             )
+            # Abgelaufene Review-Faelle bleiben sichtbar, tragen aber eine Marke.
+            abgelaufen = {e.key for e in review_events if event_expired(e, jetzt)}
+            abgelaufen_rows = {e.row_index for e in review_events if e.key in abgelaufen}
             review_table = events_to_dataframe(review_events, vehicles)
+            review_table["Expired"] = [
+                "yes" if int(r) in abgelaufen_rows else "-" for r in review_table["_row"]
+            ]
             st.dataframe(
                 review_table[
                     ["NOTAM ID", "Quelle", "FIR Code", "FIR liegt in", "Höhenprofil",
-                     "Trägersystem", "Konfidenz", "Hinweis"]
+                     "Trägersystem", "Konfidenz", "Hinweis", "Expired"]
                 ],
                 use_container_width=True,
                 hide_index=True,
@@ -7688,7 +7810,10 @@ def main() -> None:
             st.divider()
 
             for event in review_events:
-                with st.expander("{} · {}".format(event.notam_id, event.review_reason[:90])):
+                with st.expander(
+                    ("expired · " if event.key in abgelaufen else "")
+                    + "{} · {}".format(event.notam_id, event.review_reason[:90])
+                ):
                     st.code(event.raw_text, language="text")
                     info_a, info_b = st.columns(2)
                     info_a.markdown(

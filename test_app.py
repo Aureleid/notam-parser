@@ -5063,6 +5063,98 @@ if app.ARCHIVE_CSV.exists():
     check("echtes Archiv -> ein Schluessel je Zeile",
           _k2 is not None and len(_k2) == len(app.read_archive_strict(_dv / "echt.csv")))
 
+# Genaue Grenze: Ende + Karenz == jetzt bleibt sichtbar, eine Sekunde mehr ist vorbei
+_grenze = _jetzt - app.PAST_LAUNCH_GRACE
+e_gr = [_ev(0, _grenze - _td(minutes=20), _grenze)]
+check("Grenze: Ende + Karenz == jetzt -> sichtbar",
+      app.past_launch_rows([g1], e_gr, _schluessel(g1, e_gr), _jetzt) == set())
+e_gr1 = [_ev(0, _grenze - _td(minutes=20), _grenze - _td(seconds=1))]
+check("Grenze: eine Sekunde mehr -> vergangen",
+      app.past_launch_rows([g1], e_gr1, _schluessel(g1, e_gr1), _jetzt) == {0})
+check("Grenze: event_expired genau an der Grenze nicht", not app.event_expired(e_gr[0], _jetzt))
+check("Grenze: event_expired eine Sekunde danach", app.event_expired(e_gr1[0], _jetzt))
+
+# Einbindung in die Oberflaeche (Aufgabe 2)
+_t = app.groups_to_dataframe([g1], None, {"G": "past"})
+check("Overview: Spalte Archiv", "Archiv" in _t.columns and _t.iloc[0]["Archiv"] == "past")
+check("Overview: Archiv ist letzte Spalte", list(_t.columns)[-1] == "Archiv", list(_t.columns))
+check("Overview: ohne Hinweis '-'", app.groups_to_dataframe([g1])["Archiv"].iloc[0] == "-")
+check("Pasted: nicht vergangene zuerst, Reihenfolge stabil",
+      app.order_pasted_entries(4, 10, {11, 13}) == [(0, False), (2, False), (1, True), (3, True)])
+check("Pasted: ohne Datei-Offset", app.order_pasted_entries(2, 0, {0}) == [(1, False), (0, True)])
+import inspect as _ins
+_main = _ins.getsource(app.main)
+check("Berechnung nach _update_archive",
+      _main.index("_update_archive(") < _main.index("past_launch_rows("))
+check("Berechnung vor dem Filterabschnitt",
+      _main.index("past_launch_rows(") < _main.index('st.header("Filter")'))
+check("Schalter Show past launches vorhanden", '"Show past launches"' in _main)
+check("Arbeitsstand wird dabei nicht geschrieben",
+      "_persist_workspace" not in _main[_main.index("past_launch_rows("):_main.index('st.header("Filter")')])
+check("Review markiert abgelaufene Faelle", "event_expired(" in _main and '"expired · "' in _main)
+_stop = _main.index("Could not read the upload")
+check("Upload-Fehler zeichnet die Liste vor st.stop()",
+      "_render_pasted_entries(" in _main[_stop:_main.index("st.stop()", _stop)])
+check("Liste wird auch bei Fehler in der Berechnung gezeichnet",
+      _main.count("_render_pasted_entries(") >= 3)
+check("Kein unsafe_allow_html in der neuen Einbindung",
+      "unsafe_allow_html" not in _ins.getsource(app._render_pasted_entries))
+
+# _render_pasted_entries mit st-Ersatz
+_eintraege = [{"text": "erster [x](http://evil) **fett**", "added": "01.10.2026 10:00"},
+              {"text": "zweiter", "added": "02.10.2026 10:00"},
+              {"text": "dritter", "added": "03.10.2026 10:00"}]
+_eintraege_kopie = [dict(e) for e in _eintraege]
+
+
+def _pasted_lauf(flags):
+    _stub = _StStub()
+    _alt_st = app.st
+    app.st = _stub
+    try:
+        app._render_pasted_entries(_stub, _eintraege, flags)
+    finally:
+        app.st = _alt_st
+    return _stub
+
+
+_s1 = _pasted_lauf([(1, False), (0, True), (2, True)])
+_titel = [c[1][0] for c in _s1.aufrufe("expander")]
+_caps = [c[1][0] for c in _s1.aufrufe("caption")]
+_keys = [(c[2].get("key"), c[2].get("args")) for c in _s1.aufrufe("button")]
+check("Pasted (Flags): Ueberschrift mit Zahl der vergangenen",
+      _titel == ["Pasted entries (3 · 2 past)"], _titel)
+check("Pasted (Flags): vergangene markiert und am Ende",
+      len(_caps) == 3 and "zweiter" in _caps[0] and "(past)" not in _caps[0]
+      and "erster" in _caps[1] and "(past)" in _caps[1] and "dritter" in _caps[2]
+      and "(past)" in _caps[2], _caps)
+check("Pasted (Flags): Remove behaelt den urspruenglichen Index",
+      _keys == [("del_manual_1", (1,)), ("del_manual_0", (0,)), ("del_manual_2", (2,))], _keys)
+check("Pasted: Eintragstext ohne rohes Markdown",
+      "[x](http://evil)" not in _caps[1] and "**fett**" not in _caps[1], _caps[1])
+_s2 = _pasted_lauf(None)
+_titel2 = [c[1][0] for c in _s2.aufrufe("expander")]
+_caps2 = [c[1][0] for c in _s2.aufrufe("caption")]
+_keys2 = [c[2].get("key") for c in _s2.aufrufe("button")]
+check("Pasted (ohne Flags): Ueberschrift nur mit Anzahl", _titel2 == ["Pasted entries (3)"], _titel2)
+check("Pasted (ohne Flags): unmarkiert in urspruenglicher Reihenfolge",
+      len(_caps2) == 3 and not any("(past)" in c for c in _caps2)
+      and "erster" in _caps2[0] and "zweiter" in _caps2[1] and "dritter" in _caps2[2], _caps2)
+check("Pasted (ohne Flags): Remove-Schluessel in Reihenfolge",
+      _keys2 == ["del_manual_0", "del_manual_1", "del_manual_2"], _keys2)
+_s3 = _pasted_lauf([(0, False), (1, False), (2, False)])
+check("Pasted (Flags ohne vergangene): Ueberschrift nur mit Anzahl",
+      [c[1][0] for c in _s3.aufrufe("expander")] == ["Pasted entries (3)"])
+_s4 = _StStub()
+_alt_st4 = app.st
+app.st = _s4
+try:
+    app._render_pasted_entries(_s4, [], None)
+finally:
+    app.st = _alt_st4
+check("Pasted: leere Liste zeichnet nichts", _s4.aufrufe("expander") == [])
+check("Pasted: Eintraege werden nicht veraendert", _eintraege == _eintraege_kopie)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
