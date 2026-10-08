@@ -5184,6 +5184,16 @@ check("Zaehler: bereits unsichtbarer Start (Filter) zaehlt nicht",
       app.count_hidden_past([_gA, _gB, _gC, _gN], _past_v, {0, 2}) == 2)
 check("Zaehler: eine sichtbare Zeile genuegt", app.count_hidden_past([_gB], _past_v, {2}) == 1)
 check("Zaehler: nichts sichtbar -> 0", app.count_hidden_past([_gA, _gB], _past_v, set()) == 0)
+# Fall: archivierter Start 01.10. (Zeile 0), kommende 10.10./12.10. (Zeilen 1, 2); die Zeile 0
+# ist nur durch den Vergangen-Filter weg, der Zaehler darf sie nicht ueber den Datumsfilter verlieren.
+check("Zaehler: vergangener Start zaehlt ohne Datumsfilter",
+      app.count_hidden_past([_gA, _gC], {0}, {0, 1, 2}) == 1)
+_main_z = _ins.getsource(app.main)
+_i_datum = _main_z.index("mask &= day_series")
+check("Zaehler: Zaehlmaske entsteht vor dem Datumsfilter",
+      "count_mask = mask.copy()" in _main_z and _main_z.index("count_mask = mask.copy()") < _i_datum)
+check("Zaehler: Anzahl nutzt die Zaehlmaske, nicht die Datumsmaske",
+      'table.loc[count_mask, "_row"]' in _main_z and 'table.loc[mask, "_row"]' not in _main_z.split("count_hidden_past(")[1].split(")")[0])
 
 _pts_v = app.fallback_points(
     [app.LaunchEvent(row_index=0, notam_id="a", raw_text="x", status="OK", centroid_lat=1.0, centroid_lon=2.0),

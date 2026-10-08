@@ -1,6 +1,6 @@
 # Projektstand — NOLA
 
-Stand: 08.10.2026 · `app.py` 8007 Zeilen · `test_app.py` 1306 Tests, alle grün
+Stand: 08.10.2026 · `app.py` 8010 Zeilen · `test_app.py` 1309 Tests, alle grün
 
 ## Starten
 

@@ -7417,6 +7417,9 @@ def main() -> None:
         )
     inc = table["Est. Inklination (°)"]
     mask &= (inc.isna()) | ((inc >= inc_range[0]) & (inc <= inc_range[1]))
+    # Maske fuer den Zaehler: ohne Datumsfilter, denn dessen Spanne haengt selbst
+    # vom Vergangen-Filter ab.
+    count_mask = mask.copy()
     if date_filter and isinstance(date_filter, (list, tuple)) and len(date_filter) == 2:
         start_day, end_day = date_filter
         day_series = table["_from"].apply(lambda d: d.date() if d is not None and pd.notna(d) else None)
@@ -7427,7 +7430,7 @@ def main() -> None:
         versteckt = count_hidden_past(
             stats.get("groups", []),
             past_rows,
-            set(int(r) for r in table.loc[mask, "_row"]),
+            set(int(r) for r in table.loc[count_mask, "_row"]),
         )
         if versteckt:
             hinweis_slot.caption(
