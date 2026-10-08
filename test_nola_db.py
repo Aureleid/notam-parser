@@ -228,6 +228,7 @@ try:
     db.schreibe_unterschiede(_c2, _i, _ziel, "t"); check("gleicher Zielzustand -> kein Konflikt", True)
 except db.Konflikt:
     check("gleicher Zielzustand -> kein Konflikt", False)
+check("gleicher Zielzustand: k9 in DB bestaetigt", "k9" in db.lade_arbeitsstand(_c2)["confirmed_launches"])
 
 # Bestaetigen (A) gegen Ausblenden (B) auf k5
 _basis = db.lade_arbeitsstand(_c2)
