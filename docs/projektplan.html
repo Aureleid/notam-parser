@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>7.962</b> Zeilen app.py</span><span><b>1.298</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>8.007</b> Zeilen app.py</span><span><b>1.306</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -178,7 +178,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
 {t:"Seestarts",s:7,c:[
  {t:"Startpunkt aus Geometrie",f:"derive_launch_point, cluster_zone_points, sea_launch_code"},
  {t:"Eigenes Protokoll",f:"load_sea_launches, merge_sea_launches, persist_sea_launches",c:[{t:"seestarts_updated.csv",n:"fließt nicht in die Platzsuche zurück"}]}]},
-{t:"Bedienoberfläche",s:5,c:[{t:"Vergangene Starts ausblenden",s:12,f:"past_launch_rows, event_expired, archive_keys_or_reason, order_pasted_entries, _render_pasted_entries",c:[{t:"Schalter Show past launches",n:"nicht gespeichert"}]},
+{t:"Bedienoberfläche",s:5,c:[{t:"Vergangene Starts ausblenden",s:12,f:"past_launch_rows, event_expired, count_hidden_past, archive_hints, fallback_points, archive_keys_or_reason, order_pasted_entries, _render_pasted_entries",c:[{t:"Schalter Show past launches",n:"nicht gespeichert"}]},
  {t:"Sechs Reiter",f:"main, st.segmented_control",c:[
    {t:"Launch Overview",f:"groups_to_dataframe, describe_launch"},
    {t:"Flightpath Map",f:"build_event_map"},
@@ -219,7 +219,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"Nur lokal sichtbar",f:"archive_import_allowed, import_gate, is_local_request, is_public_deployment"}]}]},
  {t:"Persistenz",f:"persist_reference, save_workspace, load_workspace",c:[{t:"CSV-Referenzen"},{t:"notam_workspace.json",n:"inkl. launch_site_assignments"}]}]},
 {t:"Qualität und Betrieb",s:8,c:[
- {t:"test_app.py",n:"1.298 Tests · 5.196 Zeilen"},
+ {t:"test_app.py",n:"1.306 Tests · 5.236 Zeilen"},
  {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
  {t:"Veröffentlichung",n:"Streamlit Community Cloud"},
  {t:"Dokumentation",n:"README · STATUS · docs/intent · docs/decisions"}]},

@@ -5168,6 +5168,46 @@ finally:
 check("Pasted: leere Liste zeichnet nichts", _s4.aufrufe("expander") == [])
 check("Pasted: Eintraege werden nicht veraendert", _eintraege == _eintraege_kopie)
 
+# Schlusspruefung: Zaehler, Ersatzkarte, Hinweise
+_gA = app.LaunchGroup(group_id="GA", notam_ids=["A0001/26"], row_indices=[0], advance_row_indices=[],
+                      spaceport_code="JSLC", window_from=_jetzt, window_to=_jetzt)
+_gB = app.LaunchGroup(group_id="GB", notam_ids=["A0002/26"], row_indices=[1, 2], advance_row_indices=[],
+                      spaceport_code="JSLC", window_from=_jetzt, window_to=_jetzt)
+_gC = app.LaunchGroup(group_id="GC", notam_ids=["A0003/26"], row_indices=[3], advance_row_indices=[],
+                      spaceport_code="JSLC", window_from=_jetzt, window_to=_jetzt)
+_gN = app.LaunchGroup(group_id="GN", notam_ids=["A0004/26"], row_indices=[4], advance_row_indices=[],
+                      spaceport_code=None, window_from=_jetzt, window_to=_jetzt)
+_past_v = {0, 1, 2, 3}
+check("Zaehler: alle sichtbar -> alle gezaehlt",
+      app.count_hidden_past([_gA, _gB, _gC, _gN], _past_v, {0, 1, 2, 3, 4}) == 3)
+check("Zaehler: bereits unsichtbarer Start (Filter) zaehlt nicht",
+      app.count_hidden_past([_gA, _gB, _gC, _gN], _past_v, {0, 2}) == 2)
+check("Zaehler: eine sichtbare Zeile genuegt", app.count_hidden_past([_gB], _past_v, {2}) == 1)
+check("Zaehler: nichts sichtbar -> 0", app.count_hidden_past([_gA, _gB], _past_v, set()) == 0)
+
+_pts_v = app.fallback_points(
+    [app.LaunchEvent(row_index=0, notam_id="a", raw_text="x", status="OK", centroid_lat=1.0, centroid_lon=2.0),
+     app.LaunchEvent(row_index=1, notam_id="b", raw_text="x", status="OK", centroid_lat=3.0, centroid_lon=4.0),
+     app.LaunchEvent(row_index=2, notam_id="c", raw_text="x", status="REVIEW", centroid_lat=5.0, centroid_lon=6.0),
+     app.LaunchEvent(row_index=3, notam_id="d", raw_text="x", status="OK")],
+    {0, 2, 3})
+check("Ersatzkarte: nur Zeilen der Maske, OK und mit Punkt", _pts_v == [{"lat": 1.0, "lon": 2.0}], _pts_v)
+
+_evH = [_ev(0, alt - _td(minutes=20), alt)]
+_gH = _grp([0])
+_gH.group_id = "GH"
+_gH2 = _grp([0], platz=None)
+_gH2.group_id = "GX"
+_kH = app.archive_key(app.archive_row(_gH, _evH))
+_h = app.archive_hints([_gH, _gH2], _evH, {"GH", "GX"}, set())
+check("Hinweise: vergangener Start -> past, ohne Platz nur past aus past_groups",
+      _h.get("GH") == "past", _h)
+_h = app.archive_hints([_gH], _evH, {"GH"}, {_kH})
+check("Hinweise: aus Archiv entfernt -> removed from archive (vor past)",
+      _h == {"GH": "removed from archive"}, _h)
+_h = app.archive_hints([_gH, _gH2], _evH, set(), {_kH})
+check("Hinweise: Gruppe ohne Startplatz fehlt", "GX" not in _h and _h.get("GH") == "removed from archive", _h)
+
 import glob as _gv
 _fns_v = sorted(_gv.glob(str(_Pv(app.APP_DIR) / "fnsNotams_*.xls")))
 if _fns_v:

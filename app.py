@@ -4781,6 +4781,48 @@ def past_launch_rows(
     return vergangen
 
 
+def count_hidden_past(
+    groups: Sequence["LaunchGroup"], past_rows: Set[int], visible_rows: Set[int]
+) -> int:
+    """
+    Zahl der vergangenen Starts, die der Schalter wirklich ausblendet.
+
+    visible_rows sind die Tabellenzeilen, die ohne den Vergangen-Filter sichtbar
+    waeren; ein Start, den Ausschluss oder andere Filter schon verbergen, zaehlt
+    nicht mit.
+    """
+    return sum(
+        1
+        for g in groups
+        if set(g.row_indices) & past_rows and set(g.row_indices) & visible_rows
+    )
+
+
+def archive_hints(
+    groups: Sequence["LaunchGroup"],
+    events: Sequence["LaunchEvent"],
+    past_groups: Set[str],
+    entfernt: Set[str],
+) -> Dict[str, str]:
+    """Archiv-Hinweis je group_id: "past" oder (vorrangig) "removed from archive"."""
+    hinweise = {gid: "past" for gid in past_groups}
+    for g in groups:
+        if g.spaceport_code and archive_key(archive_row(g, events)) in entfernt:
+            hinweise[g.group_id] = "removed from archive"
+    return hinweise
+
+
+def fallback_points(
+    events: Sequence["LaunchEvent"], rows: Set[int]
+) -> List[Dict[str, float]]:
+    """Punkte der Ersatzkarte: nur OK-Zonen mit Punkt aus den sichtbaren Zeilen."""
+    return [
+        {"lat": e.centroid_lat, "lon": e.centroid_lon}
+        for e in events
+        if e.status == "OK" and e.centroid_lat is not None and e.row_index in rows
+    ]
+
+
 def archive_keys_or_reason(path: Path) -> Tuple[Optional[Set[str]], str]:
     """Schluessel des Archivs; bei unlesbarer Datei None und der Grund."""
     try:
@@ -7293,10 +7335,9 @@ def main() -> None:
         past_groups = {
             g.group_id for g in stats.get("groups", []) if set(g.row_indices) & past_rows
         }
-        archiv_hinweis = {gid: "past" for gid in past_groups}
-        for g in stats.get("groups", []):
-            if g.spaceport_code and archive_key(archive_row(g, events)) in entfernt:
-                archiv_hinweis[g.group_id] = "removed from archive"
+        archiv_hinweis = archive_hints(
+            stats.get("groups", []), events, past_groups, entfernt
+        )
         # Eingefuegte Eintraege liegen hinter den Zeilen der Datei.
         pasted_offset = len(imported) if imported is not None and not imported.empty else 0
         # Zuerst setzen: scheitert die markierte Zeichnung selbst, folgt keine
@@ -7342,12 +7383,8 @@ def main() -> None:
         )
         if archiv_keys is None:
             st.text("Past launches are not hidden: {}".format(archiv_grund))
-        elif past_groups and not show_past:
-            st.caption(
-                "{} past launch(es) hidden \u2013 in the launch archive".format(
-                    len(past_groups)
-                )
-            )
+        # Der Zaehler folgt erst nach den anderen Filtern (siehe unten).
+        hinweis_slot = st.empty()
 
         datums_zeilen = (
             table
@@ -7368,8 +7405,6 @@ def main() -> None:
                 st.caption("Startfenster: alle NOTAMs am {}".format(min_day.strftime("%d.%m.%Y")))
 
     mask = pd.Series(True, index=table.index)
-    if not show_past:
-        mask &= ~table["_row"].astype(int).isin(past_rows)
     if source_filter:
         mask &= table["Quelle"].isin(list(source_filter))
     if nation_filter:
@@ -7386,6 +7421,20 @@ def main() -> None:
         start_day, end_day = date_filter
         day_series = table["_from"].apply(lambda d: d.date() if d is not None and pd.notna(d) else None)
         mask &= day_series.isna() | ((day_series >= start_day) & (day_series <= end_day))
+
+    # Gezaehlt werden nur vergangene Starts, die sonst sichtbar waeren.
+    if archiv_keys is not None and past_groups and not show_past:
+        versteckt = count_hidden_past(
+            stats.get("groups", []),
+            past_rows,
+            set(int(r) for r in table.loc[mask, "_row"]),
+        )
+        if versteckt:
+            hinweis_slot.caption(
+                "{} past launch(es) hidden \u2013 in the launch archive".format(versteckt)
+            )
+    if not show_past:
+        mask &= ~table["_row"].astype(int).isin(past_rows)
 
     filtered = table[mask]
     ok_rows = filtered[filtered["Status"] == "OK"]
@@ -7563,11 +7612,7 @@ def main() -> None:
                 "`folium` / `streamlit-folium` are not installed - "
                 "falling back to the simple point map."
             )
-            pts = [
-                {"lat": e.centroid_lat, "lon": e.centroid_lon}
-                for e in events
-                if e.status == "OK" and e.centroid_lat is not None
-            ]
+            pts = fallback_points(events, set(int(r) for r in ok_rows["_row"]))
             if pts:
                 st.map(pd.DataFrame(pts))
         else:
