@@ -457,6 +457,9 @@ if _alt.arbeitsstand.exists():
           _gl["archiv_removed"] == app.migrate_archive_keys(_ws.get("archiv_removed", [])))
 _cu.close()
 
+_ENDEN = (".tmp", ".tmp-wal", ".tmp-shm", ".tmp-journal")
+def _reste(ordner):
+    return [p.name for p in Path(ordner).iterdir() if p.name.endswith(_ENDEN)]
 for _name, _inhalt in [("notam_workspace.json", "kein json"),
                        ("startarchiv_updated.csv", "falsch,kopf\n1,2\n"),
                        ("seestarts_updated.csv", b"\xff\xfe\x00\x00kaputt")]:
@@ -468,7 +471,7 @@ for _name, _inhalt in [("notam_workspace.json", "kein json"),
     except um.UmzugFehler as e:
         check("unlesbar {} -> Abbruch".format(_name), _name in str(e), str(e)[:120])
     check("  keine nola.db", not _z.exists())
-    check("  keine Temp-Datei", not any(p.name.endswith(".tmp") for p in _z.parent.iterdir()))
+    check("  keine Temp-Datei", _reste(_z.parent) == [], _reste(_z.parent))
 
 _leer = _altordner(mit_echten=False); _zl = Path(tempfile.mkdtemp()) / "nola.db"
 um.umziehen(_zl, um.altdateien_im(_leer))
@@ -543,9 +546,6 @@ check("Export Seestarts lesbar", len(app.load_sea_launches(_ex / app.SEA_LAUNCH_
 _ce.close()
 
 print("== 16. Fix-Runde 1 ==")
-_ENDEN = (".tmp", ".tmp-wal", ".tmp-shm", ".tmp-journal")
-def _reste(ordner):
-    return [p.name for p in Path(ordner).iterdir() if p.name.endswith(_ENDEN)]
 def _sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
@@ -689,6 +689,25 @@ _c5b.close(); _c5.close()
 _db3 = _z3; _e3 = um.exportieren(_db3, Path(tempfile.mkdtemp()) / "export")
 _c3e = db.verbinde(_db3)
 check("F5 Export Korpus (befuellt)", len(ai.load_korpus(_e3 / ai.KORPUS_JSON.name)) == 1)
+# F5 Runde 2: Korpus inhaltlich, mehrere Eintraege mit verschiedenen Feldern und Quellen
+_dk = _altordner(mit_echten=False)
+(_dk / "archiv_korpus.json").write_text(_json.dumps({"version": 1, "notams": [
+    {"notam_id": "A0001/26", "b": "2601010000", "text": "ROCKET LAUNCH AREA 1",
+     "quellen": ["2026-01-01/a.txt", "2026-01-02/b.txt"]},
+    {"notam_id": "B0002/26", "b": "2602030000", "text": "DANGER AREA\nLINE 2 \u00e4",
+     "quellen": ["2026-02-03/c.txt"]},
+    {"notam_id": "C0003/26", "b": "2603050000", "text": "NAVWARN 3",
+     "quellen": ["x.txt", "y.txt", "z.txt"]}]}), encoding="utf-8")
+_dbk = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_dbk, um.altdateien_im(_dk))
+_ck = db.verbinde(_dbk)
+_dbk_inhalt = db.lade_korpus(_ck); _ck.close()
+_ek = um.exportieren(_dbk, Path(tempfile.mkdtemp()) / "export")
+_gel = ai.load_korpus(_ek / ai.KORPUS_JSON.name)
+_gel_liste = [{"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen}
+              for _k, n in sorted(_gel.items())]
+check("F5 R2 Export Korpus: 3 Eintraege", len(_dbk_inhalt) == 3 and len(_gel) == 3)
+check("F5 R2 Export Korpus inhaltlich = Datenbank", _gel_liste == _dbk_inhalt, (_gel_liste, _dbk_inhalt))
 check("F5 Export Importzustand (befuellt)",
       ai.load_state(_e3 / ai.IMPORT_JSON.name) == ai.zustand_aus_daten(db.lade_importzustand(_c3e), "db"))
 _c3e.close()
