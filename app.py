@@ -27,7 +27,7 @@ import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -4705,6 +4705,82 @@ def archive_key(row: Dict[str, Any]) -> str:
         if teil.strip()
     )
     return "|".join([str(row.get("Startdatum", "")).strip(), ",".join(kennungen)])
+
+
+#: Karenz, bevor ein abgelaufener Start die Tageslage verlaesst. 24 Stunden:
+#: ein Start von heute frueh bleibt bis morgen sichtbar, und ein verschobener
+#: Start mit neuem NOTAM taucht nicht kurz auf und wieder ab.
+PAST_LAUNCH_GRACE = timedelta(hours=24)
+
+
+def _als_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def latest_end(events: Sequence["LaunchEvent"]) -> Optional[datetime]:
+    """Spaetestes Ende der Meldungen: valid_to, ersatzweise valid_from (UTC)."""
+    enden = [
+        _als_utc(e.valid_to or e.valid_from)
+        for e in events
+        if (e.valid_to or e.valid_from) is not None
+    ]
+    return max(enden) if enden else None
+
+
+def event_expired(
+    event: "LaunchEvent", now: datetime, karenz: timedelta = PAST_LAUNCH_GRACE
+) -> bool:
+    """Ist die Meldung laenger als die Karenz abgelaufen? Ohne Zeiten nie."""
+    ende = latest_end([event])
+    return ende is not None and ende + karenz < _als_utc(now)
+
+
+def past_launch_rows(
+    groups: Sequence["LaunchGroup"],
+    events: Sequence["LaunchEvent"],
+    archiv_keys: Set[str],
+    now: datetime,
+    karenz: timedelta = PAST_LAUNCH_GRACE,
+    entfernt: Optional[Set[str]] = None,
+) -> Set[int]:
+    """
+    Tabellenzeilen vergangener Starts.
+
+    Vergangen ist ein Start nur, wenn er archiviert ist (derselbe Schluessel,
+    den _update_archive schreibt) und sein spaetestes Fenster - Zonen und
+    angehaengte Vorankuendigungen - laenger als die Karenz vorbei ist. Review-
+    Faelle, Starts ohne Platz und im Archiv-Editor entfernte Starts bleiben
+    sichtbar: ausgeblendet wird nur, was nachweislich im Archiv steht.
+    """
+    entfernt = entfernt or set()
+    per_row = {e.row_index: e for e in events}
+    vergangen: Set[int] = set()
+    for g in groups:
+        if not g.spaceport_code:
+            continue
+        zonen = [per_row[r] for r in g.row_indices if r in per_row]
+        if not any(e.status == "OK" for e in zonen):
+            continue
+        zeilen = list(g.row_indices) + list(g.advance_row_indices)
+        ende = latest_end([per_row[r] for r in zeilen if r in per_row])
+        if ende is None or ende + karenz >= _als_utc(now):
+            continue
+        schluessel = archive_key(archive_row(g, events))
+        if schluessel not in archiv_keys or schluessel in entfernt:
+            continue
+        vergangen.update(zeilen)
+    return vergangen
+
+
+def archive_keys_or_reason(path: Path) -> Tuple[Optional[Set[str]], str]:
+    """Schluessel des Archivs; bei unlesbarer Datei None und der Grund."""
+    try:
+        bestand = read_archive_strict(path)
+    except ArchiveUnreadable as exc:
+        return None, str(exc)
+    return {archive_key(dict(r)) for _, r in bestand.iterrows()}, ""
 
 
 def migrate_archive_keys(keys: Iterable[str]) -> Set[str]:

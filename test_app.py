@@ -5003,6 +5003,66 @@ _quelle_tab = _inspect.getsource(app._archive_import_tab) + _inspect.getsource(a
 check("Reiter: jedes st.error im Import ueber _md_plain",
       "st.error(str(exc))" not in _quelle_tab and 'st.error("Archive import failed: {}".format(exc))' not in _quelle_tab)
 
+print("== Vergangene Starts ==")
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+import tempfile as _tf, shutil as _sh
+from pathlib import Path as _Pv
+
+_jetzt = _dt(2026, 10, 8, 12, 0, tzinfo=_tz.utc)
+def _ev(row, von, bis, status="OK"):
+    return app.LaunchEvent(row_index=row, notam_id="A{:04d}/26".format(row), raw_text="x",
+                           valid_from=von, valid_to=bis, status=status)
+def _grp(rows, advance=(), platz="JSLC"):
+    return app.LaunchGroup(group_id="G", notam_ids=["A{:04d}/26".format(r) for r in rows],
+                           row_indices=list(rows), advance_row_indices=list(advance),
+                           spaceport_code=platz,
+                           window_from=_jetzt - _td(days=3), window_to=_jetzt - _td(days=3))
+def _schluessel(g, evs):
+    return {app.archive_key(app.archive_row(g, evs))}
+
+alt = _jetzt - _td(hours=25)
+e1 = [_ev(0, alt - _td(minutes=20), alt)]
+g1 = _grp([0])
+check("25 h vorbei und archiviert -> vergangen",
+      app.past_launch_rows([g1], e1, _schluessel(g1, e1), _jetzt) == {0})
+e2 = [_ev(0, _jetzt - _td(hours=23, minutes=20), _jetzt - _td(hours=23))]
+check("23 h vorbei -> sichtbar", app.past_launch_rows([g1], e2, _schluessel(g1, e2), _jetzt) == set())
+e3 = [_ev(0, alt, None)]
+check("ohne valid_to zaehlt valid_from", app.past_launch_rows([g1], e3, _schluessel(g1, e3), _jetzt) == {0})
+e4 = [_ev(0, None, None)]
+check("ohne Zeiten nie vergangen", app.past_launch_rows([g1], e4, _schluessel(g1, e4), _jetzt) == set())
+check("nicht im Archiv -> sichtbar", app.past_launch_rows([g1], e1, set(), _jetzt) == set())
+check("im Archiv-Editor entfernt -> sichtbar",
+      app.past_launch_rows([g1], e1, _schluessel(g1, e1), _jetzt, entfernt=_schluessel(g1, e1)) == set())
+g_ohne = _grp([0], platz=None)
+check("ohne Startplatz nie vergangen", app.past_launch_rows([g_ohne], e1, _schluessel(g_ohne, e1), _jetzt) == set())
+e_rev = [_ev(0, alt - _td(minutes=20), alt, status="REVIEW")]
+check("ohne OK-Zone nie vergangen", app.past_launch_rows([g1], e_rev, _schluessel(g1, e_rev), _jetzt) == set())
+g_vor = _grp([0], advance=[1])
+e_vor = e1 + [_ev(1, alt - _td(days=3), _jetzt - _td(hours=2))]
+check("Vorankuendigung endet spaeter -> ihr Ende zaehlt",
+      app.past_launch_rows([g_vor], e_vor, _schluessel(g_vor, e_vor), _jetzt) == set())
+e_vor2 = e1 + [_ev(1, alt - _td(days=3), alt - _td(hours=1))]
+check("Vorankuendigung verschwindet mit ihrem Start",
+      app.past_launch_rows([g_vor], e_vor2, _schluessel(g_vor, e_vor2), _jetzt) == {0, 1})
+e_naiv = [_ev(0, (alt - _td(minutes=20)).replace(tzinfo=None), alt.replace(tzinfo=None))]
+check("naive Zeiten gelten als UTC", app.past_launch_rows([g1], e_naiv, _schluessel(g1, e_naiv), _jetzt) == {0})
+check("event_expired: abgelaufener Review-Fall",
+      app.event_expired(_ev(5, alt - _td(minutes=5), alt, status="REVIEW"), _jetzt))
+check("event_expired: laufender Fall nicht",
+      not app.event_expired(_ev(5, _jetzt, _jetzt + _td(hours=1)), _jetzt))
+
+_dv = _Pv(_tf.mkdtemp())
+check("Archiv fehlt -> leere Menge", app.archive_keys_or_reason(_dv / "fehlt.csv") == (set(), ""))
+(_dv / "kaputt.csv").write_bytes(b"\x00\x00\x00")
+_k, _grund = app.archive_keys_or_reason(_dv / "kaputt.csv")
+check("Archiv unlesbar -> None mit Grund", _k is None and "kaputt.csv" in _grund, _grund)
+if app.ARCHIVE_CSV.exists():
+    _sh.copy(app.ARCHIVE_CSV, _dv / "echt.csv")
+    _k2, _ = app.archive_keys_or_reason(_dv / "echt.csv")
+    check("echtes Archiv -> ein Schluessel je Zeile",
+          _k2 is not None and len(_k2) == len(app.read_archive_strict(_dv / "echt.csv")))
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
