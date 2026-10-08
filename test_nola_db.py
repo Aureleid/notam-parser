@@ -252,12 +252,43 @@ _neu3 = db.lade_arbeitsstand(_c2); _plus = _copy.deepcopy(_neu3)
 _plus["manual_notams"].append({"text": "C3/26 NOTAMN", "added": "03.10.2026 08:00Z"})
 db.schreibe_unterschiede(_c2, _neu3, _plus, "t")
 check("neues NOTAM eingefuegt", [n["text"] for n in db.lade_arbeitsstand(_c2)["manual_notams"]][-1] == "C3/26 NOTAMN")
+
+# F1: ids manueller NOTAMs werden nie wiederverwendet (AUTOINCREMENT)
+_snap = db.lade_arbeitsstand(_c2)
+_hoechste = _snap["manual_notams"][-1]["id"]
+_fremd.execute("DELETE FROM manuelle_notams WHERE id = ?", (_hoechste,))
+_fremd.execute("INSERT INTO manuelle_notams (text, added, geaendert_utc) VALUES ('NEW/26 NOTAMN', '', 'x')")
+_neue_id = _fremd.execute("SELECT id FROM manuelle_notams WHERE text = 'NEW/26 NOTAMN'").fetchone()[0]
+check("id des extern eingefuegten NOTAMs ist neu und groesser", _neue_id > _hoechste)
+_ohne_c = _copy.deepcopy(_snap); _ohne_c["manual_notams"] = _snap["manual_notams"][:-1]
+db.schreibe_unterschiede(_c2, _snap, _ohne_c, "t")
+check("extern eingefuegtes NOTAM nicht still geloescht",
+      "NEW/26 NOTAMN" in [n["text"] for n in db.lade_arbeitsstand(_c2)["manual_notams"]])
 _fremd.close()
+
+# F2: schreibe_arbeitsstand_neu ist atomar
+_vor = db.lade_arbeitsstand(_c2)
+_schlecht = db.leerer_arbeitsstand()
+_schlecht["confirmed_launches"] = {"z1"}
+_schlecht["manual_notams"] = [{"text": "   ", "added": ""}]
+try:
+    db.schreibe_arbeitsstand_neu(_c2, _schlecht, "t"); check("ungueltiger Stand -> DbFehler", False)
+except db.DbFehler:
+    check("ungueltiger Stand -> DbFehler", True)
+_nach = db.lade_arbeitsstand(_c2)
+check("Neuaufbau-Abbruch: Vorstand vollstaendig erhalten",
+      _nach == _vor and len(_nach["manual_notams"]) >= 2 and _nach["confirmed_launches"] != set())
+check("Neuaufbau-Abbruch: keine offene Transaktion", not _c2.in_transaction)
 
 print("== 10. Archiv-Import-Zustand ==")
 _eintraege = [("A1/26|2610010000", {"notam_id": "A1/26", "b": "2610010000", "text": "T", "quellen": ["s1.html"]})]
 db.speichere_korpus(_c2, _eintraege)
 check("Korpus Rundlauf", db.lade_korpus(_c2) == [_eintraege[0][1]])
+_umgekehrt = [("B2/26|2610020000", {"notam_id": "B2/26", "b": "2610020000", "text": "T2", "quellen": ["s2.html", "s3.html"]}),
+              _eintraege[0]]
+db.speichere_korpus(_c2, _umgekehrt)
+check("Korpus: nach Schluessel sortiert, beide vollstaendig",
+      db.lade_korpus(_c2) == [_umgekehrt[1][1], _umgekehrt[0][1]])
 _zst = {"version": 1, "tage": {"2026-10-01": {"fingerprint": "f", "kandidaten": [{"key": "x"}],
         "pruefliste": [], "usa": 2}}, "entscheidungen": {"x": {"status": "confirmed"}},
         "review_bestaetigt": ["r2", "r1"], "review_ausgeblendet": ["r3"], "erkennungsstand": "abc"}

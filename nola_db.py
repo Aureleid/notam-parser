@@ -143,7 +143,7 @@ CREATE TABLE seestarts (
   {se}
 );
 CREATE TABLE manuelle_notams (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   text TEXT NOT NULL CHECK (trim(text) <> ''),
   added TEXT,
   geaendert_utc TEXT NOT NULL
@@ -493,15 +493,10 @@ def _zuweisungen(stand: Dict[str, Any]) -> Dict[Tuple[str, str], str]:
     return out
 
 
-def schreibe_unterschiede(
+def _schreibe_unterschiede_in_transaktion(
     conn: sqlite3.Connection, vorher: Dict[str, Any], nachher: Dict[str, Any], jetzt_utc: str
 ) -> None:
-    """
-    Schreibt nur, was sich zwischen Momentaufnahme `vorher` und `nachher`
-    geaendert hat - in einer Schreibtransaktion. Fuer jeden beruehrten Schluessel
-    muss die Datenbank noch den Stand von `vorher` haben (oder schon den von
-    `nachher`); sonst Konflikt und nichts wird geschrieben.
-    """
+    """Pruefen + Schreiben ohne eigenes BEGIN - laeuft in einer schon offenen Transaktion."""
     vor_e, nach_e = _je_schluessel(vorher), _je_schluessel(nachher)
     leer: frozenset = frozenset()
     e_geaendert = [s for s in set(vor_e) | set(nach_e) if vor_e.get(s, leer) != nach_e.get(s, leer)]
@@ -513,69 +508,82 @@ def schreibe_unterschiede(
     neue = [n for n in nachher.get("manual_notams", []) if n.get("id") is None]
     if not (e_geaendert or z_geaendert or entfernt or neue):
         return
+    schreiben_e = []
+    for s in e_geaendert:
+        ist = frozenset(
+            a for (a,) in conn.execute("SELECT art FROM entscheidungen WHERE schluessel = ?", (s,))
+        )
+        if ist == nach_e.get(s, leer):
+            continue
+        if ist != vor_e.get(s, leer):
+            raise Konflikt("changed", KONFLIKT_TEXT)
+        schreiben_e.append(s)
+    schreiben_z = []
+    for s, feld in z_geaendert:
+        zeile = conn.execute(
+            "SELECT wert FROM zuweisungen WHERE schluessel = ? AND feld = ?", (s, feld)
+        ).fetchone()
+        ist = None if zeile is None else zeile[0]
+        if ist == nach_z.get((s, feld)):
+            continue
+        if ist != vor_z.get((s, feld)):
+            raise Konflikt("changed", KONFLIKT_TEXT)
+        schreiben_z.append((s, feld))
+    for s in schreiben_e:
+        conn.execute("DELETE FROM entscheidungen WHERE schluessel = ?", (s,))
+        for art in sorted(nach_e.get(s, leer)):
+            conn.execute(
+                "INSERT INTO entscheidungen (schluessel, art, geaendert_utc) VALUES (?, ?, ?)",
+                (s, art, jetzt_utc),
+            )
+    for s, feld in schreiben_z:
+        conn.execute("DELETE FROM zuweisungen WHERE schluessel = ? AND feld = ?", (s, feld))
+        if nach_z.get((s, feld)):
+            conn.execute(
+                "INSERT INTO zuweisungen (schluessel, feld, wert, geaendert_utc) "
+                "VALUES (?, ?, ?, ?)",
+                (s, feld, nach_z[(s, feld)], jetzt_utc),
+            )
+    conn.executemany("DELETE FROM manuelle_notams WHERE id = ?", [(i,) for i in entfernt])
+    conn.executemany(
+        "INSERT INTO manuelle_notams (text, added, geaendert_utc) VALUES (?, ?, ?)",
+        [(n["text"], n.get("added", ""), jetzt_utc) for n in neue],
+    )
+
+
+def schreibe_unterschiede(
+    conn: sqlite3.Connection, vorher: Dict[str, Any], nachher: Dict[str, Any], jetzt_utc: str
+) -> None:
+    """
+    Schreibt nur, was sich zwischen Momentaufnahme `vorher` und `nachher`
+    geaendert hat - in einer Schreibtransaktion. Fuer jeden beruehrten Schluessel
+    muss die Datenbank noch den Stand von `vorher` haben (oder schon den von
+    `nachher`); sonst Konflikt und nichts wird geschrieben.
+    Ein leerer NOTAM-Text verletzt die Pruefregel der Tabelle und rollt die ganze
+    Aktion mit DbFehler zurueck - der Aufrufer filtert leere Texte vorher.
+    """
     try:
         with _transaktion(conn):
-            schreiben_e = []
-            for s in e_geaendert:
-                ist = frozenset(
-                    a for (a,) in conn.execute(
-                        "SELECT art FROM entscheidungen WHERE schluessel = ?", (s,))
-                )
-                if ist == nach_e.get(s, leer):
-                    continue
-                if ist != vor_e.get(s, leer):
-                    raise Konflikt("changed", KONFLIKT_TEXT)
-                schreiben_e.append(s)
-            schreiben_z = []
-            for s, feld in z_geaendert:
-                zeile = conn.execute(
-                    "SELECT wert FROM zuweisungen WHERE schluessel = ? AND feld = ?", (s, feld)
-                ).fetchone()
-                ist = None if zeile is None else zeile[0]
-                if ist == nach_z.get((s, feld)):
-                    continue
-                if ist != vor_z.get((s, feld)):
-                    raise Konflikt("changed", KONFLIKT_TEXT)
-                schreiben_z.append((s, feld))
-            for s in schreiben_e:
-                conn.execute("DELETE FROM entscheidungen WHERE schluessel = ?", (s,))
-                for art in sorted(nach_e.get(s, leer)):
-                    conn.execute(
-                        "INSERT INTO entscheidungen (schluessel, art, geaendert_utc) VALUES (?, ?, ?)",
-                        (s, art, jetzt_utc),
-                    )
-            for s, feld in schreiben_z:
-                conn.execute("DELETE FROM zuweisungen WHERE schluessel = ? AND feld = ?", (s, feld))
-                if nach_z.get((s, feld)):
-                    conn.execute(
-                        "INSERT INTO zuweisungen (schluessel, feld, wert, geaendert_utc) "
-                        "VALUES (?, ?, ?, ?)",
-                        (s, feld, nach_z[(s, feld)], jetzt_utc),
-                    )
-            conn.executemany("DELETE FROM manuelle_notams WHERE id = ?", [(i,) for i in entfernt])
-            conn.executemany(
-                "INSERT INTO manuelle_notams (text, added, geaendert_utc) VALUES (?, ?, ?)",
-                [(n["text"], n.get("added", ""), jetzt_utc) for n in neue],
-            )
+            _schreibe_unterschiede_in_transaktion(conn, vorher, nachher, jetzt_utc)
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
 
 
 def schreibe_arbeitsstand_neu(conn: sqlite3.Connection, stand: Dict[str, Any], jetzt_utc: str) -> None:
-    """Nur fuer Umzug und Tests: leert den Arbeitsstand und schreibt `stand` vollstaendig."""
+    """Nur fuer Umzug und Tests: leert den Arbeitsstand und schreibt `stand` - atomar."""
     leer = leerer_arbeitsstand()
+    ohne_ids = dict(stand)
+    ohne_ids["manual_notams"] = [
+        {"text": n["text"], "added": n.get("added", "")} for n in stand.get("manual_notams", [])
+    ]
     try:
         with _transaktion(conn):
             conn.execute("DELETE FROM entscheidungen")
             conn.execute("DELETE FROM zuweisungen")
             conn.execute("DELETE FROM manuelle_notams")
+            _schreibe_unterschiede_in_transaktion(conn, leer, ohne_ids, jetzt_utc)
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
-    ohne_ids = dict(stand)
-    ohne_ids["manual_notams"] = [
-        {"text": n["text"], "added": n.get("added", "")} for n in stand.get("manual_notams", [])
-    ]
-    schreibe_unterschiede(conn, leer, ohne_ids, jetzt_utc)
 
 
 def lade_korpus(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
