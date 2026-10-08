@@ -342,6 +342,46 @@ for _label, _aufruf in [
 check("echter Sicherungsordner unveraendert", _echt_vorher is None
       or sorted(os.listdir(db.ECHTER_SICHERUNGSORDNER)) == _echt_vorher)
 
+# Fix-Runde 1: Fehlerarten
+import errno as _errno
+_ord2 = Path(tempfile.mkdtemp())
+for _n in range(31):
+    (_ord2 / "nola-2026-09-{:02d}-0000.db".format(_n + 1)).write_bytes(b"x")
+_unlink_orig = Path.unlink
+def _unlink_kaputt(self, *a, **k):
+    if self.parent == _ord2 and not self.name.startswith("."):
+        raise PermissionError(_errno.EACCES, "Permission denied")
+    return _unlink_orig(self, *a, **k)
+Path.unlink = _unlink_kaputt
+try:
+    db.sichere(_c3, _ord2, _dt(2026, 10, 9, 9, 0)); check("Rotation-Fehler -> DbFehler", False)
+except db.DbFehler as e:
+    check("Rotation-Fehler -> DbFehler", e.ursache == "backup rotation failed", e.ursache)
+except OSError:
+    check("Rotation-Fehler -> DbFehler", False, "roher OSError")
+finally:
+    Path.unlink = _unlink_orig
+check("Sicherung trotz Rotation-Fehler vorhanden", (_ord2 / "nola-2026-10-09-0900.db").exists())
+
+_stat_orig = os.stat
+_connect_orig = db.sqlite3.connect
+_oeffnungen = []
+_cloud_datei = _ord / "nola-cloud-test.db"; _cloud_datei.write_bytes(b"x")
+def _stat_cloud(pfad, *a, **k):
+    if str(pfad) == str(_cloud_datei):
+        return _StatAus()
+    return _stat_orig(pfad, *a, **k)
+def _connect_zaehle(*a, **k):
+    _oeffnungen.append(a); return _connect_orig(*a, **k)
+os.stat = _stat_cloud; db.sqlite3.connect = _connect_zaehle
+try:
+    _res_cloud = db.pruefe_sicherung(_cloud_datei)
+finally:
+    os.stat = _stat_orig; db.sqlite3.connect = _connect_orig
+check("ausgelagert -> in_cloud", _res_cloud == ("in_cloud", None), _res_cloud)
+check("in_cloud-Datei nicht geoeffnet", _oeffnungen == [], _oeffnungen)
+_cloud_datei.unlink()
+
 print("== 12. Wiederherstellen ==")
 _ziel = Path(tempfile.mkdtemp()) / "nola.db"
 db.stelle_wieder_her(_reg[0], _ziel)
@@ -352,6 +392,21 @@ try:
     db.stelle_wieder_her(_reg[1], _ziel); check("ueberschreibt nie", False)
 except db.DbFehler as e:
     check("ueberschreibt nie", e.ursache == "exists" and _ziel.read_bytes() == _vorher)
+check("keine tmp nach Wiederherstellen", not any(p.name.endswith(".tmp") for p in _ziel.parent.iterdir()))
+_zd = Path(tempfile.mkdtemp()); _zz = _zd / "nola.db"
+_link_orig = os.link
+def _link_kaputt(*a, **k):
+    raise OSError(_errno.EPERM, "Operation not permitted")
+os.link = _link_kaputt
+try:
+    db.stelle_wieder_her(_reg[0], _zz); check("link-Fehler -> DbFehler", False)
+except db.DbFehler as e:
+    check("link-Fehler -> DbFehler", e.ursache == "restore failed", e.ursache)
+except OSError:
+    check("link-Fehler -> DbFehler", False, "roher OSError")
+finally:
+    os.link = _link_orig
+check("link-Fehler: Ziel fehlt, keine tmp", not _zz.exists() and list(_zd.iterdir()) == [], list(_zd.iterdir()))
 _c3.close()
 
 print()

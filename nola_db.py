@@ -729,8 +729,14 @@ def sichere(
         tmp.unlink(missing_ok=True)
         raise
     if not zusatz:
-        for alt in liste_sicherungen(ordner, nur_regulaer=True)[behalten:]:
-            alt.unlink(missing_ok=True)
+        try:
+            for alt in liste_sicherungen(ordner, nur_regulaer=True)[behalten:]:
+                alt.unlink(missing_ok=True)
+        except OSError as exc:
+            raise DbFehler(
+                "backup rotation failed",
+                "Backup written to {}, but old backups could not be removed: {}".format(name, exc),
+            ) from exc
     return ziel
 
 
@@ -782,18 +788,22 @@ def stelle_wieder_her(sicherung: Path, pfad: Path) -> None:
         quelle = sqlite3.connect(
             "file:{}?mode=ro".format(urllib.parse.quote(str(Path(sicherung).resolve()))), uri=True
         )
-        ziel = sqlite3.connect(str(tmp))
         try:
-            quelle.backup(ziel)
-            if ziel.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                raise DbFehler("backup corrupt", "The selected backup is corrupt.")
+            ziel = sqlite3.connect(str(tmp))
+            try:
+                quelle.backup(ziel)
+                if ziel.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise DbFehler("backup corrupt", "The selected backup is corrupt.")
+            finally:
+                ziel.close()
         finally:
-            ziel.close()
             quelle.close()
         try:
             os.link(tmp, pfad)
         except FileExistsError as exc:
             raise DbFehler("exists", "{} exists - restore refused.".format(pfad.name)) from exc
+        except OSError as exc:
+            raise DbFehler("restore failed", "Restore failed: {}".format(exc)) from exc
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
     finally:
