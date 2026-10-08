@@ -14,10 +14,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import urllib.parse
 from collections import defaultdict
 from contextlib import contextmanager
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -667,3 +669,132 @@ def speichere_importzustand(conn: sqlite3.Connection, state: Dict[str, Any]) -> 
             )
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
+
+
+_SICHERUNG = re.compile(r"^nola-(\d{4})-(\d{2})-(\d{2})-(\d{4})(-[a-z0-9-]+)?\.db$")
+
+
+def liste_sicherungen(ordner: Path, nur_regulaer: bool = False) -> List[Path]:
+    """Sicherungen nach dem Namensmuster, neueste zuerst."""
+    schuetze_echte_orte(Path(ordner))
+    if not Path(ordner).is_dir():
+        return []
+    treffer = []
+    for p in Path(ordner).iterdir():
+        m = _SICHERUNG.match(p.name)
+        if m and (not nur_regulaer or m.group(5) is None):
+            treffer.append(p)
+    return sorted(treffer, key=lambda p: p.name, reverse=True)
+
+
+def sicherung_faellig(ordner: Path, heute: date) -> bool:
+    praefix = "nola-{}-".format(heute.strftime("%Y-%m-%d"))
+    return not any(p.name.startswith(praefix) for p in liste_sicherungen(ordner, nur_regulaer=True))
+
+
+def sichere(
+    conn: sqlite3.Connection, ordner: Path, jetzt: datetime, behalten: int = 30, zusatz: str = ""
+) -> Path:
+    """
+    Kopiert die Datenbank mit der SQLite-Sicherungsfunktion (stimmig auch
+    waehrend eines Schreibvorgangs) erst in eine temporaere Datei, prueft sie
+    und benennt sie dann um - iCloud sieht nie eine halbe Datei. Danach nur
+    regulaere Sicherungen ueber `behalten` loeschen.
+    """
+    ordner = Path(ordner)
+    schuetze_echte_orte(ordner)
+    if not ordner.is_dir():
+        raise DbFehler("backup folder missing", "Backup folder {} is missing.".format(ordner))
+    name = "nola-{}{}.db".format(jetzt.strftime("%Y-%m-%d-%H%M"), "-" + zusatz if zusatz else "")
+    ziel = ordner / name
+    tmp = ordner / ".{}.tmp".format(name)
+    try:
+        kopie = sqlite3.connect(str(tmp))
+        try:
+            conn.backup(kopie)
+            kopie.execute("PRAGMA journal_mode = DELETE")
+            pruefung = kopie.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            kopie.close()
+        if pruefung != "ok":
+            raise DbFehler("backup corrupt", "Backup failed the integrity check: {}".format(pruefung))
+        os.replace(tmp, ziel)
+    except sqlite3.Error as exc:
+        tmp.unlink(missing_ok=True)
+        raise _uebersetze(exc) from exc
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        raise DbFehler("backup failed", "Backup failed: {}".format(exc)) from exc
+    except DbFehler:
+        tmp.unlink(missing_ok=True)
+        raise
+    if not zusatz:
+        for alt in liste_sicherungen(ordner, nur_regulaer=True)[behalten:]:
+            alt.unlink(missing_ok=True)
+    return ziel
+
+
+#: macOS: Datei ist ein iCloud-Platzhalter ohne Inhalt ("Mac-Speicher optimieren").
+SF_DATALESS = 0x40000000
+
+
+def ist_ausgelagert(stat_ergebnis: Any) -> bool:
+    return bool(getattr(stat_ergebnis, "st_flags", 0) & SF_DATALESS)
+
+
+def pruefe_sicherung(pfad: Path) -> Tuple[str, Optional[Dict[str, int]]]:
+    """
+    ("ok", Zeilenzahlen) fuer eine heile Sicherung, ("corrupt", None) fuer eine
+    defekte, ("in_cloud", None) fuer eine von iCloud ausgelagerte - die wird nicht
+    geoeffnet, sonst sahe sie faelschlich defekt aus.
+    """
+    schuetze_echte_orte(Path(pfad).parent)
+    try:
+        if ist_ausgelagert(os.stat(pfad)):
+            return "in_cloud", None
+    except OSError:
+        return "corrupt", None
+    try:
+        conn = sqlite3.connect(
+            "file:{}?mode=ro".format(urllib.parse.quote(str(Path(pfad).resolve()))), uri=True
+        )
+        try:
+            if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                return "corrupt", None
+            return "ok", {
+                t: int(conn.execute("SELECT count(*) FROM {}".format(_q(t))).fetchone()[0])
+                for t in list(FACHTABELLEN) + ["manuelle_notams", "entscheidungen", "zuweisungen"]
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "corrupt", None
+
+
+def stelle_wieder_her(sicherung: Path, pfad: Path) -> None:
+    """Kopiert eine Sicherung nach `pfad` - nur, wenn dort keine Datei liegt (os.link)."""
+    pfad = Path(pfad)
+    schuetze_echte_orte(pfad)
+    if pfad.exists():
+        raise DbFehler("exists", "{} exists - restore refused, nothing was overwritten.".format(pfad.name))
+    tmp = pfad.parent / "{}.{}.tmp".format(pfad.name, os.urandom(4).hex())
+    try:
+        quelle = sqlite3.connect(
+            "file:{}?mode=ro".format(urllib.parse.quote(str(Path(sicherung).resolve()))), uri=True
+        )
+        ziel = sqlite3.connect(str(tmp))
+        try:
+            quelle.backup(ziel)
+            if ziel.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise DbFehler("backup corrupt", "The selected backup is corrupt.")
+        finally:
+            ziel.close()
+            quelle.close()
+        try:
+            os.link(tmp, pfad)
+        except FileExistsError as exc:
+            raise DbFehler("exists", "{} exists - restore refused.".format(pfad.name)) from exc
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    finally:
+        tmp.unlink(missing_ok=True)

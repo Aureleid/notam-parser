@@ -297,6 +297,63 @@ db.speichere_importzustand(_c2, _zst)
 check("Importzustand Rundlauf", db.lade_importzustand(_c2) == _zst)
 _c2.close()
 
+print("== 11. Sicherung ==")
+from datetime import datetime as _dt, date as _date, timedelta as _td
+_p3, _c3 = neue_db()
+db.ersetze_tabelle(_c3, "startplaetze", _sp(), None)
+_ord = Path(tempfile.mkdtemp())
+try:
+    db.sichere(_c3, _ord / "fehlt", _dt(2026, 10, 8, 9, 0)); check("fehlender Ordner -> Fehler", False)
+except db.DbFehler as e:
+    check("fehlender Ordner -> Fehler", e.ursache == "backup folder missing")
+check("ohne Sicherung faellig", db.sicherung_faellig(_ord, _date(2026, 10, 8)))
+_s1 = db.sichere(_c3, _ord, _dt(2026, 10, 8, 9, 0))
+check("Name nach Muster", _s1.name == "nola-2026-10-08-0900.db")
+check("keine Temp-Datei uebrig", not any(p.name.endswith(".tmp") for p in _ord.iterdir()))
+check("Sicherung geprueft und vollstaendig", db.pruefe_sicherung(_s1)[0] == "ok"
+      and db.pruefe_sicherung(_s1)[1]["startplaetze"] == 1)
+_jm = sqlite3.connect(str(_s1)).execute("PRAGMA journal_mode").fetchone()[0]
+check("Sicherung im Journalmodus delete", _jm == "delete", _jm)
+check("heute nicht mehr faellig", not db.sicherung_faellig(_ord, _date(2026, 10, 8)))
+check("morgen wieder faellig", db.sicherung_faellig(_ord, _date(2026, 10, 9)))
+_vs = db.sichere(_c3, _ord, _dt(2026, 10, 8, 9, 1), zusatz="vor-schema-2")
+for _n in range(31):
+    db.sichere(_c3, _ord, _dt(2026, 10, 8, 10, 0) + _td(minutes=_n))
+_reg = db.liste_sicherungen(_ord, nur_regulaer=True)
+check("30 regulaere bleiben", len(_reg) == 30, len(_reg))
+check("aelteste regulaere entfernt", not _s1.exists())
+check("vor-schema bleibt", _vs.exists())
+check("neueste zuerst", _reg[0].name == "nola-2026-10-08-1030.db", _reg[0].name)
+_kaputt = _ord / "nola-2026-10-01-0000.db"; _kaputt.write_bytes(b"kein sqlite")
+check("zerstoerte Sicherung -> corrupt", db.pruefe_sicherung(_kaputt) == ("corrupt", None))
+class _StatAus: st_flags = 0x40000000
+class _StatDa: st_flags = 0
+check("ausgelagert erkannt", db.ist_ausgelagert(_StatAus()) and not db.ist_ausgelagert(_StatDa()))
+_echt_vorher = sorted(os.listdir(db.ECHTER_SICHERUNGSORDNER)) if db.ECHTER_SICHERUNGSORDNER.is_dir() else None
+for _label, _aufruf in [
+        ("sichere", lambda: db.sichere(_c3, db.ECHTER_SICHERUNGSORDNER, _dt(2026, 10, 8, 9, 0))),
+        ("liste_sicherungen", lambda: db.liste_sicherungen(db.ECHTER_SICHERUNGSORDNER)),
+        ("pruefe_sicherung", lambda: db.pruefe_sicherung(db.ECHTER_SICHERUNGSORDNER / "nola-2026-10-08-0900.db")),
+        ("stelle_wieder_her", lambda: db.stelle_wieder_her(_s1, db.PROJEKT_DB))]:
+    try:
+        _aufruf(); check("NOLA_TEST sperrt echten Ort: " + _label, False)
+    except RuntimeError:
+        check("NOLA_TEST sperrt echten Ort: " + _label, True)
+check("echter Sicherungsordner unveraendert", _echt_vorher is None
+      or sorted(os.listdir(db.ECHTER_SICHERUNGSORDNER)) == _echt_vorher)
+
+print("== 12. Wiederherstellen ==")
+_ziel = Path(tempfile.mkdtemp()) / "nola.db"
+db.stelle_wieder_her(_reg[0], _ziel)
+_cz = db.verbinde(_ziel)
+check("wiederhergestellt", db.zaehle(_cz, "startplaetze") == 1); _cz.close()
+_vorher = _ziel.read_bytes()
+try:
+    db.stelle_wieder_her(_reg[1], _ziel); check("ueberschreibt nie", False)
+except db.DbFehler as e:
+    check("ueberschreibt nie", e.ursache == "exists" and _ziel.read_bytes() == _vorher)
+_c3.close()
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
