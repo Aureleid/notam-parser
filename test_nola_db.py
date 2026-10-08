@@ -56,6 +56,17 @@ try:
 except db.DbFehler as e:
     check("leere Abkuerzung abgelehnt", e.ursache == "constraint failed")
 check("nach Ablehnung leer", db.zaehle(_c, "startplaetze") == 0)
+for _label, _df in [("Breite 12abc", _sp(Latitude="12abc")), ("Breite 4O.9 (Buchstabe O)", _sp(Latitude="4O.9"))]:
+    try:
+        db.ersetze_tabelle(_c, "startplaetze", _df, None); check(_label + " abgelehnt", False)
+    except db.DbFehler as e:
+        check(_label + " abgelehnt", e.ursache == "constraint failed", e.ursache)
+try:
+    db.ersetze_tabelle(_c, "startplaetze", _sp(Latitude="-12.5"), None)
+    check("Breite -12.5 angenommen", db.lese_tabelle(_c, "startplaetze").loc[0, "Latitude"] == "-12.5")
+except db.DbFehler as e:
+    check("Breite -12.5 angenommen", False, e.ursache)
+db.ersetze_tabelle(_c, "startplaetze", _sp().iloc[0:0], None)
 
 print("== 4. Lesen, Stand, Konflikt ==")
 _stand1 = db.ersetze_tabelle(_c, "startplaetze", _sp(), None)
@@ -94,12 +105,55 @@ try:
 except db.SchemaZuNeu:
     check("neuere Version -> SchemaZuNeu", True)
 _c.execute("UPDATE meta SET wert = '0' WHERE schluessel = 'schema_version'")
+db.SCHRITTE[0] = "SELECT 1"  # Schritt vorhanden, damit die Sicherungspruefung greift
 try:
     db.pruefe_schema(_c, lambda: None); check("ohne Sicherung kein Umbau", False)
 except db.DbFehler as e:
     check("ohne Sicherung kein Umbau", e.ursache == "backup failed")
+finally:
+    del db.SCHRITTE[0]
 check("Version unveraendert", db.schema_version(_c) == 0)
 _c.close()
+
+print("== 7. Platte voll: Originalursache bleibt ==")
+_pv, _cv = neue_db()
+_vorher = db.ersetze_tabelle(_cv, "startplaetze", _sp(), None)
+_seiten = _cv.execute("PRAGMA page_count").fetchone()[0]
+_cv.execute("PRAGMA max_page_count = {}".format(_seiten + 2))
+_gross = pd.DataFrame([{"Kurzel": "K{}".format(i), "Latitude": "1", "Longitude": "1",
+                        "Name": "x" * 5000, "Land": "L"} for i in range(200)])
+try:
+    db.ersetze_tabelle(_cv, "startplaetze", _gross, None); check("volle Platte -> DbFehler", False)
+except db.DbFehler as e:
+    check("volle Platte -> Ursache disk full", e.ursache == "disk full", e.ursache + " | " + str(e))
+check("volle Platte: keine offene Transaktion", not _cv.in_transaction)
+check("volle Platte: Tabelle unveraendert", db.lese_tabelle(_cv, "startplaetze").attrs["nola_stand"] == _vorher)
+_cv.close()
+
+print("== 8. Schema: fehlender Schritt, Anlegen ==")
+_ps, _cs = neue_db()
+_cs.execute("UPDATE meta SET wert = '0' WHERE schluessel = 'schema_version'")
+_aufrufe = []
+try:
+    db.pruefe_schema(_cs, lambda: (_aufrufe.append(1), _ps)[1]); check("fehlender Schritt -> DbFehler", False)
+except db.DbFehler as e:
+    check("fehlender Schritt -> Ursache schema step missing", e.ursache == "schema step missing", e.ursache)
+except BaseException as e:
+    check("fehlender Schritt -> DbFehler", False, type(e).__name__)
+check("fehlender Schritt: nicht gesichert", _aufrufe == [])
+check("fehlender Schritt: Version bleibt 0", db.schema_version(_cs) == 0)
+check("fehlender Schritt: keine offene Transaktion", not _cs.in_transaction)
+try:
+    db.lege_schema_an(_cs); check("Anlegen auf vorhandener Datei scheitert", False)
+except db.DbFehler:
+    check("Anlegen auf vorhandener Datei scheitert", True)
+check("Anlegen-Fehler laesst keine Transaktion offen", not _cs.in_transaction)
+_cs.close()
+_pn = Path(tempfile.mkdtemp()) / "n.db"
+_cn = db.verbinde(_pn, anlegen=True)
+db.lege_schema_an(_cn)
+check("Version 1 nach Anlegen", db.schema_version(_cn) == 1)
+_cn.close()
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

@@ -16,6 +16,7 @@ import math
 import os
 import sqlite3
 import urllib.parse
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -101,6 +102,7 @@ def _zahl(spalte: str, lo: float, hi: float) -> str:
     s = _q(spalte)
     return (
         "CHECK ({s} IS NOT NULL AND {s} GLOB '*[0-9]*' "
+        "AND trim({s}) NOT GLOB '*[^0-9.+eE-]*' "
         "AND CAST({s} AS REAL) BETWEEN {lo} AND {hi})".format(s=s, lo=lo, hi=hi)
     )
 
@@ -225,15 +227,45 @@ def verbinde(pfad: Path, anlegen: bool = False) -> sqlite3.Connection:
     return conn
 
 
-def lege_schema_an(conn: sqlite3.Connection) -> None:
-    """Legt alle Tabellen an und traegt die Schema-Version ein (nur auf leerer Datei)."""
+@contextmanager
+def _transaktion(conn: sqlite3.Connection):
+    """
+    BEGIN IMMEDIATE ... COMMIT. Bei einem Fehler wird nur zurueckgerollt, wenn
+    SQLite das nicht schon selbst getan hat - so bleibt der Originalfehler
+    (z. B. Platte voll) die gemeldete Ursache.
+    """
+    conn.execute("BEGIN IMMEDIATE")
     try:
-        conn.executescript("BEGIN;\n" + _schema_sql() + "\nCOMMIT;")
-        conn.execute(
-            "INSERT INTO meta (schluessel, wert) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
+        yield
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        raise
+
+
+def lege_schema_an(conn: sqlite3.Connection) -> None:
+    """
+    Legt alle Tabellen an und traegt die Schema-Version ein (nur auf leerer Datei).
+    Die Version steht in derselben Transaktion wie die Tabellen.
+    """
+    version = int(SCHEMA_VERSION)  # Modulkonstante, keine Eingabe
+    skript = (
+        "BEGIN;\n" + _schema_sql()
+        + "\nINSERT INTO meta (schluessel, wert) VALUES ('schema_version', '{}');".format(version)
+        + "\nCOMMIT;"
+    )
+    try:
+        conn.executescript(skript)
     except sqlite3.Error as exc:
+        if conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
         raise _uebersetze(exc) from exc
 
 
@@ -292,24 +324,25 @@ def pruefe_schema(conn: sqlite3.Connection, sichern: Callable[[], Optional[Path]
         )
     if version == SCHEMA_VERSION:
         return
+    fehlend = [n for n in range(version, SCHEMA_VERSION) if n not in SCHRITTE]
+    if fehlend:
+        raise DbFehler(
+            "schema step missing",
+            "No upgrade step from schema {} - the database was not changed.".format(fehlend[0]),
+        )
     if sichern() is None:
         raise DbFehler(
             "backup failed",
             "Backup before the schema upgrade failed - the database was not changed.",
         )
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with _transaktion(conn):
             for n in range(version, SCHEMA_VERSION):
                 conn.execute(SCHRITTE[n])  # einzelne Anweisungen; executescript beendete die Transaktion
             conn.execute(
                 "UPDATE meta SET wert = ? WHERE schluessel = 'schema_version'",
                 (str(SCHEMA_VERSION),),
             )
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
 
@@ -373,17 +406,12 @@ def ersetze_tabelle(
         _q(tabelle), ", ".join(_q(s) for s in spalten), ", ".join("?" for _ in spalten)
     )
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with _transaktion(conn):
             if erwartet is not None and _stand(_zeilen(conn, tabelle)) != erwartet:
                 raise Konflikt("changed", KONFLIKT_TEXT)
             conn.execute("DELETE FROM {}".format(_q(tabelle)))
             conn.executemany(einfuegen, werte)
             neu = _stand(_zeilen(conn, tabelle))
-            conn.execute("COMMIT")
-        except BaseException:
-            conn.execute("ROLLBACK")
-            raise
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
     return neu
