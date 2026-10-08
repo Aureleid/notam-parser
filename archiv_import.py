@@ -1008,19 +1008,23 @@ def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
 
 
 def detection_stamp(
-    paths: Sequence[Path] = (
-        app.APP_DIR / "app.py", app.APP_DIR / "archiv_import.py",
-        app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV,
-    ),
+    paths: Sequence[Path] = (app.APP_DIR / "app.py", app.APP_DIR / "archiv_import.py"),
+    db: Optional[Path] = None,
 ) -> str:
     """
     Erkennungsstand: aendert sich mit der Pipeline, mit diesem Modul
-    (Buendelung, Kandidatenbildung) oder einer ihrer Referenzen.
+    (Buendelung, Kandidatenbildung) oder einer ihrer Referenzen (in der Datenbank).
     """
     h = hashlib.sha256()
     for path in paths:
         h.update(path.name.encode("utf-8"))
         h.update(path.read_bytes() if path.exists() else b"-")
+    for tabelle in ("startplaetze", "firs", "traegersysteme"):
+        h.update(tabelle.encode("utf-8"))
+        try:
+            h.update(app.referenz_lesen(tabelle, db).attrs["nola_stand"].encode("utf-8"))
+        except Exception:
+            h.update(b"-")
     return h.hexdigest()[:16]
 
 

@@ -1,6 +1,14 @@
 import os, sys, math, re
+os.environ["NOLA_TEST"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import app
+import tempfile as _tf_db
+from pathlib import Path as _P_db
+import nola_umzug as _um_db
+# Jede Pruefung arbeitet auf einer Temp-Datenbank aus den echten Projektdateien;
+# die echte nola.db sperrt nola_db.verbinde unter NOLA_TEST.
+app.DB_PATH = _P_db(_tf_db.mkdtemp()) / "nola.db"
+_um_db.umziehen(app.DB_PATH, _um_db.altdateien_im(app.APP_DIR))
 
 ok = True
 def check(label, cond, extra=""):
@@ -1555,10 +1563,10 @@ check("Projektdatei unveraendert",
 print("== 65. Einbindung wie die anderen Referenzen ==")
 quelle_v = Path("app.py").read_text(encoding="utf-8")
 check("eigener Pfad definiert", "VEHICLE_CSV = APP_DIR" in quelle_v)
-check("Statuszeile in der Sidebar", '_reference_status("Traegersysteme", VEHICLE_CSV)' in quelle_v)
+check("Statuszeile in der Sidebar", '_reference_status("Traegersysteme", "traegersysteme")' in quelle_v)
 check("eigener Reiter im Optionsmenue", "_vehicle_editor(vehicles)" in quelle_v)
-check("Entfernen schreibt in die Datei",
-      "VEHICLE_CSV, vehicles, VEHICLE_EXPORT_COLUMNS" in quelle_v)
+check("Entfernen schreibt in die Datenbank",
+      '"traegersysteme", vehicles, VEHICLE_EXPORT_COLUMNS' in quelle_v)
 check("Sicherungs-Schaltflaeche vorhanden", "Download launch vehicles" in quelle_v)
 
 def _ev_n(nation=None, hint=None, fir=None):
@@ -5240,6 +5248,73 @@ if _fns_v:
           app.past_launch_rows(_st_v["groups"], _ev_v, _keys_v, _frueh) == set())
 else:
     print("  SKIP  Echtbestand vergangene Starts (keine FNS-Datei)")
+
+print("== Lokale Datenbank: Referenzen ==")
+import nola_db as _ndb
+check("DB-Pfad ist Temp", app.DB_PATH != _ndb.PROJEKT_DB)
+_sp_csv = app.load_spaceports(str(app.SPACEPORT_CSV))
+_sp_db = app.referenz_lesen("startplaetze")
+_sp_db2 = _sp_db.copy(); _sp_db2.attrs = {}
+try:
+    import pandas as _pd_r
+    _pd_r.testing.assert_frame_equal(_sp_db2.reset_index(drop=True), _sp_csv.reset_index(drop=True))
+    check("Startplaetze aus DB = aus CSV", True)
+except AssertionError as e:
+    check("Startplaetze aus DB = aus CSV", False, str(e)[:200])
+_fir_db = app.referenz_lesen("firs")
+check("FIR mit Nationen", "Nationen" in _fir_db.columns and "nola_stand" in _fir_db.attrs)
+_fir_csv = app.load_firs(str(app.FIR_CSV))
+_fir_db2 = _fir_db.copy(); _fir_db2.attrs = {}
+try:
+    _pd_r.testing.assert_frame_equal(_fir_db2.reset_index(drop=True), _fir_csv.reset_index(drop=True))
+    check("FIRs aus DB = aus CSV (Koordinaten zahlengleich)", True)
+except AssertionError as e:
+    check("FIRs aus DB = aus CSV (Koordinaten zahlengleich)", False, str(e)[:200])
+_veh_db = app.referenz_lesen("traegersysteme"); _veh_db.attrs = {}
+check("Traegersysteme aus DB = aus CSV", _veh_db.equals(app.load_vehicles(str(app.VEHICLE_CSV))))
+_csv_bytes = app.SPACEPORT_CSV.read_bytes()
+
+class _StR:
+    def __init__(self): self.session_state = {}
+    def warning(self, *a, **k): self.session_state.setdefault("_w", []).append(a)
+    error = info = success = warning
+_st_orig_r = app.st; app.st = _StR()
+try:
+    _neu = {"Kurzel": "ZZZZ", "Latitude": 1.0, "Longitude": 2.0, "Name": "**x**", "Land": "China"}
+    app._add_reference_row("startplaetze", _sp_db, app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", _neu)
+    _nach = app.referenz_lesen("startplaetze")
+    check("Hinzufuegen schreibt DB", "ZZZZ" in set(_nach["Kurzel"]))
+    check("CSV unveraendert", app.SPACEPORT_CSV.read_bytes() == _csv_bytes)
+    app._remove_reference_row("startplaetze", _nach, app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", "ZZZZ")
+    check("Entfernen schreibt DB", "ZZZZ" not in set(app.referenz_lesen("startplaetze")["Kurzel"]))
+    app._undo_reference(); app._undo_reference()
+    _zur = app.referenz_lesen("startplaetze"); _zur.attrs = {}
+    check("zweimal Undo -> Ausgangsstand", _zur.equals(_sp_db2))
+    # fremde Aenderung zwischen Lesen und Schreiben
+    _alt_stand = app.referenz_lesen("startplaetze")
+    with app._db() as _c:
+        _c.execute("UPDATE startplaetze SET Name = 'fremd' WHERE Kurzel = 'JSLC'")
+    app._add_reference_row("startplaetze", _alt_stand, app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", _neu)
+    check("Konflikt: nichts geschrieben", "ZZZZ" not in set(app.referenz_lesen("startplaetze")["Kurzel"]))
+    check("Konflikt gemeldet", app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT)
+    # Undo nach fremder Aenderung verweigert
+    app._add_reference_row("startplaetze", app.referenz_lesen("startplaetze"),
+                           app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", _neu)
+    with app._db() as _c:
+        _c.execute("UPDATE startplaetze SET Name = 'fremd2' WHERE Kurzel = 'JSLC'")
+    try:
+        app._undo_reference(); check("Undo nach fremder Aenderung verweigert", False)
+    except app.UndoRefused as e:
+        check("Undo nach fremder Aenderung verweigert", str(e) == app.REFERENCE_UNDO_REFUSED)
+finally:
+    app.st = _st_orig_r
+import inspect as _ins_r
+check("Editor entschaerft DB-Werte", "_md_plain(" in _ins_r.getsource(app._spaceport_editor))
+import archiv_import as _ai_r
+_s1 = _ai_r.detection_stamp()
+with app._db() as _c:
+    _c.execute("UPDATE firs SET Land = Land || ' ' WHERE rowid = 1")
+check("Erkennungsstand folgt der DB", _ai_r.detection_stamp() != _s1)
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

@@ -24,12 +24,14 @@ import json
 import math
 import os
 import re
+import sqlite3
 import tempfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -1720,7 +1722,11 @@ def load_vehicles(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
     ordnet jedem Traegersystem eine Nation zu. mtime gehoert zum Cache-
     Schluessel, damit Aenderungen an der Datei sofort greifen.
     """
-    df = _read_csv_any(path_str)
+    return prepare_vehicles(_read_csv_any(path_str))
+
+
+def prepare_vehicles(df: pd.DataFrame) -> pd.DataFrame:
+    """Aufbereitung der Traegersysteme - gleich fuer CSV und Datenbank."""
     fehlend = [c for c in VEHICLE_COLUMNS if c not in df.columns]
     if fehlend:
         raise ValueError(
@@ -2004,7 +2010,12 @@ def load_spaceports(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
     # mtime gehoert zum Cache-Schluessel: wird die Referenzdatei gepflegt,
     # laedt die App sie beim naechsten Aufruf neu statt die alte Fassung zu
     # behalten, bis der Server neu startet.
-    df = _require_columns(_read_csv_any(path_str), SPACEPORT_COLUMNS, "Weltraumbahnhoefe")
+    return prepare_spaceports(_read_csv_any(path_str))
+
+
+def prepare_spaceports(df: pd.DataFrame) -> pd.DataFrame:
+    """Aufbereitung der Startplaetze - gleich fuer CSV und Datenbank."""
+    df = _require_columns(df, SPACEPORT_COLUMNS, "Weltraumbahnhoefe")
     df["Kurzel"] = df["Kurzel"].astype(str).str.strip().str.upper()
     df["Land"] = df["Land"].astype(str).str.strip()
     return df
@@ -2013,7 +2024,12 @@ def load_spaceports(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_firs(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
     # siehe load_spaceports: der Zeitstempel erzwingt das Neuladen.
-    df = _require_columns(_read_csv_any(path_str), FIR_COLUMNS, "ICAO FIR/ACC")
+    return prepare_firs(_read_csv_any(path_str))
+
+
+def prepare_firs(df: pd.DataFrame) -> pd.DataFrame:
+    """Aufbereitung der FIRs (mit abgeleiteter Spalte Nationen) - gleich fuer CSV und Datenbank."""
+    df = _require_columns(df, FIR_COLUMNS, "ICAO FIR/ACC")
     df["ICAO Code"] = df["ICAO Code"].astype(str).str.strip().str.upper()
     df["Nationen"] = (
         df["Zugehörige Startnation"]
@@ -2114,6 +2130,30 @@ def persist_reference(path: Path, df: pd.DataFrame, columns: Sequence[str]) -> N
     geschrieben, sie entsteht beim Laden neu.
     """
     path.write_text(df[list(columns)].to_csv(index=False), encoding="utf-8")
+
+
+@contextmanager
+def _db(db: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
+    """Eine kurze Verbindung je Durchlauf bzw. Callback - nie ueber Threads geteilt."""
+    conn = nola_db.verbinde(db or DB_PATH)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+REFERENZ_TABELLEN = {"spaceports": "startplaetze", "firs": "firs", "vehicles": "traegersysteme"}
+_PREPARE = {"startplaetze": prepare_spaceports, "firs": prepare_firs, "traegersysteme": prepare_vehicles}
+
+
+def referenz_lesen(tabelle: str, db: Optional[Path] = None) -> pd.DataFrame:
+    """Referenztabelle aus der Datenbank, aufbereitet wie aus der CSV; der Stand bleibt in attrs."""
+    with _db(db) as conn:
+        roh = nola_db.lese_tabelle(conn, tabelle)
+    stand = roh.attrs.get("nola_stand")
+    df = _PREPARE[tabelle](roh.copy())
+    df.attrs["nola_stand"] = stand
+    return df
 
 
 def load_workspace() -> Dict[str, Any]:
@@ -5614,10 +5654,13 @@ FIR_EXPORT_COLUMNS = (
 VEHICLE_EXPORT_COLUMNS = ("Land", "Name", "Alternativname englisch", "Abkürzung")
 
 
-def _push_undo(path: Path, label: str) -> Optional[Dict[str, Any]]:
+def _push_undo_datei(path: Path, label: str) -> Optional[Dict[str, Any]]:
     """
     Sichert den Dateistand vor einer Aenderung, damit sie ruecknehmbar bleibt.
     Rueckgabe: der neue Eintrag (None, wenn die Datei nicht lesbar war).
+
+    Uebergang: nur noch fuer Startarchiv und Seestart-Protokoll, solange diese
+    als Datei gefuehrt werden; Referenzen laufen ueber _push_undo (Datenbank).
     """
     try:
         inhalt = path.read_text(encoding="utf-8")
@@ -5674,17 +5717,37 @@ def _undo_archive(letzter: Dict[str, Any], stapel: List[Dict[str, Any]]) -> Opti
     return letzter["label"]
 
 
-def _undo_reference() -> Optional[str]:
+REFERENCE_UNDO_REFUSED = (
+    "Reference table changed since this action - undo refused to protect newer entries."
+)
+
+
+def _spalten_von(tabelle: str) -> Tuple[str, ...]:
+    return nola_db.FACHTABELLEN[tabelle]
+
+
+def _push_undo(tabelle: str, vorher: pd.DataFrame, nachher_stand: str, label: str) -> Dict[str, Any]:
+    """Merkt den Tabelleninhalt vor und den Stand nach einer Aenderung."""
+    stapel = st.session_state.setdefault("ref_undo", [])
+    eintrag = {
+        "tabelle": tabelle,
+        "zeilen": vorher[list(_spalten_von(tabelle))].to_dict("records"),
+        "nachher": nachher_stand,
+        "label": label,
+    }
+    stapel.append(eintrag)
+    del stapel[:-UNDO_LIMIT]
+    return eintrag
+
+
+def _undo_datei(letzter: Dict[str, Any], stapel: List[Dict[str, Any]]) -> Optional[str]:
     """
-    Nimmt die letzte Referenzaenderung zurueck. Eine Aenderung am Startarchiv
-    laeuft ueber _undo_archive und kann mit UndoRefused abgelehnt werden.
+    Uebergang: Ruecknahme eines Datei-Eintrags (Startarchiv ueber _undo_archive,
+    Seestart-Protokoll durch Zurueckschreiben des alten Inhalts).
     """
-    stapel = st.session_state.get("ref_undo", [])
-    if not stapel:
-        return None
-    if "archiv_nachher" in stapel[-1]:
-        return _undo_archive(stapel[-1], stapel)
-    letzter = stapel.pop()
+    if "archiv_nachher" in letzter:
+        return _undo_archive(letzter, stapel)
+    stapel.pop()
     try:
         Path(letzter["pfad"]).write_text(letzter["inhalt"], encoding="utf-8")
     except OSError:
@@ -5692,40 +5755,87 @@ def _undo_reference() -> Optional[str]:
     return letzter["label"]
 
 
+def _undo_reference() -> Optional[str]:
+    """
+    Nimmt die letzte Aenderung zurueck - nur, wenn die Tabelle seitdem
+    unveraendert ist. Sonst faellt der Eintrag vom Stapel (dieser Stand kehrt
+    nicht zurueck) und UndoRefused nennt den Grund. Bei einem Lesefehler bleibt
+    der Eintrag liegen.
+    """
+    stapel = st.session_state.get("ref_undo", [])
+    if not stapel:
+        return None
+    letzter = stapel[-1]
+    if "pfad" in letzter:
+        return _undo_datei(letzter, stapel)
+    tabelle = letzter["tabelle"]
+    verweigert = ARCHIVE_UNDO_REFUSED if tabelle == "startarchiv" else REFERENCE_UNDO_REFUSED
+    try:
+        with _db() as conn:
+            nola_db.ersetze_tabelle(
+                conn, tabelle, pd.DataFrame(letzter["zeilen"], columns=list(_spalten_von(tabelle))),
+                letzter["nachher"],
+            )
+    except nola_db.Konflikt as exc:
+        stapel.pop()
+        raise UndoRefused(verweigert) from exc
+    except nola_db.DbFehler as exc:
+        raise UndoRefused(ARCHIVE_UNDO_UNREADABLE if tabelle == "startarchiv" else str(exc)) from exc
+    stapel.pop()
+    return letzter["label"]
+
+
+def _melde_db(art: str, text: str) -> None:
+    """Meldung fuer den naechsten Durchlauf (Callbacks koennen nicht dauerhaft zeichnen)."""
+    st.session_state["db_meldung"] = (art, text)
+
+
 def _write_reference(
-    path: Path, df: pd.DataFrame, columns: Sequence[str], label: str
+    tabelle: str, df: pd.DataFrame, columns: Sequence[str], label: str, vorher: pd.DataFrame
 ) -> None:
-    """Sichert den alten Stand und schreibt die Tabelle in die Projektdatei."""
-    _push_undo(path, label)
-    persist_reference(path, df, columns)
+    """Schreibt die Tabelle mit Vergleich gegen den gelesenen Stand und merkt das Undo."""
+    if not vorher.attrs.get("nola_stand"):
+        raise ValueError("_write_reference needs the table as read by referenz_lesen (attrs['nola_stand'])")
+    try:
+        with _db() as conn:
+            neu = nola_db.ersetze_tabelle(conn, tabelle, df[list(columns)], vorher.attrs.get("nola_stand"))
+    except nola_db.Konflikt:
+        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        return
+    except nola_db.DbFehler as exc:
+        _melde_db("error", str(exc))
+        return
+    _push_undo(tabelle, vorher, neu, label)
     st.session_state["ref_flash"] = label
 
 
 def _remove_reference_row(
-    path: Path, df: pd.DataFrame, columns: Sequence[str], key_column: str, key: str
+    tabelle: str, df: pd.DataFrame, columns: Sequence[str], key_column: str, key: str
 ) -> None:
-    """Entfernt einen Eintrag dauerhaft aus der Referenzdatei."""
+    """Entfernt einen Eintrag dauerhaft aus der Referenztabelle der Datenbank."""
     rest = df[df[key_column].astype(str) != key]
     _write_reference(
-        path, rest, columns,
-        "{} removed - permanently deleted from {}.".format(key, path.name),
+        tabelle, rest, columns,
+        "{} removed - permanently deleted from {}.".format(key, tabelle),
+        vorher=df,
     )
 
 
 def _add_reference_row(
-    path: Path,
+    tabelle: str,
     df: pd.DataFrame,
     columns: Sequence[str],
     key_column: str,
     zeile: Dict[str, Any],
 ) -> None:
-    """Fuegt einen Eintrag dauerhaft zur Referenzdatei hinzu."""
+    """Fuegt einen Eintrag dauerhaft zur Referenztabelle der Datenbank hinzu."""
     key = str(zeile[key_column])
     ohne = df[df[key_column].astype(str) != key]
     erweitert = pd.concat([ohne, pd.DataFrame([zeile])], ignore_index=True)
     _write_reference(
-        path, erweitert, columns,
-        "{} gespeichert - steht ab sofort in {}.".format(key, path.name),
+        tabelle, erweitert, columns,
+        "{} gespeichert - steht ab sofort in {}.".format(key, tabelle),
+        vorher=df,
     )
 
 
@@ -5760,11 +5870,11 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
         code = str(r["Kurzel"])
         knopf = _reference_row(
             (
-                "`{}`".format(code),
-                str(r["Name"])[:44],
+                "`{}`".format(code.replace("`", "'")),
+                _md_plain(str(r["Name"])[:44]),
                 "{:.3f}".format(float(r["Latitude"])),
                 "{:.3f}".format(float(r["Longitude"])),
-                str(r["Land"]),
+                _md_plain(str(r["Land"])),
                 "",
             ),
             breiten,
@@ -5773,7 +5883,7 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
             "Remove", key="rm_sp_{}".format(code), use_container_width=True
         ):
             _remove_reference_row(
-                SPACEPORT_CSV, spaceports, SPACEPORT_EXPORT_COLUMNS, "Kurzel", code
+                "startplaetze", spaceports, SPACEPORT_EXPORT_COLUMNS, "Kurzel", code
             )
             # Der Dialog laeuft als Fragment; ohne App-Scope wuerde nur er selbst
             # neu laufen und die Auswertung mit den alten Daten weiterrechnen.
@@ -5799,7 +5909,7 @@ def _spaceport_editor(spaceports: pd.DataFrame) -> None:
                 st.error("Code {} is already taken.".format(code))
             else:
                 _add_reference_row(
-                    SPACEPORT_CSV, spaceports, SPACEPORT_EXPORT_COLUMNS, "Kurzel",
+                    "startplaetze", spaceports, SPACEPORT_EXPORT_COLUMNS, "Kurzel",
                     {
                         "Kurzel": code, "Latitude": float(lat), "Longitude": float(lon),
                         "Name": name.strip() or code, "Land": land,
@@ -5833,12 +5943,12 @@ def _fir_editor(firs: pd.DataFrame) -> None:
         code = str(r["ICAO Code"])
         knopf = _reference_row(
             (
-                "`{}`".format(code),
-                str(r["Betroffene Region / FIR Name"])[:38],
+                "`{}`".format(code.replace("`", "'")),
+                _md_plain(str(r["Betroffene Region / FIR Name"])[:38]),
                 "{:.2f}".format(float(r["Latitude"])),
                 "{:.2f}".format(float(r["Longitude"])),
-                str(r["Land"])[:20],
-                str(r["Zugehörige Startnation"])[:26],
+                _md_plain(str(r["Land"])[:20]),
+                _md_plain(str(r["Zugehörige Startnation"])[:26]),
                 "",
             ),
             breiten,
@@ -5847,7 +5957,7 @@ def _fir_editor(firs: pd.DataFrame) -> None:
             "Remove", key="rm_fir_{}".format(code), use_container_width=True
         ):
             _remove_reference_row(
-                FIR_CSV, firs, FIR_EXPORT_COLUMNS, "ICAO Code", code
+                "firs", firs, FIR_EXPORT_COLUMNS, "ICAO Code", code
             )
             st.rerun(scope="app")
     if len(zeilen) > 60:
@@ -5877,7 +5987,7 @@ def _fir_editor(firs: pd.DataFrame) -> None:
                 st.error("Select at least one launch nation.")
             else:
                 _add_reference_row(
-                    FIR_CSV, firs, FIR_EXPORT_COLUMNS, "ICAO Code",
+                    "firs", firs, FIR_EXPORT_COLUMNS, "ICAO Code",
                     {
                         "ICAO Code": code, "Latitude": float(lat), "Longitude": float(lon),
                         "Betroffene Region / FIR Name": name.strip() or code,
@@ -5912,10 +6022,10 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
         code = str(r["Abkürzung"])
         knopf = _reference_row(
             (
-                "`{}`".format(code),
-                str(r["Name"])[:30],
-                str(r["Alternativname englisch"])[:34],
-                str(r["Land"]),
+                "`{}`".format(code.replace("`", "'")),
+                _md_plain(str(r["Name"])[:30]),
+                _md_plain(str(r["Alternativname englisch"])[:34]),
+                _md_plain(str(r["Land"])),
                 "",
             ),
             breiten,
@@ -5924,7 +6034,7 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
             "Remove", key="rm_veh_{}".format(code), use_container_width=True
         ):
             _remove_reference_row(
-                VEHICLE_CSV, vehicles, VEHICLE_EXPORT_COLUMNS, "Abkürzung", code
+                "traegersysteme", vehicles, VEHICLE_EXPORT_COLUMNS, "Abkürzung", code
             )
             st.rerun(scope="app")
     if len(zeilen) > 60:
@@ -5950,7 +6060,7 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
                 st.error("Name fehlt.")
             else:
                 _add_reference_row(
-                    VEHICLE_CSV, vehicles, VEHICLE_EXPORT_COLUMNS, "Abkürzung",
+                    "traegersysteme", vehicles, VEHICLE_EXPORT_COLUMNS, "Abkürzung",
                     {
                         "Land": land,
                         "Name": name.strip(),
@@ -6008,7 +6118,7 @@ def _reference_dialog(
     st.caption(
         "Changes are written to `{}`, `{}`, `{}` and `{}` right away and "
         "survive a restart.".format(
-            SPACEPORT_CSV.name, FIR_CSV.name, VEHICLE_CSV.name, ARCHIVE_CSV.name
+            "nola.db", "nola.db", "nola.db", ARCHIVE_CSV.name
         )
     )
     a, b, c, d = st.columns(4)
@@ -6416,7 +6526,7 @@ def _update_sea_launches(
 
 def _remove_sea_launch_row(schluessel: str) -> None:
     """Loescht eine Protokollzeile dauerhaft."""
-    _push_undo(SEA_LAUNCH_CSV, "Sea launch row removed")
+    _push_undo_datei(SEA_LAUNCH_CSV, "Sea launch row removed")
     st.session_state.setdefault("seestarts_removed", set()).add(schluessel)
     bestand = load_sea_launches(SEA_LAUNCH_CSV)
     behalten = [
@@ -6484,7 +6594,7 @@ def _remove_archive_row(schluessel: str) -> None:
     except ArchiveUnreadable as exc:
         st.error("Launch archive: {} Nothing was removed.".format(exc))
         return
-    eintrag = _push_undo(ARCHIVE_CSV, "Archivzeile entfernt")
+    eintrag = _push_undo_datei(ARCHIVE_CSV, "Archivzeile entfernt")
     if eintrag is not None:
         try:
             eintrag["roh"] = ARCHIVE_CSV.read_bytes()
@@ -7033,28 +7143,15 @@ def _render_header() -> None:
 
 
 
-def _reference_status(label: str, path: Path) -> Tuple[Optional[pd.DataFrame], str]:
-    """Laedt eine Referenz-CSV und liefert Dataframe plus Statusmeldung."""
-    if not path.exists():
-        return None, "{} {}: file not found ({})".format(
-            glyph(GLYPH_MISSING, COLOR_ERROR), label, path.name
-        )
+def _reference_status(label: str, tabelle: str) -> Tuple[Optional[pd.DataFrame], str]:
+    """Laedt eine Referenztabelle aus der Datenbank und liefert Dataframe plus Statusmeldung."""
     try:
-        stamp = path.stat().st_mtime
-        if "weltraum" in path.name:
-            df = load_spaceports(str(path), stamp)
-        elif "traegersysteme" in path.name:
-            df = load_vehicles(str(path), stamp)
-        else:
-            df = load_firs(str(path), stamp)
+        df = referenz_lesen(tabelle)
     except Exception as exc:
         return None, "{} {}: {}".format(glyph(GLYPH_MISSING, COLOR_ERROR), label, exc)
-    return df, "{} {}: {} entries ({})".format(
-        glyph(GLYPH_OK, COLOR_OK, 0.85),
-        label,
-        len(df),
-        datetime.fromtimestamp(stamp).strftime("%d.%m.%Y %H:%M"),
-    )
+    if df.empty:
+        return None, "{} {}: no entries in the database".format(glyph(GLYPH_MISSING, COLOR_ERROR), label)
+    return df, "{} {}: {} entries".format(glyph(GLYPH_OK, COLOR_OK, 0.85), label, len(df))
 
 
 def main() -> None:
@@ -7106,6 +7203,9 @@ def main() -> None:
     st.session_state.setdefault("ref_flash", None)
 
     _render_header()
+    meldung = st.session_state.pop("db_meldung", None)
+    if meldung:
+        (st.warning if meldung[0] == "warning" else st.error)(meldung[1])
 
     # ----------------------------- Sidebar ------------------------------- #
     with st.sidebar:
@@ -7124,9 +7224,9 @@ def main() -> None:
         ):
             st.session_state["ref_dialog_open"] = True
 
-        spaceports, sp_msg = _reference_status("Weltraumbahnhoefe", SPACEPORT_CSV)
-        firs, fir_msg = _reference_status("ICAO FIR/ACC", FIR_CSV)
-        vehicles, veh_msg = _reference_status("Traegersysteme", VEHICLE_CSV)
+        spaceports, sp_msg = _reference_status("Weltraumbahnhoefe", "startplaetze")
+        firs, fir_msg = _reference_status("ICAO FIR/ACC", "firs")
+        vehicles, veh_msg = _reference_status("Traegersysteme", "traegersysteme")
 
         st.markdown(sp_msg, unsafe_allow_html=True)
         st.markdown(fir_msg, unsafe_allow_html=True)
@@ -7137,12 +7237,7 @@ def main() -> None:
         _show_archive_status(archiv_status)
 
         if spaceports is None or firs is None or vehicles is None:
-            st.error(
-                "All three reference CSVs must sit in the folder of app.py:\n\n"
-                "- `weltraumbahnhoefe_koordinaten_updated.csv`\n"
-                "- `icao_fir_acc_coordinates_updated.csv`\n"
-                "- `traegersysteme_updated.csv`"
-            )
+            st.error("The reference tables in nola.db are empty or unreadable.")
             st.stop()
 
         st.divider()
