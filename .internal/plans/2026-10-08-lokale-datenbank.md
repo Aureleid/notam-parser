@@ -681,6 +681,12 @@ git commit -m "Lokale Datenbank Aufgabe 1: Speicherschicht-Kern (<task-id>)"
 
 **Interfaces:**
 - Consumes: `verbinde`, `lege_schema_an`, `_uebersetze`, `Konflikt`, `KONFLIKT_TEXT` aus Task 1.
+  **Seit der Fix-Runde von Aufgabe 1 gilt:** Jede Schreibtransaktion in dieser Aufgabe nutzt
+  `with _transaktion(conn):` (Task 1) statt des ausgeschriebenen Musters
+  `conn.execute("BEGIN IMMEDIATE") / try … COMMIT / except BaseException: ROLLBACK; raise`, das im
+  Code unten noch steht. Grund: Rollt SQLite selbst zurück (z. B. Platte voll), scheitert ein
+  explizites `ROLLBACK` und verdeckt die echte Ursache. Der Code unten ist entsprechend umzuschreiben;
+  das äußere `except sqlite3.Error as exc: raise _uebersetze(exc) from exc` bleibt.
 - Produces:
   - `ENTSCHEIDUNGS_SCHLUESSEL: Dict[str, str]` — `session_state`-Name → `art`
     (`confirmed_launches`→`bestaetigt`, `hidden_events`→`ausgeblendet`,

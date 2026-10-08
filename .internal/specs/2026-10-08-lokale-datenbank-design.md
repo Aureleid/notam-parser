@@ -88,7 +88,7 @@ im heutigen Format** (`TT.MM.JJJJ`, `HH:MM`). (Korrektur beim Planschreiben: sta
 | Tabelle | Spalten | Schlüssel und Prüfregeln |
 |---|---|---|
 | `startplaetze` | `SPACEPORT_EXPORT_COLUMNS` | `Kurzel` PRIMARY KEY, nicht leer; `Latitude` −90…90, `Longitude` −180…180 |
-| `firs` | `FIR_EXPORT_COLUMNS` | `ICAO Code` PRIMARY KEY, Länge 4; Koordinaten wie oben |
+| `firs` | `FIR_EXPORT_COLUMNS` | `ICAO Code` PRIMARY KEY, Länge 3–4 (US-ARTCC wie `ZAB` haben 3 Zeichen; Korrektur in der Umsetzung); Koordinaten wie oben |
 | `traegersysteme` | `VEHICLE_EXPORT_COLUMNS` | `Abkürzung` PRIMARY KEY (der Referenzeditor schlüsselt danach), `Name` nicht leer |
 | `startarchiv` | `id` + `ARCHIVE_COLUMNS` | `id` INTEGER PRIMARY KEY; `NOTAM`, `Startdatum`, `Nation` NOT NULL |
 | `seestarts` | `id` + `SEA_LAUNCH_COLUMNS` | `id` INTEGER PRIMARY KEY; `Datum`, `Nation` NOT NULL |
