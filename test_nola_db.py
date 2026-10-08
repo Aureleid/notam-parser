@@ -778,6 +778,41 @@ finally:
     ai.write_json_atomic = _waj_orig
 check("F7 Zielordner nach Fehler entfernt", not _ziel7.exists())
 
+# --- Sicherung ohne Nebendateien (nola-a6c.2) ---
+from datetime import datetime as _dt3
+def _wal_quelle():
+    d = Path(tempfile.mkdtemp())
+    c = db.verbinde(d / "t.db", anlegen=True); db.lege_schema_an(c); db.setze_wal(c)
+    c.execute('INSERT INTO startplaetze ("Kurzel","Latitude","Longitude","Name","Land") VALUES (?,?,?,?,?)', ("KSC", 28.5, -80.6, "Kennedy", "USA")); c.commit()
+    return c
+_cw = _wal_quelle()
+_ow = Path(tempfile.mkdtemp())
+_bw = db.sichere(_cw, _ow, _dt3(2026, 10, 8, 9, 0))
+_namen = sorted(x.name for x in _ow.iterdir())
+check("G1 Ordner enthaelt genau die Sicherung", _namen == [_bw.name], _namen)
+check("G1 keine Nebendateien", not any(n.startswith(".") or n.endswith(("-wal", "-shm", "-journal", ".tmp")) for n in _namen), _namen)
+_cx = sqlite3.connect(str(_bw))
+check("G1 Journal-Modus delete", _cx.execute("PRAGMA journal_mode").fetchone()[0] == "delete")
+_cx.close()
+_st, _z = db.pruefe_sicherung(_bw)
+check("G1 pruefe_sicherung ok mit Zeilenzahl", _st == "ok" and _z is not None and _z.get("startplaetze") == 1 == db.zaehle(_cw, "startplaetze"), (_st, _z))
+check("G1 nach Pruefung weiter sauber", sorted(x.name for x in _ow.iterdir()) == [_bw.name])
+
+_orig_replace = os.replace
+def _replace_kaputt(*a, **k):
+    raise OSError(_errno.EIO, "kaputt")
+os.replace = _replace_kaputt
+_ow2 = Path(tempfile.mkdtemp())
+try:
+    try:
+        db.sichere(_cw, _ow2, _dt3(2026, 10, 8, 9, 5)); check("G2 Fehler bei replace -> DbFehler", False)
+    except db.DbFehler:
+        check("G2 Fehler bei replace -> DbFehler", True)
+finally:
+    os.replace = _orig_replace
+check("G2 Ordner nach Fehler leer", list(_ow2.iterdir()) == [], [x.name for x in _ow2.iterdir()])
+_cw.close()
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

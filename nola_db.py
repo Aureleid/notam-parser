@@ -698,6 +698,15 @@ def sicherung_faellig(ordner: Path, heute: date) -> bool:
     return not any(p.name.startswith(praefix) for p in liste_sicherungen(ordner, nur_regulaer=True))
 
 
+def _entferne_tmp(tmp: Path) -> None:
+    """Loescht die temporaere Sicherungsdatei samt SQLite-Nebendateien (-wal/-shm/-journal)."""
+    for endung in ("", "-wal", "-shm", "-journal"):
+        try:
+            Path(str(tmp) + endung).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def sichere(
     conn: sqlite3.Connection, ordner: Path, jetzt: datetime, behalten: int = 30, zusatz: str = ""
 ) -> Path:
@@ -722,17 +731,21 @@ def sichere(
             pruefung = kopie.execute("PRAGMA integrity_check").fetchone()[0]
         finally:
             kopie.close()
+        # backup() uebernimmt den WAL-Modus der Quelle; beim Wechsel zu DELETE bleibt
+        # die -shm-Datei der Kopie liegen. Nach dem Schliessen ist sie wertlos.
+        for endung in ("-wal", "-shm", "-journal"):
+            Path(str(tmp) + endung).unlink(missing_ok=True)
         if pruefung != "ok":
             raise DbFehler("backup corrupt", "Backup failed the integrity check: {}".format(pruefung))
         os.replace(tmp, ziel)
     except sqlite3.Error as exc:
-        tmp.unlink(missing_ok=True)
+        _entferne_tmp(tmp)
         raise _uebersetze(exc) from exc
     except OSError as exc:
-        tmp.unlink(missing_ok=True)
+        _entferne_tmp(tmp)
         raise DbFehler("backup failed", "Backup failed: {}".format(exc)) from exc
     except DbFehler:
-        tmp.unlink(missing_ok=True)
+        _entferne_tmp(tmp)
         raise
     if not zusatz:
         try:
