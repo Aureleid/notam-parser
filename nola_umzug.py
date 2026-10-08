@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,16 +81,28 @@ def _arbeitsstand_streng(pfad: Path) -> Dict[str, Any]:
             raise ValueError("not an object")
     except (OSError, ValueError) as exc:
         raise UmzugFehler("{} could not be read ({}). No database was created.".format(pfad.name, exc)) from exc
+
+    def falsch(was: str) -> UmzugFehler:
+        return UmzugFehler("{} has an unexpected structure ({}). No database was created.".format(pfad.name, was))
+
+    manuell = roh.get("manual_notams", [])
+    if not isinstance(manuell, list):
+        raise falsch("manual_notams is not a list")
     stand["manual_notams"] = [
         {"text": str(n.get("text", "")), "added": str(n.get("added", ""))}
-        for n in roh.get("manual_notams", []) if isinstance(n, dict) and str(n.get("text", "")).strip()
+        for n in manuell if isinstance(n, dict) and str(n.get("text", "")).strip()
     ]
     for k in db.ENTSCHEIDUNGS_SCHLUESSEL:
-        stand[k] = {str(x) for x in roh.get(k, [])}
+        werte = roh.get(k, [])
+        if not isinstance(werte, list):
+            raise falsch("{} is not a list".format(k))
+        stand[k] = {str(x) for x in werte}
     stand["archiv_removed"] = app.migrate_archive_keys(stand["archiv_removed"])
     for k in db.ZUWEISUNGS_SCHLUESSEL:
         werte = roh.get(k, {})
-        stand[k] = {str(a): str(b) for a, b in werte.items() if b} if isinstance(werte, dict) else {}
+        if not isinstance(werte, dict):
+            raise falsch("{} is not an object".format(k))
+        stand[k] = {str(a): str(b) for a, b in werte.items() if b}
     return stand
 
 
@@ -137,11 +150,25 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
             zaehlung["manuelle_notams"] = db.zaehle(conn, "manuelle_notams")
             if zaehlung["manuelle_notams"] != len(stand["manual_notams"]):
                 raise UmzugFehler("Pasted NOTAMs: count mismatch. No database was created.")
+            erwartet = {
+                "entscheidungen": sum(len(stand[k]) for k in db.ENTSCHEIDUNGS_SCHLUESSEL),
+                "zuweisungen": sum(len(stand[k]) for k in db.ZUWEISUNGS_SCHLUESSEL),
+                "archiv_korpus": len(korpus),
+                "archiv_import_tage": len(zustand.get("tage", {})),
+                "archiv_import_entscheidungen": len(zustand.get("entscheidungen", {})),
+                "archiv_import_review": len(zustand.get("review_bestaetigt", []))
+                + len(zustand.get("review_ausgeblendet", [])),
+            }
             db.speichere_korpus(conn, [
                 (n.schluessel, {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen})
                 for n in korpus.values()])
             if zustand:
                 db.speichere_importzustand(conn, zustand)
+            for name, soll in erwartet.items():
+                zaehlung[name] = db.zaehle(conn, name)
+                if zaehlung[name] != soll:
+                    raise UmzugFehler("{}: {} rows read, {} written. No database was created.".format(
+                        name, soll, zaehlung[name]))
             db.setze_meta(conn, "umgezogen_utc", jetzt)
             db.setze_meta(conn, "umzug_quellen", json.dumps(
                 {k: str(v) for k, v in alt.__dict__.items()}, ensure_ascii=False))
@@ -150,13 +177,31 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
         try:
             os.link(tmp, datenbank)
         except FileExistsError:
-            pass  # ein anderer Prozess hat schon umgezogen - dessen Datei gilt
+            # ein anderer Prozess hat schon umgezogen - dessen Datei gilt, auch fuer die Zahlen
+            zaehlung = _zaehle_alle(datenbank)
+        except OSError as exc:
+            raise UmzugFehler("Moving to the database failed ({}). No database was created.".format(exc)) from exc
     except db.DbFehler as exc:
         raise UmzugFehler("Moving to the database failed ({}). No database was created.".format(exc)) from exc
     finally:
         for rest in (tmp, Path(str(tmp) + "-wal"), Path(str(tmp) + "-shm"), Path(str(tmp) + "-journal")):
             rest.unlink(missing_ok=True)
     return zaehlung
+
+
+_ZAEHLTABELLEN = (
+    "startplaetze", "firs", "traegersysteme", "seestarts", "startarchiv", "manuelle_notams",
+    "entscheidungen", "zuweisungen", "archiv_korpus", "archiv_import_tage",
+    "archiv_import_entscheidungen", "archiv_import_review",
+)
+
+
+def _zaehle_alle(datenbank: Path) -> Dict[str, int]:
+    conn = db.verbinde(datenbank)
+    try:
+        return {t: db.zaehle(conn, t) for t in _ZAEHLTABELLEN}
+    finally:
+        conn.close()
 
 
 def stelle_bereit(datenbank: Path, alt: Altdateien, sicherungsordner: Path, jetzt: datetime) -> Startzustand:
@@ -197,9 +242,21 @@ def _sichern_oder_none(conn, ordner: Path, jetzt: datetime, zusatz: str):
 def exportieren(datenbank: Path, ziel: Path) -> Path:
     """Schreibt alle Tabellen in die bisherigen Formate nach `ziel` (neuer Ordner)."""
     ziel = Path(ziel)
-    if os.environ.get("NOLA_TEST") and (app.APP_DIR / "export").resolve() in ziel.resolve().parents:
-        raise RuntimeError("NOLA_TEST is set: tests must never export into the project folder")
+    if os.environ.get("NOLA_TEST"):
+        proj = app.APP_DIR.resolve()
+        z = ziel.resolve()
+        if z == proj or proj in z.parents:
+            raise RuntimeError("NOLA_TEST is set: tests must never export into the project folder")
     ziel.mkdir(parents=True, exist_ok=False)
+    try:
+        _schreibe_export(datenbank, ziel)
+    except BaseException:
+        shutil.rmtree(ziel, ignore_errors=True)
+        raise
+    return ziel
+
+
+def _schreibe_export(datenbank: Path, ziel: Path) -> None:
     conn = db.verbinde(datenbank)
     try:
         for name, pfad, spalten in [
@@ -225,12 +282,12 @@ def exportieren(datenbank: Path, ziel: Path) -> Path:
             roh_ws[k] = sorted(stand[k])
         for k in db.ZUWEISUNGS_SCHLUESSEL:
             roh_ws[k] = dict(sorted(stand[k].items()))
-        (ziel / app.WORKSPACE_FILE.name).write_text(
-            json.dumps(roh_ws, ensure_ascii=False, indent=2), encoding="utf-8")
+        app._write_bytes_atomic(
+            ziel / app.WORKSPACE_FILE.name,
+            json.dumps(roh_ws, ensure_ascii=False, indent=2).encode("utf-8"))
         ai.write_json_atomic(ziel / ai.KORPUS_JSON.name, {"version": 1, "notams": db.lade_korpus(conn)})
         ai.write_json_atomic(ziel / ai.IMPORT_JSON.name, db.lade_importzustand(conn) or {
             "version": 1, "tage": {}, "entscheidungen": {}, "review_bestaetigt": [],
             "review_ausgeblendet": [], "erkennungsstand": ""})
     finally:
         conn.close()
-    return ziel

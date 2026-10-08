@@ -475,16 +475,25 @@ um.umziehen(_zl, um.altdateien_im(_leer))
 _cl = db.verbinde(_zl); check("fehlende Altdateien -> leere Tabellen", db.zaehle(_cl, "startarchiv") == 0); _cl.close()
 
 # nola.db entsteht waehrend des Umzugs -> bleibt unveraendert
+import hashlib
 _zr = Path(tempfile.mkdtemp()) / "nola.db"
+_vorh_quelle = Path(tempfile.mkdtemp()) / "vorh.db"
+um.umziehen(_vorh_quelle, um.altdateien_im(_altordner(mit_echten=False)))  # echte, leere DB des "schnelleren" Prozesses
+_vorh_bytes = _vorh_quelle.read_bytes()
 _orig_link = um.os.link
 def _vorher_anlegen(src, dst):
-    Path(dst).write_bytes(b"vorhanden"); return _orig_link(src, dst)
+    Path(dst).write_bytes(_vorh_bytes); return _orig_link(src, dst)
 um.os.link = _vorher_anlegen
 try:
-    um.umziehen(_zr, um.altdateien_im(_altordner()))
+    _zahl_race = um.umziehen(_zr, um.altdateien_im(_altordner()))
 finally:
     um.os.link = _orig_link
-check("vorhandene nola.db nicht ueberschrieben", _zr.read_bytes() == b"vorhanden")
+check("vorhandene nola.db nicht ueberschrieben",
+      hashlib.sha256(_zr.read_bytes()).hexdigest() == hashlib.sha256(_vorh_bytes).hexdigest())
+check("Race: Zaehlung stammt aus der vorhandenen Datei",
+      _zahl_race["startarchiv"] == 0 and _zahl_race["startplaetze"] == 0, _zahl_race)
+check("Race: keine Reste",
+      not any(p.name.endswith(_e) for p in _zr.parent.iterdir() for _e in (".tmp", ".tmp-wal", ".tmp-shm", ".tmp-journal")))
 
 print("== 14. Start-Entscheidung ==")
 from datetime import datetime as _dt2
@@ -532,6 +541,223 @@ except RuntimeError:
     check("NOLA_TEST sperrt Export ins Projekt", True)
 check("Export Seestarts lesbar", len(app.load_sea_launches(_ex / app.SEA_LAUNCH_CSV.name)) == db.zaehle(_ce, "seestarts"))
 _ce.close()
+
+print("== 16. Fix-Runde 1 ==")
+_ENDEN = (".tmp", ".tmp-wal", ".tmp-shm", ".tmp-journal")
+def _reste(ordner):
+    return [p.name for p in Path(ordner).iterdir() if p.name.endswith(_ENDEN)]
+def _sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+# F1: roher OSError aus os.link
+_d1 = _altordner(); _z1d = Path(tempfile.mkdtemp()); _z1 = _z1d / "nola.db"
+_orig_link = um.os.link
+def _link_eperm(*a, **k):
+    raise PermissionError(_errno.EPERM, "Operation not permitted")
+um.os.link = _link_eperm
+try:
+    try:
+        um.umziehen(_z1, um.altdateien_im(_d1)); check("F1 link-OSError -> UmzugFehler", False)
+    except um.UmzugFehler as e:
+        check("F1 link-OSError -> UmzugFehler", "No database was created" in str(e), str(e)[:120])
+    except OSError:
+        check("F1 link-OSError -> UmzugFehler", False, "roher OSError")
+    check("F1  keine nola.db, kein Rest", not _z1.exists() and _reste(_z1d) == [], list(_z1d.iterdir()))
+    _zs = um.stelle_bereit(_z1, um.altdateien_im(_d1), Path(tempfile.mkdtemp()), _dt2(2026, 10, 8, 9, 0))
+except OSError:
+    check("F1 stelle_bereit -> fehlgeschlagen", False, "roher OSError")
+else:
+    check("F1 stelle_bereit -> fehlgeschlagen", _zs.art == "fehlgeschlagen" and _zs.grund, _zs)
+finally:
+    um.os.link = _orig_link
+
+# F2: Typen im Arbeitsstand
+for _bez, _roh in [("manual_notams=5", {"manual_notams": 5}),
+                   ("hidden_events=null", {"hidden_events": None}),
+                   ("hidden_events=String", {"hidden_events": "abc"}),
+                   ("vehicle_assignments=Liste", {"vehicle_assignments": ["a"]}),
+                   ("confirmed_launches=Zahl", {"confirmed_launches": 7})]:
+    _d = _altordner(); (_d / "notam_workspace.json").write_text(_json.dumps(_roh), encoding="utf-8")
+    _z = Path(tempfile.mkdtemp()) / "nola.db"
+    try:
+        um.umziehen(_z, um.altdateien_im(_d)); check("F2 {} -> UmzugFehler".format(_bez), False)
+    except um.UmzugFehler as e:
+        check("F2 {} -> UmzugFehler".format(_bez), "notam_workspace.json" in str(e), str(e)[:120])
+    except Exception as e:
+        check("F2 {} -> UmzugFehler".format(_bez), False, repr(e)[:120])
+    check("F2  keine nola.db", not _z.exists())
+
+# F3: Zaehlung je Quelle
+_d3 = _altordner(mit_echten=False)
+(_d3 / "notam_workspace.json").write_text(_json.dumps({
+    "manual_notams": [{"text": "A", "added": "t"}],
+    "hidden_events": ["a", "b"], "confirmed_launches": ["c"],
+    "vehicle_assignments": {"x": "y", "z": ""}, "payload_assignments": {"p": "q"}}), encoding="utf-8")
+(_d3 / "archiv_korpus.json").write_text(_json.dumps({"version": 1, "notams": [
+    {"notam_id": "A1/26", "b": "2601010000", "text": "T", "quellen": ["q"]}]}), encoding="utf-8")
+(_d3 / ai.IMPORT_JSON.name).write_text(_json.dumps({"version": 1,
+    "tage": {"2026-01-01": {"fingerprint": "f", "kandidaten": [], "pruefliste": []}},
+    "entscheidungen": {"k": {"a": 1}}, "review_bestaetigt": ["r1", "r2"], "review_ausgeblendet": ["r3"],
+    "erkennungsstand": "s"}), encoding="utf-8")
+_z3 = Path(tempfile.mkdtemp()) / "nola.db"
+try:
+    _zz = um.umziehen(_z3, um.altdateien_im(_d3))
+except Exception as e:
+    _zz = {}; check("F3 Umzug mit Arbeitsstand/Korpus/Importzustand", False, repr(e)[:150])
+_erw3 = {"manuelle_notams": 1, "entscheidungen": 3, "zuweisungen": 2, "archiv_korpus": 1,
+         "archiv_import_tage": 1, "archiv_import_entscheidungen": 1, "archiv_import_review": 3}
+for _k, _v in _erw3.items():
+    check("F3 Zaehlung {}".format(_k), _zz.get(_k) == _v, "{} != {}".format(_zz.get(_k), _v))
+if _z3.exists():
+    _c3z = db.verbinde(_z3)
+    check("F3 Zaehlung = Tabellen", all(db.zaehle(_c3z, _k) == _v for _k, _v in _erw3.items()))
+    _c3z.close()
+# F3: echte Dateien
+_zr3 = um.umziehen(Path(tempfile.mkdtemp()) / "nola.db", um.altdateien_im(_altordner()))
+_ar = um.altdateien_im(_altordner())
+_kn = len(ai.load_korpus(_ar.korpus)); _zst = ai.read_json(_ar.importzustand)
+check("F3 echte Dateien: Korpus", _zr3.get("archiv_korpus") == _kn, (_zr3.get("archiv_korpus"), _kn))
+check("F3 echte Dateien: Importtage", _zr3.get("archiv_import_tage") == len(_zst.get("tage", {})))
+check("F3 echte Dateien: Entscheidungen",
+      _zr3.get("archiv_import_entscheidungen") == len(_zst.get("entscheidungen", {})))
+check("F3 echte Dateien: Review", _zr3.get("archiv_import_review")
+      == len(_zst.get("review_bestaetigt", [])) + len(_zst.get("review_ausgeblendet", [])))
+_wsr = _json.loads(_ar.arbeitsstand.read_text(encoding="utf-8")) if _ar.arbeitsstand.exists() else {}
+check("F3 echte Dateien: Entscheidungen/Zuweisungen", _zr3.get("entscheidungen") == sum(
+          len({str(x) for x in _wsr.get(k, [])}) if k != "archiv_removed"
+          else len(app.migrate_archive_keys({str(x) for x in _wsr.get(k, [])}))
+          for k in db.ENTSCHEIDUNGS_SCHLUESSEL)
+      and _zr3.get("zuweisungen") == sum(len({a for a, b in _wsr.get(k, {}).items() if b})
+                                         for k in db.ZUWEISUNGS_SCHLUESSEL), _zr3)
+
+# F4: Scheitern nach dem Anlegen der Temp-DB
+_d4 = _altordner(); _z4d = Path(tempfile.mkdtemp()); _z4 = _z4d / "nola.db"
+_ers_orig = db.ersetze_tabelle
+def _ers_kaputt(conn, name, df, *a, **k):
+    if name == "seestarts":
+        raise db.DbFehler("write failed", "disk full")
+    return _ers_orig(conn, name, df, *a, **k)
+db.ersetze_tabelle = _ers_kaputt
+try:
+    try:
+        um.umziehen(_z4, um.altdateien_im(_d4)); check("F4 Scheitern nach Temp-DB -> UmzugFehler", False)
+    except um.UmzugFehler as e:
+        check("F4 Scheitern nach Temp-DB -> UmzugFehler", "disk full" in str(e), str(e)[:120])
+finally:
+    db.ersetze_tabelle = _ers_orig
+check("F4  keine nola.db, kein Rest", not _z4.exists() and _reste(_z4d) == [], list(_z4d.iterdir()))
+
+# F5: Akzeptanzkriterien
+_alt5 = um.altdateien_im(_altordner()); _db5 = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_db5, _alt5); _c5 = db.verbinde(_db5)
+_erw_s = _alt5.seestarts and um._csv_streng(_alt5.seestarts, db.FACHTABELLEN["seestarts"])
+_ist_s = db.lese_tabelle(_c5, "seestarts"); _ist_s.attrs = {}
+try:
+    pd.testing.assert_frame_equal(_ist_s, app.load_sea_launches(_alt5.seestarts)[list(db.FACHTABELLEN["seestarts"])]
+                                  .reset_index(drop=True), check_dtype=True)
+    check("F5 Rundlauf seestarts (Altdatei-Leser)", True)
+except AssertionError as e:
+    check("F5 Rundlauf seestarts (Altdatei-Leser)", False, str(e)[:200])
+
+_alle = [_alt5.startplaetze, _alt5.firs, _alt5.traegersysteme, _alt5.startarchiv, _alt5.seestarts,
+         _alt5.arbeitsstand, _alt5.korpus, _alt5.importzustand]
+_proj = um.altdateien_im(app.APP_DIR)
+_proj_dat = [p for p in (_proj.startplaetze, _proj.firs, _proj.traegersysteme, _proj.startarchiv,
+                         _proj.seestarts, _proj.arbeitsstand, _proj.korpus, _proj.importzustand) if p.exists()]
+_hash_vorher = {p: _sha(p) for p in _proj_dat}
+_dbp = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_dbp, _proj)                                   # liest die Projektdateien direkt
+_exp5 = um.exportieren(_dbp, Path(tempfile.mkdtemp()) / "export")
+check("F5 Altdateien im Projekt unberuehrt", {p: _sha(p) for p in _proj_dat} == _hash_vorher)
+_c5b = db.verbinde(_dbp)
+check("F5 Export Korpus = Datenbank",
+      ai.load_korpus(_exp5 / ai.KORPUS_JSON.name) == ai.korpus_aus_daten({"notams": db.lade_korpus(_c5b)}, "db"))
+_zdb = db.lade_importzustand(_c5b)
+_zerw = ai.zustand_aus_daten(_zdb, "db") if _zdb else ai.zustand_aus_daten(
+    {"version": 1, "tage": {}, "entscheidungen": {}, "review_bestaetigt": [],
+     "review_ausgeblendet": [], "erkennungsstand": ""}, "db")
+check("F5 Export Importzustand = Datenbank", ai.load_state(_exp5 / ai.IMPORT_JSON.name) == _zerw)
+_sb = db.lese_tabelle(_c5b, "seestarts"); _sb.attrs = {}
+try:
+    pd.testing.assert_frame_equal(app.load_sea_launches(_exp5 / app.SEA_LAUNCH_CSV.name)[list(_sb.columns)]
+                                  .reset_index(drop=True), _sb, check_dtype=True)
+    check("F5 Export seestarts gleich Datenbank", True)
+except AssertionError as e:
+    check("F5 Export seestarts gleich Datenbank", False, str(e)[:200])
+_c5b.close(); _c5.close()
+# Export mit befuelltem Korpus/Importzustand (synthetisch)
+_db3 = _z3; _e3 = um.exportieren(_db3, Path(tempfile.mkdtemp()) / "export")
+_c3e = db.verbinde(_db3)
+check("F5 Export Korpus (befuellt)", len(ai.load_korpus(_e3 / ai.KORPUS_JSON.name)) == 1)
+check("F5 Export Importzustand (befuellt)",
+      ai.load_state(_e3 / ai.IMPORT_JSON.name) == ai.zustand_aus_daten(db.lade_importzustand(_c3e), "db"))
+_c3e.close()
+
+# F5: Schema-Anhebung in stelle_bereit
+_sd5 = Path(tempfile.mkdtemp()); _sdb5 = _sd5 / "nola.db"; _sord5 = Path(tempfile.mkdtemp())
+um.umziehen(_sdb5, um.altdateien_im(_altordner(mit_echten=False)))
+_cc = db.verbinde(_sdb5); db.setze_meta(_cc, "schema_version", "0"); _cc.close()
+db.SCHRITTE[0] = "SELECT 1"
+try:
+    _zs5 = um.stelle_bereit(_sdb5, _alt5, _sord5, _dt2(2026, 10, 8, 9, 0))
+    check("F5 Schema-Anhebung -> bereit", _zs5.art == "bereit", _zs5)
+    check("F5  Sicherung vor-schema-1", [p.name for p in _sord5.iterdir() if not p.name.startswith(".")] == ["nola-2026-10-08-0900-vor-schema-1.db"],
+          [p.name for p in _sord5.iterdir()])
+    _cc = db.verbinde(_sdb5); check("F5  Version danach 1", db.schema_version(_cc) == 1); _cc.close()
+    # Sicherungsordner fehlt -> fehlgeschlagen, Version bleibt 0
+    _cc = db.verbinde(_sdb5); db.setze_meta(_cc, "schema_version", "0"); _cc.close()
+    _zs6 = um.stelle_bereit(_sdb5, _alt5, _sord5 / "gibts-nicht", _dt2(2026, 10, 8, 9, 5))
+    check("F5 Schema-Anhebung ohne Sicherungsordner -> fehlgeschlagen",
+          _zs6.art == "fehlgeschlagen" and "Backup" in _zs6.grund, _zs6)
+    _cc = db.verbinde(_sdb5); check("F5  Version bleibt 0", db.schema_version(_cc) == 0); _cc.close()
+finally:
+    db.SCHRITTE.clear()
+
+# F5: kaputter Korpus / Importzustand
+for _name, _inhalt in [("archiv_korpus.json", '{"notams": [{"notam_id": 1}]}'),
+                       ("archiv_korpus.json", "kein json"),
+                       (ai.IMPORT_JSON.name, '{"tage": 5}'),
+                       (ai.IMPORT_JSON.name, "kein json")]:
+    _d = _altordner(); (_d / _name).write_text(_inhalt, encoding="utf-8")
+    _z = Path(tempfile.mkdtemp()) / "nola.db"
+    try:
+        um.umziehen(_z, um.altdateien_im(_d)); check("F5 kaputt {} -> UmzugFehler".format(_name), False)
+    except um.UmzugFehler as e:
+        check("F5 kaputt {} -> UmzugFehler".format(_name), _name in str(e), str(e)[:100])
+    check("F5  keine nola.db, kein Rest", not _z.exists() and _reste(_z.parent) == [])
+
+# F6: Testschutz Export im ganzen Projektordner
+for _ziel6 in (app.APP_DIR / "export", app.APP_DIR / "x"):
+    try:
+        um.exportieren(_db_p, _ziel6); check("F6 Export nach {} gesperrt".format(_ziel6.name), False)
+    except RuntimeError:
+        check("F6 Export nach {} gesperrt".format(_ziel6.name), True)
+check("F6  Ordner nicht angelegt", not (app.APP_DIR / "export").exists() and not (app.APP_DIR / "x").exists())
+
+# F7: Workspace atomar, Aufraeumen bei Fehler
+_atomar = []
+_wba_orig = app._write_bytes_atomic
+def _wba_spion(pfad, daten):
+    _atomar.append(Path(pfad).name); return _wba_orig(pfad, daten)
+app._write_bytes_atomic = _wba_spion
+try:
+    um.exportieren(_db_p, Path(tempfile.mkdtemp()) / "export")
+finally:
+    app._write_bytes_atomic = _wba_orig
+check("F7 notam_workspace.json atomar geschrieben", app.WORKSPACE_FILE.name in _atomar, _atomar)
+_ziel7 = Path(tempfile.mkdtemp()) / "export"
+_waj_orig = ai.write_json_atomic
+def _waj_kaputt(*a, **k):
+    raise OSError(_errno.ENOSPC, "No space left")
+ai.write_json_atomic = _waj_kaputt
+try:
+    try:
+        um.exportieren(_db_p, _ziel7); check("F7 Fehler wird weitergereicht", False)
+    except OSError:
+        check("F7 Fehler wird weitergereicht", True)
+finally:
+    ai.write_json_atomic = _waj_orig
+check("F7 Zielordner nach Fehler entfernt", not _ziel7.exists())
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
