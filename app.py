@@ -35,6 +35,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import nola_db
+
 # --------------------------------------------------------------------------- #
 # Optionale Abhaengigkeiten (App bleibt ohne sie lauffaehig)
 # --------------------------------------------------------------------------- #
@@ -2023,6 +2025,10 @@ def load_firs(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
 
 #: Arbeitsstand der Sitzung: manuelle NOTAMs, Bestaetigungen, Ausblendungen.
 WORKSPACE_FILE = APP_DIR / "notam_workspace.json"
+#: Die lokale Datenbank - Quelle der Wahrheit fuer alles Eingepflegte.
+DB_PATH = APP_DIR / "nola.db"
+#: Sicherungen der Datenbank (iCloud Drive); die Datenbank selbst liegt nie dort.
+BACKUP_DIR = nola_db.ECHTER_SICHERUNGSORDNER
 #: Archiv der erkannten Starts - anders als die drei Referenzen oben wird diese
 #: Datei nicht eingelesen, sondern von der Anwendung selbst fortgeschrieben.
 ARCHIVE_CSV = APP_DIR / "startarchiv_updated.csv"

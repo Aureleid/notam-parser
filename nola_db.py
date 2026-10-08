@@ -377,9 +377,14 @@ def _als_text(wert: Any) -> Optional[str]:
     return text if text != "" else None
 
 
+#: Tabellen, die app.read_archive_strict / load_sea_launches mit "" statt NaN lesen.
+_LEER_ALS_TEXT = frozenset({"startarchiv", "seestarts"})
+
+
 def lese_tabelle(conn: sqlite3.Connection, tabelle: str) -> pd.DataFrame:
     """
     Liest eine Fachtabelle wie _read_csv_any eine CSV: Text-Spalten, leer = NaN.
+    Ausnahme wie bei den App-Lesern: Startarchiv und Seestarts haben leer = "".
     df.attrs["nola_stand"] ist die Pruefsumme des gelesenen Inhalts - wer die
     Tabelle spaeter ersetzt, gibt sie als `erwartet` mit.
     """
@@ -389,8 +394,9 @@ def lese_tabelle(conn: sqlite3.Connection, tabelle: str) -> pd.DataFrame:
         raise _uebersetze(exc) from exc
     spalten = list(FACHTABELLEN[tabelle])
     df = pd.DataFrame([list(z) for z in zeilen], columns=spalten, dtype=object)
+    leer = "" if tabelle in _LEER_ALS_TEXT else np.nan
     for sp in spalten:
-        df[sp] = df[sp].map(lambda v: np.nan if v is None or v == "" else str(v)).astype(object)
+        df[sp] = df[sp].map(lambda v: leer if v is None or v == "" else str(v)).astype(object)
     df.attrs["nola_stand"] = _stand(zeilen)
     return df
 

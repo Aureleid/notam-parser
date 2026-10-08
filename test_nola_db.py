@@ -409,6 +409,130 @@ finally:
 check("link-Fehler: Ziel fehlt, keine tmp", not _zz.exists() and list(_zd.iterdir()) == [], list(_zd.iterdir()))
 _c3.close()
 
+print("== 13. Umzug ==")
+import shutil, json as _json
+import archiv_import as ai
+import nola_umzug as um
+
+def _altordner(mit_echten=True):
+    d = Path(tempfile.mkdtemp())
+    if mit_echten:
+        for f in (app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV):
+            shutil.copy(f, d / f.name)
+        for f in (app.ARCHIVE_CSV, app.SEA_LAUNCH_CSV, app.WORKSPACE_FILE, ai.KORPUS_JSON, ai.IMPORT_JSON):
+            if f.exists():
+                shutil.copy(f, d / f.name)
+    return d
+
+_alt_d = _altordner()
+_alt = um.altdateien_im(_alt_d)
+_db_p = Path(tempfile.mkdtemp()) / "nola.db"
+_zahl = um.umziehen(_db_p, _alt)
+_cu = db.verbinde(_db_p)
+for _t, _datei, _sp_ in [("startplaetze", _alt.startplaetze, app.SPACEPORT_EXPORT_COLUMNS),
+                         ("firs", _alt.firs, app.FIR_EXPORT_COLUMNS),
+                         ("traegersysteme", _alt.traegersysteme, app.VEHICLE_EXPORT_COLUMNS)]:
+    _erw = app._read_csv_any(str(_datei))[list(_sp_)].reset_index(drop=True)
+    _ist = db.lese_tabelle(_cu, _t); _ist.attrs = {}
+    try:
+        pd.testing.assert_frame_equal(_ist, _erw, check_dtype=True); check("Rundlauf " + _t, True)
+    except AssertionError as e:
+        check("Rundlauf " + _t, False, str(e)[:200])
+_erw_a = app.read_archive_strict(_alt.startarchiv)[list(app.ARCHIVE_COLUMNS)].reset_index(drop=True)
+_ist_a = db.lese_tabelle(_cu, "startarchiv"); _ist_a.attrs = {}
+try:
+    pd.testing.assert_frame_equal(_ist_a, _erw_a, check_dtype=True); check("Rundlauf startarchiv", True)
+except AssertionError as e:
+    check("Rundlauf startarchiv", False, str(e)[:200])
+check("Zeilenzahlen gemeldet", _zahl["startarchiv"] == len(_erw_a))
+check("Traegersysteme und Seestarts umgezogen (ohne Koordinatenspalten)",
+      _zahl["traegersysteme"] == len(app._read_csv_any(str(_alt.traegersysteme)))
+      and _zahl["seestarts"] == (len(app._read_csv_any(str(_alt.seestarts))) if _alt.seestarts.exists() else 0))
+check("Umlaut-Spalte vorhanden", "Trägersystem" in db.lese_tabelle(_cu, "startarchiv").columns)
+if _alt.arbeitsstand.exists():
+    _ws = _json.loads(_alt.arbeitsstand.read_text(encoding="utf-8"))
+    _gl = db.lade_arbeitsstand(_cu)
+    check("Arbeitsstand: NOTAMs", len(_gl["manual_notams"]) == len(_ws.get("manual_notams", [])))
+    check("Arbeitsstand: archiv_removed umgestellt",
+          _gl["archiv_removed"] == app.migrate_archive_keys(_ws.get("archiv_removed", [])))
+_cu.close()
+
+for _name, _inhalt in [("notam_workspace.json", "kein json"),
+                       ("startarchiv_updated.csv", "falsch,kopf\n1,2\n"),
+                       ("seestarts_updated.csv", b"\xff\xfe\x00\x00kaputt")]:
+    _d = _altordner(); _f = _d / _name
+    (_f.write_bytes(_inhalt) if isinstance(_inhalt, bytes) else _f.write_text(_inhalt, encoding="utf-8"))
+    _z = Path(tempfile.mkdtemp()) / "nola.db"
+    try:
+        um.umziehen(_z, um.altdateien_im(_d)); check("unlesbar {} -> Abbruch".format(_name), False)
+    except um.UmzugFehler as e:
+        check("unlesbar {} -> Abbruch".format(_name), _name in str(e), str(e)[:120])
+    check("  keine nola.db", not _z.exists())
+    check("  keine Temp-Datei", not any(p.name.endswith(".tmp") for p in _z.parent.iterdir()))
+
+_leer = _altordner(mit_echten=False); _zl = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_zl, um.altdateien_im(_leer))
+_cl = db.verbinde(_zl); check("fehlende Altdateien -> leere Tabellen", db.zaehle(_cl, "startarchiv") == 0); _cl.close()
+
+# nola.db entsteht waehrend des Umzugs -> bleibt unveraendert
+_zr = Path(tempfile.mkdtemp()) / "nola.db"
+_orig_link = um.os.link
+def _vorher_anlegen(src, dst):
+    Path(dst).write_bytes(b"vorhanden"); return _orig_link(src, dst)
+um.os.link = _vorher_anlegen
+try:
+    um.umziehen(_zr, um.altdateien_im(_altordner()))
+finally:
+    um.os.link = _orig_link
+check("vorhandene nola.db nicht ueberschrieben", _zr.read_bytes() == b"vorhanden")
+
+print("== 14. Start-Entscheidung ==")
+from datetime import datetime as _dt2
+_sd = Path(tempfile.mkdtemp()); _sdb = _sd / "nola.db"; _sord = Path(tempfile.mkdtemp())
+_z1 = um.stelle_bereit(_sdb, um.altdateien_im(_altordner()), _sord, _dt2(2026, 10, 8, 9, 0))
+check("fehlt, keine Sicherung -> umgezogen", _z1.art == "umgezogen" and _sdb.exists(), _z1)
+_z2 = um.stelle_bereit(_sdb, um.altdateien_im(_altordner()), _sord, _dt2(2026, 10, 8, 9, 0))
+check("vorhanden -> bereit", _z2.art == "bereit", _z2)
+_cs = db.verbinde(_sdb); db.sichere(_cs, _sord, _dt2(2026, 10, 8, 9, 5)); _cs.close()
+_sdb.unlink()
+_z3 = um.stelle_bereit(_sdb, um.altdateien_im(_altordner()), _sord, _dt2(2026, 10, 8, 9, 10))
+check("fehlt mit Sicherungen -> Wahl, keine Datei", _z3.art == "fehlt_mit_sicherungen" and not _sdb.exists(), _z3)
+_z4db = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_z4db, um.altdateien_im(_altordner()))
+_c4 = db.verbinde(_z4db); db.setze_meta(_c4, "schema_version", "99"); _c4.close()
+_z4 = um.stelle_bereit(_z4db, um.altdateien_im(_altordner()), _sord, _dt2(2026, 10, 8, 9, 0))
+check("neuere Version -> fehlgeschlagen", _z4.art == "fehlgeschlagen", _z4)
+
+print("== 15. Export ==")
+_ex = um.exportieren(_db_p, Path(tempfile.mkdtemp()) / "export")
+_ce = db.verbinde(_db_p)
+for _t, _n in [("startplaetze", app.SPACEPORT_CSV.name), ("firs", app.FIR_CSV.name),
+               ("traegersysteme", app.VEHICLE_CSV.name)]:
+    _a = app._read_csv_any(str(_ex / _n)).reset_index(drop=True)
+    _b = db.lese_tabelle(_ce, _t); _b.attrs = {}
+    try:
+        pd.testing.assert_frame_equal(_a[list(_b.columns)], _b); check("Export " + _t, True)
+    except AssertionError as e:
+        check("Export " + _t, False, str(e)[:200])
+_ea = app.read_archive_strict(_ex / app.ARCHIVE_CSV.name).reset_index(drop=True)
+_eb = db.lese_tabelle(_ce, "startarchiv"); _eb.attrs = {}
+try:
+    pd.testing.assert_frame_equal(_ea[list(_eb.columns)], _eb); check("Export startarchiv", True)
+except AssertionError as e:
+    check("Export startarchiv", False, str(e)[:200])
+_ew = _json.loads((_ex / app.WORKSPACE_FILE.name).read_text(encoding="utf-8"))
+_gw = db.lade_arbeitsstand(_ce)
+check("Export Arbeitsstand", [n["text"] for n in _ew["manual_notams"]] == [n["text"] for n in _gw["manual_notams"]]
+      and set(_ew["hidden_events"]) == _gw["hidden_events"])
+check("Export Korpus lesbar", isinstance(ai.load_korpus(_ex / ai.KORPUS_JSON.name), dict))
+check("Export Importzustand lesbar", isinstance(ai.load_state(_ex / ai.IMPORT_JSON.name), dict))
+try:
+    um.exportieren(_db_p, app.APP_DIR / "export" / "test"); check("NOLA_TEST sperrt Export ins Projekt", False)
+except RuntimeError:
+    check("NOLA_TEST sperrt Export ins Projekt", True)
+check("Export Seestarts lesbar", len(app.load_sea_launches(_ex / app.SEA_LAUNCH_CSV.name)) == db.zaehle(_ce, "seestarts"))
+_ce.close()
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

@@ -284,8 +284,8 @@ def write_json_atomic(path: Path, data: Dict[str, Any]) -> None:
     _write_bytes_atomic(path, json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8"))
 
 
-def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
-    data = read_json(path)
+def korpus_aus_daten(data: Dict[str, Any], name: str) -> Dict[str, KorpusNotam]:
+    """Prueft und baut den Korpus aus der Rohform (Datei oder Datenbank)."""
     korpus: Dict[str, KorpusNotam] = {}
     try:
         for e in data.get("notams", []):
@@ -299,9 +299,13 @@ def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         raise ImportStateError(
             "{} has an unexpected structure ({!r}). It is left untouched - please check it.".format(
-                path.name, exc)
+                name, exc)
         ) from exc
     return korpus
+
+
+def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
+    return korpus_aus_daten(read_json(path), path.name)
 
 
 def save_korpus(korpus: Dict[str, KorpusNotam], path: Path = KORPUS_JSON) -> None:
@@ -956,22 +960,18 @@ _STATE_TYPEN = (
 )
 
 
-def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
-    """
-    Liest den Importzustand. Wie load_korpus: eine Datei mit unerwarteter
-    Struktur bricht ab (ImportStateError) und wird nie ueberschrieben.
-    """
-    data = read_json(path)
+def zustand_aus_daten(data: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """Prueft und baut den Importzustand aus der Rohform (Datei oder Datenbank)."""
 
     def kaputt(was: str) -> ImportStateError:
         return ImportStateError(
             "{} has an unexpected structure ({}). It is left untouched - "
-            "please check it.".format(path.name, was)
+            "please check it.".format(name, was)
         )
 
-    for name, typ in _STATE_TYPEN:
-        if name in data and not isinstance(data[name], typ):
-            raise kaputt("{} is not a {}".format(name, typ.__name__))
+    for feld, typ in _STATE_TYPEN:
+        if feld in data and not isinstance(data[feld], typ):
+            raise kaputt("{} is not a {}".format(feld, typ.__name__))
     for iso, tag in data.get("tage", {}).items():
         if not isinstance(tag, dict) or not isinstance(tag.get("fingerprint"), str):
             raise kaputt("day {} is not a day entry".format(iso))
@@ -993,6 +993,14 @@ def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
         "review_ausgeblendet": list(data.get("review_ausgeblendet", [])),
         "erkennungsstand": data.get("erkennungsstand", ""),
     }
+
+
+def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
+    """
+    Liest den Importzustand. Wie load_korpus: eine Datei mit unerwarteter
+    Struktur bricht ab (ImportStateError) und wird nie ueberschrieben.
+    """
+    return zustand_aus_daten(read_json(path), path.name)
 
 
 def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
