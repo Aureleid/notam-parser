@@ -17,6 +17,7 @@ Lizenz:     MIT
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import html
 import io
@@ -5556,22 +5557,48 @@ def build_event_map(events: Sequence[LaunchEvent], trail_factor: float = 2.5) ->
 # --------------------------------------------------------------------------- #
 # Streamlit UI
 # --------------------------------------------------------------------------- #
+WORKSPACE_KEYS: Tuple[str, ...] = ("manual_notams",) + tuple(
+    nola_db.ENTSCHEIDUNGS_SCHLUESSEL
+) + tuple(nola_db.ZUWEISUNGS_SCHLUESSEL)
+
+
+def _arbeitsstand_laden() -> None:
+    """
+    Fuellt den Arbeitsstand im session_state aus der Datenbank - in jedem
+    Durchlauf, damit Aenderungen anderer Tabs und externer Werkzeuge beim
+    naechsten Klick sichtbar sind. Die Momentaufnahme ist der Stand, den der
+    Benutzer gerade sieht; _persist_workspace schreibt nur Abweichungen davon.
+    """
+    with _db() as conn:
+        stand = nola_db.lade_arbeitsstand(conn)
+    stand["archiv_removed"] = migrate_archive_keys(stand["archiv_removed"])
+    for k in WORKSPACE_KEYS:
+        st.session_state[k] = copy.deepcopy(stand[k])
+    st.session_state["_ws_momentaufnahme"] = copy.deepcopy(stand)
+
+
 def _persist_workspace() -> None:
-    """Sichert den Arbeitsstand nach jeder Aenderung."""
-    # Benannt statt nach Position: ein spaeter eingeschobener Parameter hat die
-    # Argumente sonst stillschweigend verschoben.
-    save_workspace(
-        st.session_state.get("manual_notams", []),
-        st.session_state.get("confirmed_launches", set()),
-        st.session_state.get("hidden_events", set()),
-        rejected=st.session_state.get("rejected_launches", set()),
-        vehicle_assignments=st.session_state.get("vehicle_assignments", {}),
-        payload_assignments=st.session_state.get("payload_assignments", {}),
-        launch_site_assignments=st.session_state.get("launch_site_assignments", {}),
-        archiv_removed=st.session_state.get("archiv_removed", set()),
-        restored=st.session_state.get("restored_events", set()),
-        seestarts_removed=st.session_state.get("seestarts_removed", set()),
-    )
+    """
+    Schreibt die Aenderungen am Arbeitsstand seit der Momentaufnahme. Hat
+    jemand anderes dieselben Eintraege inzwischen geaendert, wird nichts
+    geschrieben und die Ansicht neu geladen.
+    """
+    vorher = st.session_state.get("_ws_momentaufnahme") or nola_db.leerer_arbeitsstand()
+    aktuell = {k: st.session_state.get(k, vorher.get(k)) for k in WORKSPACE_KEYS}
+    try:
+        with _db() as conn:
+            nola_db.schreibe_unterschiede(
+                conn, vorher, aktuell, datetime.now(timezone.utc).isoformat()
+            )
+    except nola_db.Konflikt:
+        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+    except nola_db.DbFehler as exc:
+        _melde_db("error", "Not saved: {}".format(exc))
+    # In jedem Fall den echten Stand zeigen (neue NOTAMs bekommen ihre id).
+    try:
+        _arbeitsstand_laden()
+    except nola_db.DbFehler as exc:
+        _melde_db("error", str(exc))
 
 
 def _add_manual_notams() -> None:
@@ -5586,11 +5613,11 @@ def _add_manual_notams() -> None:
     _persist_workspace()
 
 
-def _remove_manual(index: int) -> None:
-    """Entfernt einen einzelnen manuellen Eintrag."""
-    items = st.session_state.get("manual_notams", [])
-    if 0 <= index < len(items):
-        items.pop(index)
+def _remove_manual(notam_id: int) -> None:
+    """Entfernt einen einzelnen manuellen Eintrag - ueber seine Datenbank-id, nie ueber die Position."""
+    st.session_state["manual_notams"] = [
+        e for e in st.session_state.get("manual_notams", []) if e.get("id") != notam_id
+    ]
     st.session_state["manual_feedback"] = None
     _persist_workspace()
 
@@ -5605,7 +5632,7 @@ def _render_pasted_entries(
 
     `flags` kommt aus order_pasted_entries: (urspruenglicher Index, vergangen).
     Ohne `flags` unmarkiert in urspruenglicher Reihenfolge. "Remove" bekommt
-    immer den urspruenglichen Index - die Liste im Arbeitsstand bleibt, wie sie ist.
+    die Datenbank-id des Eintrags - die Anzeige-Reihenfolge spielt dafuer keine Rolle.
     """
     if not items:
         return
@@ -5632,9 +5659,9 @@ def _render_pasted_entries(
                 )
                 st.button(
                     "Remove",
-                    key="del_manual_{}".format(i),
+                    key="del_manual_{}".format(entry.get("id")),
                     on_click=_remove_manual,
-                    args=(i,),
+                    args=(entry.get("id"),),
                     use_container_width=True,
                 )
 
@@ -7162,40 +7189,8 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    if not st.session_state.get("workspace_loaded"):
-        gespeichert = load_workspace()
-        st.session_state["manual_notams"] = list(gespeichert.get("manual_notams", []))
-        st.session_state["confirmed_launches"] = set(gespeichert.get("confirmed_launches", []))
-        st.session_state["hidden_events"] = set(gespeichert.get("hidden_events", []))
-        st.session_state["rejected_launches"] = set(gespeichert.get("rejected_launches", []))
-        for feld in (
-            "vehicle_assignments", "payload_assignments", "launch_site_assignments",
-        ):
-            roh = gespeichert.get(feld, {})
-            st.session_state[feld] = (
-                {str(k): str(v) for k, v in roh.items() if v}
-                if isinstance(roh, dict)
-                else {}
-            )
-        st.session_state["archiv_removed"] = migrate_archive_keys(
-            gespeichert.get("archiv_removed", [])
-        )
-        st.session_state["restored_events"] = set(gespeichert.get("restored_events", []))
-        st.session_state["seestarts_removed"] = set(
-            gespeichert.get("seestarts_removed", [])
-        )
-        st.session_state["workspace_loaded"] = True
-    st.session_state.setdefault("manual_notams", [])
+    _arbeitsstand_laden()
     st.session_state.setdefault("manual_feedback", None)
-    st.session_state.setdefault("confirmed_launches", set())
-    st.session_state.setdefault("hidden_events", set())
-    st.session_state.setdefault("rejected_launches", set())
-    st.session_state.setdefault("vehicle_assignments", {})
-    st.session_state.setdefault("payload_assignments", {})
-    st.session_state.setdefault("launch_site_assignments", {})
-    st.session_state.setdefault("archiv_removed", set())
-    st.session_state.setdefault("restored_events", set())
-    st.session_state.setdefault("seestarts_removed", set())
     st.session_state.setdefault("focus_rows", [])
     st.session_state.setdefault("goto_notam_data", False)
     st.session_state.setdefault("ref_undo", [])

@@ -3038,8 +3038,12 @@ try:
 finally:
     app.WORKSPACE_FILE.unlink(missing_ok=True)
     app.WORKSPACE_FILE = echt_w2
+import inspect as _ins_pw
+_quelle_pw = _ins_pw.getsource(app._persist_workspace)
 check("save_workspace wird benannt aufgerufen - nicht nach Position",
-      "launch_site_assignments=st.session_state" in quelle_x)
+      "nola_db.schreibe_unterschiede(" in _quelle_pw
+      and "conn, vorher, aktuell," in _quelle_pw
+      and "save_workspace(" not in _quelle_pw)
 check("die Pad-Wahl greift vor Tabelle und Archiv",
       quelle_x.index("apply_launch_site_assignments(")
       < quelle_x.index("table = events_to_dataframe(visible_events, vehicles)"))
@@ -5122,9 +5126,9 @@ check("Kein unsafe_allow_html in der neuen Einbindung",
       "unsafe_allow_html" not in _ins.getsource(app._render_pasted_entries))
 
 # _render_pasted_entries mit st-Ersatz
-_eintraege = [{"text": "erster [x](http://evil) **fett**", "added": "01.10.2026 10:00"},
-              {"text": "zweiter", "added": "02.10.2026 10:00"},
-              {"text": "dritter", "added": "03.10.2026 10:00"}]
+_eintraege = [{"id": 11, "text": "erster [x](http://evil) **fett**", "added": "01.10.2026 10:00"},
+              {"id": 10, "text": "zweiter", "added": "02.10.2026 10:00"},
+              {"id": 12, "text": "dritter", "added": "03.10.2026 10:00"}]
 _eintraege_kopie = [dict(e) for e in _eintraege]
 
 
@@ -5149,8 +5153,8 @@ check("Pasted (Flags): vergangene markiert und am Ende",
       len(_caps) == 3 and "zweiter" in _caps[0] and "(past)" not in _caps[0]
       and "erster" in _caps[1] and "(past)" in _caps[1] and "dritter" in _caps[2]
       and "(past)" in _caps[2], _caps)
-check("Pasted (Flags): Remove behaelt den urspruenglichen Index",
-      _keys == [("del_manual_1", (1,)), ("del_manual_0", (0,)), ("del_manual_2", (2,))], _keys)
+check("Pasted (Flags): Remove bekommt die Datenbank-id",
+      _keys == [("del_manual_10", (10,)), ("del_manual_11", (11,)), ("del_manual_12", (12,))], _keys)
 check("Pasted: Eintragstext ohne rohes Markdown",
       "[x](http://evil)" not in _caps[1] and "**fett**" not in _caps[1], _caps[1])
 _s2 = _pasted_lauf(None)
@@ -5162,7 +5166,7 @@ check("Pasted (ohne Flags): unmarkiert in urspruenglicher Reihenfolge",
       len(_caps2) == 3 and not any("(past)" in c for c in _caps2)
       and "erster" in _caps2[0] and "zweiter" in _caps2[1] and "dritter" in _caps2[2], _caps2)
 check("Pasted (ohne Flags): Remove-Schluessel in Reihenfolge",
-      _keys2 == ["del_manual_0", "del_manual_1", "del_manual_2"], _keys2)
+      _keys2 == ["del_manual_11", "del_manual_10", "del_manual_12"], _keys2)
 _s3 = _pasted_lauf([(0, False), (1, False), (2, False)])
 check("Pasted (Flags ohne vergangene): Ueberschrift nur mit Anzahl",
       [c[1][0] for c in _s3.aufrufe("expander")] == ["Pasted entries (3)"])
@@ -5315,6 +5319,64 @@ _s1 = _ai_r.detection_stamp()
 with app._db() as _c:
     _c.execute("UPDATE firs SET Land = Land || ' ' WHERE rowid = 1")
 check("Erkennungsstand folgt der DB", _ai_r.detection_stamp() != _s1)
+
+print("== Lokale Datenbank: Arbeitsstand ==")
+_st_orig_w = app.st
+class _StW(_StR):
+    pass
+app.st = _StW()
+try:
+    app._arbeitsstand_laden()
+    _basis = app.st.session_state["_ws_momentaufnahme"]
+    check("Momentaufnahme vorhanden", set(app.WORKSPACE_KEYS) <= set(_basis))
+    def _db_stand():
+        with app._db() as _c:
+            return _ndb.lade_arbeitsstand(_c)
+    _faelle = [
+        ("_confirm_launch", ("rk1",), lambda s: "rk1" in s["confirmed_launches"]),
+        ("_reject_launch", ("rk2",), lambda s: "rk2" in s["rejected_launches"]),
+        ("_hide_event", ("rk3",), lambda s: "rk3" in s["hidden_events"]),
+        ("_unhide_event", ("rk3",), lambda s: "rk3" not in s["hidden_events"]),
+        ("_reset_decision", ("rk2",), lambda s: "rk2" not in s["rejected_launches"]),
+        ("_revoke_launch", ("rk1",), lambda s: "rk1" not in s["confirmed_launches"]),
+    ]
+    for _fn, _args, _pruef in _faelle:
+        app._arbeitsstand_laden()
+        getattr(app, _fn)(*_args)
+        check("Regel: {} schreibt in die DB".format(_fn), _pruef(_db_stand()))
+    app._arbeitsstand_laden()
+    app.st.session_state["manual_input"] = "A1111/26 NOTAMN\nQ) ZJSA/QRTCA/IV/BO/W/000/999\nE) TEST"
+    app._add_manual_notams()
+    _m = _db_stand()["manual_notams"]
+    check("Regel: _add_manual_notams schreibt in die DB", any("A1111/26" in n["text"] for n in _m))
+    app._arbeitsstand_laden()
+    _id = [n["id"] for n in app.st.session_state["manual_notams"] if "A1111/26" in n["text"]][0]
+    app._remove_manual(_id)
+    check("Regel: _remove_manual(id) schreibt in die DB", all(n["id"] != _id for n in _db_stand()["manual_notams"]))
+    app._arbeitsstand_laden(); app._hide_event("rk4"); app._arbeitsstand_laden(); app._unhide_all()
+    check("Regel: _unhide_all schreibt in die DB", _db_stand()["hidden_events"] == set())
+    app._arbeitsstand_laden(); app._clear_manual()
+    check("Regel: _clear_manual schreibt in die DB", _db_stand()["manual_notams"] == [])
+    for _fn, _feld, _wkey in [("_set_vehicle", "vehicle_assignments", "wv"),
+                              ("_set_payload", "payload_assignments", "wp"),
+                              ("_set_launch_site", "launch_site_assignments", "wl")]:
+        app._arbeitsstand_laden()
+        app.st.session_state[_wkey] = "CZ-2D" if _fn == "_set_vehicle" else ("Yaogan" if _fn == "_set_payload" else "JSLC")
+        getattr(app, _fn)(_wkey, ["ek1"])
+        check("Regel: {} schreibt in die DB".format(_fn), _db_stand()[_feld].get("ek1") == app.st.session_state[_wkey])
+    # Konflikt
+    app._arbeitsstand_laden()
+    with app._db() as _c:
+        _c.execute("INSERT INTO entscheidungen VALUES ('rk9', 'ausgeblendet', 'x')")
+    app._confirm_launch("rk9")
+    check("Konflikt gemeldet", app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT)
+    check("Konflikt: nichts geschrieben", "rk9" not in _db_stand()["confirmed_launches"])
+    check("session_state danach = DB", app.st.session_state["hidden_events"] == _db_stand()["hidden_events"])
+finally:
+    app.st = _st_orig_w
+import inspect as _ins_w
+_main_q = _ins_w.getsource(app.main)
+check("kein workspace_loaded-Schalter mehr", "workspace_loaded" not in _main_q and "_arbeitsstand_laden()" in _main_q)
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
