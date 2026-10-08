@@ -4660,6 +4660,9 @@ ARCHIVE_COLUMNS = (
     "Dropzones",
 )
 
+#: Pflichtspalten des Startarchivs (die Datenbank verlangt sie nicht leer).
+ARCHIVE_PFLICHTSPALTEN = ("NOTAM", "Startdatum", "Nation")
+
 #: Kurzformen der Orbit-Typen fuer das Archiv - die langen Klartext-Labels
 #: waeren in einer Tabellenspalte unleserlich.
 ORBIT_SHORT = {
@@ -4955,6 +4958,26 @@ SEA_LAUNCH_COLUMNS = (
     "NOTAM",
     "N\u00e4chster bekannter Platz",
 )
+
+#: Pflichtspalten des Seestart-Protokolls (die Datenbank verlangt sie nicht leer).
+SEA_LAUNCH_PFLICHTSPALTEN = ("Datum", "Nation")
+
+
+def _vollstaendig_trennen(
+    zeilen: Sequence[Dict[str, Any]], pflicht: Sequence[str]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Teilt Kandidatenzeilen in vollstaendige und solche, denen eine Pflichtspalte fehlt."""
+    voll: List[Dict[str, Any]] = []
+    fehlt: List[Dict[str, Any]] = []
+    for z in zeilen:
+        ziel = voll if all(str(z.get(s) if z.get(s) is not None else "").strip() for s in pflicht) else fehlt
+        ziel.append(z)
+    return voll, fehlt
+
+
+def _kennungen_text(zeilen: Sequence[Dict[str, Any]]) -> str:
+    """NOTAM-Kennungen der Zeilen fuer eine Meldung, entschaerft."""
+    return ", ".join(_md_plain(str(z.get("NOTAM") or "").strip() or "?") for z in zeilen)
 
 
 def sea_launch_row(
@@ -5763,6 +5786,9 @@ ARCHIVE_UNDO_UNREADABLE = (
 REFERENCE_UNDO_REFUSED = (
     "Reference table changed since this action - undo refused to protect newer entries."
 )
+SEA_UNDO_REFUSED = (
+    "Sea launch log changed since this action - undo refused to protect newer entries."
+)
 
 
 def _spalten_von(tabelle: str) -> Tuple[str, ...]:
@@ -5795,7 +5821,9 @@ def _undo_reference() -> Optional[str]:
         return None
     letzter = stapel[-1]
     tabelle = letzter["tabelle"]
-    verweigert = ARCHIVE_UNDO_REFUSED if tabelle == "startarchiv" else REFERENCE_UNDO_REFUSED
+    verweigert = {"startarchiv": ARCHIVE_UNDO_REFUSED, "seestarts": SEA_UNDO_REFUSED}.get(
+        tabelle, REFERENCE_UNDO_REFUSED
+    )
     try:
         with _db() as conn:
             nola_db.ersetze_tabelle(
@@ -6495,16 +6523,33 @@ def _update_archive(
     ]
     if not kandidaten:
         return
-    for _ in range(2):  # bei Konflikt einmal neu lesen und erneut zusammenfuehren
+    zeilen: Optional[List[Dict[str, Any]]] = None
+    # Bei Konflikt einmal neu lesen und erneut zusammenfuehren. Verliert auch der
+    # zweite Versuch, endet die Schleife ohne Meldung: der naechste Durchlauf
+    # schreibt erneut fort.
+    for _ in range(2):
         try:
             bestand = archiv_lesen()
         except ArchiveUnreadable as exc:
             # Nie ueber ein unlesbares Archiv schreiben; die Auswertung laeuft weiter.
-            st.warning("Launch archive: {}".format(exc))
+            st.warning("Launch archive: {}".format(_md_plain(exc)))
+            return
+        if zeilen is None:
+            # Eine Zeile ohne Pflichtwert darf nicht die ganze Fortschreibung
+            # blockieren: aussortieren, einmal je Lauf melden
+            zeilen, unvollstaendig = _vollstaendig_trennen(
+                [archive_row(g, events) for g in kandidaten], ARCHIVE_PFLICHTSPALTEN
+            )
+            if unvollstaendig:
+                st.warning(
+                    "Launch archive: {} launch(es) without launch date or nation were not "
+                    "archived ({}).".format(len(unvollstaendig), _kennungen_text(unvollstaendig))
+                )
+        if not zeilen:
             return
         neu = merge_archive(
             bestand,
-            [archive_row(g, events) for g in kandidaten],
+            zeilen,
             set(st.session_state.get("archiv_removed", set())),
         )
         if neu.to_csv(index=False) == bestand.to_csv(index=False):
@@ -6515,7 +6560,7 @@ def _update_archive(
         except nola_db.Konflikt:
             continue
         except nola_db.DbFehler as exc:
-            st.warning("Launch archive: not updated ({})".format(exc))
+            st.warning("Launch archive: not updated ({})".format(_md_plain(exc)))
             return
 
 
@@ -6546,16 +6591,33 @@ def _update_sea_launches(
     ]
     if not kandidaten:
         return
-    for _ in range(2):  # bei Konflikt einmal neu lesen und erneut zusammenfuehren
+    zeilen: Optional[List[Dict[str, Any]]] = None
+    # Bei Konflikt einmal neu lesen und erneut zusammenfuehren. Verliert auch der
+    # zweite Versuch, endet die Schleife ohne Meldung: der naechste Durchlauf
+    # schreibt erneut fort.
+    for _ in range(2):
         try:
             bestand = seestarts_lesen()
         except nola_db.DbFehler as exc:
             # Nie ueber ein unlesbares Protokoll schreiben; die Auswertung laeuft weiter.
-            st.warning("Sea launch log: could not be read ({}) - not updated.".format(exc))
+            st.warning("Sea launch log: could not be read ({}) - not updated.".format(_md_plain(exc)))
+            return
+        if zeilen is None:
+            # Eine Zeile ohne Pflichtwert darf nicht die ganze Fortschreibung
+            # blockieren: aussortieren, einmal je Lauf melden
+            zeilen, unvollstaendig = _vollstaendig_trennen(
+                [sea_launch_row(g, events, spaceports) for g in kandidaten], SEA_LAUNCH_PFLICHTSPALTEN
+            )
+            if unvollstaendig:
+                st.warning(
+                    "Sea launch log: {} launch(es) without date or nation were not "
+                    "recorded ({}).".format(len(unvollstaendig), _kennungen_text(unvollstaendig))
+                )
+        if not zeilen:
             return
         neu = merge_sea_launches(
             bestand,
-            [sea_launch_row(g, events, spaceports) for g in kandidaten],
+            zeilen,
             set(st.session_state.get("seestarts_removed", set())),
         )
         if neu.to_csv(index=False) == bestand.to_csv(index=False):
@@ -6566,7 +6628,7 @@ def _update_sea_launches(
         except nola_db.Konflikt:
             continue
         except nola_db.DbFehler as exc:
-            st.warning("Sea launch log: not updated ({})".format(exc))
+            st.warning("Sea launch log: not updated ({})".format(_md_plain(exc)))
             return
 
 
@@ -6651,7 +6713,8 @@ def _remove_archive_row(schluessel: str) -> None:
     try:
         bestand = archiv_lesen()
     except ArchiveUnreadable as exc:
-        st.error("Launch archive: {} Nothing was removed.".format(exc))
+        # Meldung fuer den naechsten Durchlauf - der Aufrufer zeichnet sofort neu
+        _melde_db("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     behalten = bestand[[archive_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
     try:

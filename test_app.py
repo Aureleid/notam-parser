@@ -3217,8 +3217,9 @@ try:
           _e is None and _kaputt_db_u.read_bytes() == _kaputt_db_inhalt and not _ws_u
           and "archiv_removed" not in app.st.session_state
           and not app.st.session_state.get("ref_undo"), (repr(_e), _ws_u, app.st.session_state))
-    check("  ... mit Meldung", any("could not be read" in t for _, t in _meld_u)
-          or "could not be read" in str(app.st.session_state.get("ref_flash", "")),
+    check("  ... mit Meldung (ueber db_meldung, uebersteht das rerun)",
+          app.st.session_state.get("db_meldung", ("", ""))[0] == "error"
+          and "could not be read" in app.st.session_state.get("db_meldung", ("", ""))[1],
           (_meld_u, app.st.session_state))
     # Leeres Archiv: wie bisher, die erste Zeile entsteht
     app.st = _st_u()
@@ -5616,6 +5617,171 @@ check("Referenz-Dialog nennt nola.db statt Datei", "straight to the file on disk
       and _q_dlg.count('"nola.db"') == 0 and "`nola.db`" in _q_dlg)
 check("Datei-Undo-Bruecke entfernt", not any(hasattr(app, n) for n in
       ("_push_undo_datei", "_undo_datei", "_undo_archive", "_file_hash")))
+
+print("== Lokale Datenbank: Archiv und Seestarts, Fix-Runde 1 ==")
+import types as _types_f
+_orig_f = (app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben,
+           app.seestarts_schreiben)
+try:
+    # F1: unvollstaendige Zeilen werden uebersprungen, genau eine Warnung je Tabelle
+    _leer_a = {s: "" for s in app.ARCHIVE_COLUMNS}
+    _zeilen_f = {
+        "voll": dict(_leer_a, NOTAM="Z8001/26", Startdatum="07.10.2026", Nation="China"),
+        "ohne_datum": dict(_leer_a, NOTAM="Z8002/26", Startdatum="", Nation="China"),
+        "ohne_nation": dict(_leer_a, NOTAM="Z8003/26", Startdatum="07.10.2026", Nation="  "),
+    }
+    app.archive_row = lambda g, ev: dict(_zeilen_f[g.art])
+    def _grp_f(*arten):
+        return [_types_f.SimpleNamespace(spaceport_code="JSLC", row_indices=[0], site_from_geometry=True, art=a)
+                for a in arten]
+    _tab_f = _pd_a.DataFrame({"Status": ["OK"], "_row": [0]})
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._update_archive([], _grp_f("voll", "ohne_datum", "ohne_nation"), _tab_f)
+    _af = app.archiv_lesen()
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix1 Archiv: vollstaendige Zeile geschrieben, unvollstaendige nicht",
+          list(_af["NOTAM"]) == ["Z8001/26"], _af["NOTAM"].tolist())
+    check("Fix1 Archiv: genau eine Warnung mit den Kennungen",
+          len(_wf) == 1 and "not archived" in _wf[0] and "2 launch" in _wf[0]
+          and app._md_plain("Z8002/26") in _wf[0] and app._md_plain("Z8003/26") in _wf[0], _wf)
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._update_archive([], _grp_f("ohne_datum"), _tab_f)
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix1 Archiv: nur unvollstaendig -> nichts geschrieben", app.archiv_lesen().empty)
+    check("Fix1 Archiv: nur unvollstaendig -> eine Warnung, kein constraint failed",
+          len(_wf) == 1 and "not archived" in _wf[0] and "constraint" not in " ".join(_wf).lower(), _wf)
+    check("Fix1: Pflichtspalten als Konstanten",
+          tuple(getattr(app, "ARCHIVE_PFLICHTSPALTEN", ())) == ("NOTAM", "Startdatum", "Nation")
+          and tuple(getattr(app, "SEA_LAUNCH_PFLICHTSPALTEN", ())) == ("Datum", "Nation"))
+    _leer_s = {s: "" for s in app.SEA_LAUNCH_COLUMNS}
+    _see_f = {
+        "voll": dict(_leer_s, Datum="07.10.2026", Nation="China", Breite="21.0", **{"Länge": "112.0"}, NOTAM="Z8101/26"),
+        "ohne_datum": dict(_leer_s, Datum=" ", Nation="China", Breite="22.0", **{"Länge": "113.0"}, NOTAM="Z8102/26"),
+        "ohne_nation": dict(_leer_s, Datum="07.10.2026", Nation="", Breite="23.0", **{"Länge": "114.0"}, NOTAM="Z8103/26"),
+    }
+    app.sea_launch_row = lambda g, ev, sp: dict(_see_f[g.art])
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._update_sea_launches([], _grp_f("voll", "ohne_datum", "ohne_nation"), _tab_f, None)
+    _sf = app.seestarts_lesen()
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix1 Seestarts: vollstaendige Zeile geschrieben, unvollstaendige nicht",
+          list(_sf["NOTAM"]) == ["Z8101/26"], _sf["NOTAM"].tolist())
+    check("Fix1 Seestarts: genau eine Warnung mit den Kennungen",
+          len(_wf) == 1 and _wf[0].startswith("Sea launch log") and "2 launch" in _wf[0]
+          and app._md_plain("Z8102/26") in _wf[0] and app._md_plain("Z8103/26") in _wf[0], _wf)
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._update_sea_launches([], _grp_f("ohne_nation"), _tab_f, None)
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix1 Seestarts: nur unvollstaendig -> nichts geschrieben", app.seestarts_lesen().empty)
+    check("Fix1 Seestarts: nur unvollstaendig -> eine Warnung, kein constraint failed",
+          len(_wf) == 1 and _wf[0].startswith("Sea launch log")
+          and "constraint" not in " ".join(_wf).lower(), _wf)
+
+    # F2: Seestart-Undo nach fremder Aenderung -> eigener Text
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._update_sea_launches([], _grp_f("voll"), _tab_f, None)
+    app._remove_sea_launch_row(app.sea_launch_key(_see_f["voll"]))
+    _jetzt_s = app.seestarts_lesen()
+    _orig_f[5](_pd_a.DataFrame([dict(_see_f["voll"], NOTAM="Z8199/26")]), vorher=_jetzt_s)
+    try:
+        app._undo_reference(); _uf = None
+    except app.UndoRefused as exc:
+        _uf = str(exc)
+    check("Fix2: Seestart-Undo nach fremder Aenderung -> SEA_UNDO_REFUSED",
+          _uf == getattr(app, "SEA_UNDO_REFUSED", None) == ("Sea launch log changed since this action - undo refused "
+                                          "to protect newer entries."), _uf)
+
+    # F3: Archivzeile entfernen bei fehlender DB -> db_meldung statt st.error
+    app.st = _StR()
+    app.DB_PATH = _P_db(_tf_db.mkdtemp()) / "fehlt.db"
+    _e_f = None
+    try:
+        app._remove_archive_row("07.10.2026|Z8001/26")
+    except Exception as exc:  # noqa: BLE001
+        _e_f = exc
+    check("Fix3: Archivzeile entfernen, DB fehlt -> db_meldung error, keine Ausnahme",
+          _e_f is None and app.st.session_state.get("db_meldung", ("", ""))[0] == "error", repr(_e_f))
+    check("  ... nichts entfernt, kein Undo, Schluessel nicht gemerkt",
+          not app.st.session_state.get("ref_undo") and not app.st.session_state.get("archiv_removed")
+          and not app.DB_PATH.exists())
+    check("  ... kein sofortiges st.error (ginge im rerun verloren)", not app.st.session_state.get("_w"))
+
+    # F3/F4: DbFehler beim Schreiben -> genau eine Warnung, Fehlertext entschaerft
+    def _wirf_db(neu, vorher, db=None):
+        raise _ndb.DbFehler("x", "disk *full* [x](y)")
+    _roh_f = "disk *full* [x](y)"
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app.archiv_schreiben = _wirf_db
+    _e_f = None
+    try:
+        app._update_archive([], _grp_f("voll"), _tab_f)
+    except Exception as exc:  # noqa: BLE001
+        _e_f = exc
+    finally:
+        app.archiv_schreiben = _orig_f[4]
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix4: DbFehler beim Archiv-Schreiben -> genau eine Warnung, keine Ausnahme",
+          _e_f is None and len(_wf) == 1, (repr(_e_f), _wf))
+    check("Fix3: Archiv-Warnung entschaerft den Fehlertext",
+          len(_wf) == 1 and _roh_f not in _wf[0] and app._md_plain(_roh_f) in _wf[0], _wf)
+    app.st = _StR()
+    app.seestarts_schreiben = _wirf_db
+    try:
+        app._update_sea_launches([], _grp_f("voll"), _tab_f, None)
+    finally:
+        app.seestarts_schreiben = _orig_f[5]
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix3: Seestart-Warnung entschaerft den Fehlertext",
+          len(_wf) == 1 and _roh_f not in _wf[0] and app._md_plain(_roh_f) in _wf[0], _wf)
+    app.st = _StR()
+    app.DB_PATH = _kaputte_db()
+    app._update_archive([], _grp_f("voll"), _tab_f)
+    app._update_sea_launches([], _grp_f("voll"), _tab_f, None)
+    _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+    check("Fix3: Lesefehler-Warnungen entschaerft",
+          len(_wf) == 2 and all("\\(file is not a database\\)" in w for w in _wf), _wf)
+
+    # F4: Konfliktpfad beim Entfernen
+    def _wirf_konflikt(neu, vorher, db=None):
+        raise _ndb.Konflikt("changed", _ndb.KONFLIKT_TEXT)
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._update_archive([], _grp_f("voll"), _tab_f)
+    _ak_f = app.archive_key(_zeilen_f["voll"])
+    app.archiv_schreiben = _wirf_konflikt
+    try:
+        app._remove_archive_row(_ak_f)
+    finally:
+        app.archiv_schreiben = _orig_f[4]
+    check("Fix4: Archivzeile entfernen, Konflikt -> KONFLIKT_TEXT, kein Undo, Schluessel nicht gemerkt",
+          app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT
+          and not app.st.session_state.get("ref_undo")
+          and _ak_f not in app.st.session_state.get("archiv_removed", set())
+          and list(app.archiv_lesen()["NOTAM"]) == ["Z8001/26"])
+    app.st = _StR()
+    app._update_sea_launches([], _grp_f("voll"), _tab_f, None)
+    _sk_f = app.sea_launch_key(_see_f["voll"])
+    app.seestarts_schreiben = _wirf_konflikt
+    try:
+        app._remove_sea_launch_row(_sk_f)
+    finally:
+        app.seestarts_schreiben = _orig_f[5]
+    check("Fix4: Seestart entfernen, Konflikt -> KONFLIKT_TEXT, kein Undo, Schluessel nicht gemerkt",
+          app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT
+          and not app.st.session_state.get("ref_undo")
+          and _sk_f not in app.st.session_state.get("seestarts_removed", set())
+          and list(app.seestarts_lesen()["NOTAM"]) == ["Z8101/26"])
+finally:
+    (app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben,
+     app.seestarts_schreiben) = _orig_f
+check("Fix3: Kommentar zum zweiten Konflikt in Folge",
+      all("naechste Durchlauf" in _ins_n.getsource(f) for f in (app._update_archive, app._update_sea_launches)))
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
