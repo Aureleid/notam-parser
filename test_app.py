@@ -5095,8 +5095,21 @@ check("Review markiert abgelaufene Faelle", "event_expired(" in _main and '"expi
 _stop = _main.index("Could not read the upload")
 check("Upload-Fehler zeichnet die Liste vor st.stop()",
       "_render_pasted_entries(" in _main[_stop:_main.index("st.stop()", _stop)])
-check("Liste wird auch bei Fehler in der Berechnung gezeichnet",
-      _main.count("_render_pasted_entries(") >= 3)
+_try = _main.index("gezeichnet = False")
+_try = _main.index("try:", _try)
+_fin = _main.index("finally:", _try)
+check("Analyse liegt zwischen try und finally",
+      _try < _main.index("analyze_notams(") < _fin)
+check("Berechnung der vergangenen Starts liegt im try",
+      _try < _main.index("past_launch_rows(") < _fin)
+_fin_block = _main[_fin:_fin + 400]
+check("finally zeichnet die Liste nur ohne Flag",
+      "if not gezeichnet" in _fin_block and "_render_pasted_entries(" in _fin_block)
+_marked = _main.index("order_pasted_entries(")
+check("Flag wird vor der markierten Zeichnung gesetzt",
+      _main.rindex("gezeichnet = True", _try, _marked) > _try)
+check("Kein except um die Zeichnung",
+      "except Exception:" not in _main[_try:_fin])
 check("Kein unsafe_allow_html in der neuen Einbindung",
       "unsafe_allow_html" not in _ins.getsource(app._render_pasted_entries))
 

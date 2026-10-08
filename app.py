@@ -7231,51 +7231,55 @@ def main() -> None:
                 )
         return
 
-    with st.spinner("Analysing NOTAMs \u2026"):
-        events, stats = analyze_notams(
-            notams,
-            spaceports,
-            firs,
-            min_confidence=min_conf,
-            confirmed_keys=st.session_state["confirmed_launches"],
-            rejected_keys=st.session_state["rejected_launches"],
-        )
-    # Automatisch ausgeblendet wird erst hier, nicht in der Auswertung: so bleibt
-    # die Entscheidung an einer Stelle, und ein von Hand zurueckgeholtes NOTAM
-    # bleibt zurueck.
-    zurueckgeholt = st.session_state["restored_events"]
-    auto_hidden_keys = {
-        e.key for e in events if e.auto_hidden_reason and e.key not in zurueckgeholt
-    }
-    st.session_state["auto_hidden_keys"] = auto_hidden_keys
-    hidden_keys = set(st.session_state["hidden_events"]) | auto_hidden_keys
-    hidden_events = [e for e in events if e.key in hidden_keys]
-    visible_events = [e for e in events if e.key not in hidden_keys]
-    apply_vehicle_assignments(
-        events, stats.get("groups", []), st.session_state["vehicle_assignments"]
-    )
-    apply_payload_assignments(
-        events, stats.get("groups", []), st.session_state["payload_assignments"]
-    )
-    # Vor der Tabelle und vor dem Archivschreiben: die Pad-Wahl veraendert
-    # Kuerzel und Name des Startplatzes und muss in beiden stehen.
-    apply_launch_site_assignments(
-        events,
-        stats.get("groups", []),
-        spaceports,
-        st.session_state["launch_site_assignments"],
-    )
-    # Einmal je Durchlauf gelesen: der Pad-Hinweis rechnet darauf, und je Zeile
-    # zu lesen hiesse, dieselbe Datei dutzendfach anzufassen.
-    pad_historie = load_archive(ARCHIVE_CSV)
-    table = events_to_dataframe(visible_events, vehicles)
-    _update_archive(events, stats.get("groups", []), table)
-    _update_sea_launches(events, stats.get("groups", []), table, spaceports)
-    _show_archive_status(archiv_status)
-
-    # Vergangene Starts: erst jetzt, das Archiv ist geschrieben. Ausgeblendet
-    # wird nur Archiviertes; geloescht wird nichts.
+    # Die Liste muss auch dann stehen, wenn die Auswertung scheitert (der
+    # einzelne Eintrag soll sich dann noch entfernen lassen). Fehler werden
+    # nicht verschluckt, das finally zeichnet nur, falls noch nichts steht.
+    gezeichnet = False
     try:
+        with st.spinner("Analysing NOTAMs \u2026"):
+            events, stats = analyze_notams(
+                notams,
+                spaceports,
+                firs,
+                min_confidence=min_conf,
+                confirmed_keys=st.session_state["confirmed_launches"],
+                rejected_keys=st.session_state["rejected_launches"],
+            )
+        # Automatisch ausgeblendet wird erst hier, nicht in der Auswertung: so bleibt
+        # die Entscheidung an einer Stelle, und ein von Hand zurueckgeholtes NOTAM
+        # bleibt zurueck.
+        zurueckgeholt = st.session_state["restored_events"]
+        auto_hidden_keys = {
+            e.key for e in events if e.auto_hidden_reason and e.key not in zurueckgeholt
+        }
+        st.session_state["auto_hidden_keys"] = auto_hidden_keys
+        hidden_keys = set(st.session_state["hidden_events"]) | auto_hidden_keys
+        hidden_events = [e for e in events if e.key in hidden_keys]
+        visible_events = [e for e in events if e.key not in hidden_keys]
+        apply_vehicle_assignments(
+            events, stats.get("groups", []), st.session_state["vehicle_assignments"]
+        )
+        apply_payload_assignments(
+            events, stats.get("groups", []), st.session_state["payload_assignments"]
+        )
+        # Vor der Tabelle und vor dem Archivschreiben: die Pad-Wahl veraendert
+        # Kuerzel und Name des Startplatzes und muss in beiden stehen.
+        apply_launch_site_assignments(
+            events,
+            stats.get("groups", []),
+            spaceports,
+            st.session_state["launch_site_assignments"],
+        )
+        # Einmal je Durchlauf gelesen: der Pad-Hinweis rechnet darauf, und je Zeile
+        # zu lesen hiesse, dieselbe Datei dutzendfach anzufassen.
+        pad_historie = load_archive(ARCHIVE_CSV)
+        table = events_to_dataframe(visible_events, vehicles)
+        _update_archive(events, stats.get("groups", []), table)
+        _update_sea_launches(events, stats.get("groups", []), table, spaceports)
+        _show_archive_status(archiv_status)
+
+        # Vergangene Starts: erst jetzt, das Archiv ist geschrieben. Ausgeblendet
+        # wird nur Archiviertes; geloescht wird nichts.
         archiv_keys, archiv_grund = archive_keys_or_reason(ARCHIVE_CSV)
         entfernt = set(st.session_state.get("archiv_removed", set()))
         jetzt = datetime.now(timezone.utc)
@@ -7295,15 +7299,17 @@ def main() -> None:
                 archiv_hinweis[g.group_id] = "removed from archive"
         # Eingefuegte Eintraege liegen hinter den Zeilen der Datei.
         pasted_offset = len(imported) if imported is not None and not imported.empty else 0
+        # Zuerst setzen: scheitert die markierte Zeichnung selbst, folgt keine
+        # zweite (doppelte Widget-Schluessel wuerden den echten Fehler verdecken).
+        gezeichnet = True
         _render_pasted_entries(
             pasted_slot,
             manual_items,
             order_pasted_entries(len(manual_items), pasted_offset, past_rows),
         )
-    except Exception:
-        # Die Liste bleibt sichtbar (unmarkiert), der Fehler wird nicht verschluckt.
-        _render_pasted_entries(pasted_slot, manual_items)
-        raise
+    finally:
+        if not gezeichnet:
+            _render_pasted_entries(pasted_slot, manual_items)
 
     # ----------------------------- Filter --------------------------------- #
     with st.sidebar:
