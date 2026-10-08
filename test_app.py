@@ -5175,12 +5175,17 @@ if _fns_v:
     _ev_v, _st_v = app.analyze_notams(_df_v, sp, fir, min_confidence="MEDIUM")
     _gr_v = [g for g in _st_v["groups"] if g.spaceport_code]
     _keys_v = {app.archive_key(app.archive_row(g, _ev_v)) for g in _gr_v}
-    _enden = [app.latest_end([e for e in _ev_v if e.row_index in g.row_indices]) for g in _gr_v]
+    _pe_v = {e.row_index: e for e in _ev_v}
+    _arch_v = [g for g in _gr_v if any(_pe_v[r].status == "OK" for r in g.row_indices if r in _pe_v)]
+    _enden = [app.latest_end([_pe_v[r] for r in list(g.row_indices) + list(g.advance_row_indices)
+                              if r in _pe_v]) for g in _arch_v]
     _enden = [x for x in _enden if x is not None]
     _spaet = max(_enden) + _td(days=30)
     _frueh = min(_enden) - _td(days=30)
     _alle = app.past_launch_rows(_st_v["groups"], _ev_v, _keys_v, _spaet)
     check("Echtbestand: spaeter Zeitpunkt -> archivierte Starts vergangen", len(_alle) > 0, len(_alle))
+    check("Echtbestand: spaeter Zeitpunkt -> jeder archivierbare Start vergangen",
+          len(_arch_v) > 0 and all(set(g.row_indices) <= _alle for g in _arch_v), (len(_arch_v), len(_alle)))
     check("Echtbestand: frueher Zeitpunkt -> nichts vergangen",
           app.past_launch_rows(_st_v["groups"], _ev_v, _keys_v, _frueh) == set())
 else:

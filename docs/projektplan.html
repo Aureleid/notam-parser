@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>7.962</b> Zeilen app.py</span><span><b>1.297</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>7.962</b> Zeilen app.py</span><span><b>1.298</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -127,7 +127,7 @@ var STEPS=[
  r:"Ergebnis: keine Archivzeile wird mehr über eine fremde Kennungskollision gelöscht, 1.248 Tests grün."},
 {id:12,name:"Vergangene Starts",h:"Starts nach Ablauf aus der Tageslage ausblenden",
  p:"Ein archivierter Start verschwindet, wenn das späteste Ende seiner Meldungen plus 24 h vorbei ist. Nicht archivierte, aus dem Archiv entfernte und Review-Fälle bleiben sichtbar (abgelaufene mit Marke expired). Ein Schalter in der Seitenleiste holt alles zurück, ein Hinweis nennt die Zahl. Unter Pasted entries stehen vergangene Einträge mit (past). Gelöscht oder geschrieben wird nichts.",
- r:"Ergebnis: Echtbestand 16 Starts bei spätem Zeitpunkt vergangen, bei frühem keiner, 1.297 Tests grün."},
+ r:"Ergebnis: Echtbestand 8 Starts (16 Tabellenzeilen) bei spätem Zeitpunkt vergangen, bei frühem keiner, 1.298 Tests grün."},
 {id:0,name:"Offen",h:"Offene Punkte",
  p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten, .bak-Kopie der Referenzdateien. Aus dem Archiv-Import: Spaltenverschiebung durch ein Zusatzfeld in der ersten Archivzeile (nola-djk), echte NSF-Seite als Testfixture, Archivspalte Quelle, nicht-atomares Schreiben der Seestarts, zwei gleichzeitig offene Tabs, alte Dubletten, Zweitzeile des Tagesbetriebs neben einer Importzeile, kein Rückgängig für ergänzte Zeilen. Aus Vergangene Starts: Sammelknopf zum Verwerfen eingefügter Einträge vergangener Starts.",
  r:"Quelle: STATUS.md, Abschnitt Offene Punkte."}
@@ -179,7 +179,6 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
  {t:"Startpunkt aus Geometrie",f:"derive_launch_point, cluster_zone_points, sea_launch_code"},
  {t:"Eigenes Protokoll",f:"load_sea_launches, merge_sea_launches, persist_sea_launches",c:[{t:"seestarts_updated.csv",n:"fließt nicht in die Platzsuche zurück"}]}]},
 {t:"Bedienoberfläche",s:5,c:[{t:"Vergangene Starts ausblenden",s:12,f:"past_launch_rows, event_expired, archive_keys_or_reason, order_pasted_entries, _render_pasted_entries",c:[{t:"Schalter Show past launches",n:"nicht gespeichert"}]},
- 
  {t:"Sechs Reiter",f:"main, st.segmented_control",c:[
    {t:"Launch Overview",f:"groups_to_dataframe, describe_launch"},
    {t:"Flightpath Map",f:"build_event_map"},
@@ -220,7 +219,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"Nur lokal sichtbar",f:"archive_import_allowed, import_gate, is_local_request, is_public_deployment"}]}]},
  {t:"Persistenz",f:"persist_reference, save_workspace, load_workspace",c:[{t:"CSV-Referenzen"},{t:"notam_workspace.json",n:"inkl. launch_site_assignments"}]}]},
 {t:"Qualität und Betrieb",s:8,c:[
- {t:"test_app.py",n:"1.297 Tests · 5.191 Zeilen"},
+ {t:"test_app.py",n:"1.298 Tests · 5.196 Zeilen"},
  {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
  {t:"Veröffentlichung",n:"Streamlit Community Cloud"},
  {t:"Dokumentation",n:"README · STATUS · docs/intent · docs/decisions"}]},
