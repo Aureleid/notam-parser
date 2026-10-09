@@ -3234,9 +3234,10 @@ try:
           _e is None and _kaputt_db_u.read_bytes() == _kaputt_db_inhalt and not _ws_u
           and "archiv_removed" not in app.st.session_state
           and not app.st.session_state.get("ref_undo"), (repr(_e), _ws_u, app.st.session_state))
-    check("  ... mit Meldung (ueber db_meldung, uebersteht das rerun)",
-          app.st.session_state.get("db_meldung", ("", ""))[0] == "error"
-          and "could not be read" in app.st.session_state.get("db_meldung", ("", ""))[1],
+    # Entscheidung 3: Meldungen aus dem Referenzdialog nur im Dialog
+    check("  ... mit Meldung (im Dialog, uebersteht das rerun), nicht zusaetzlich auf der Hauptseite",
+          "could not be read" in app.st.session_state.get("ref_flash_error", "")
+          and "db_meldung" not in app.st.session_state,
           (_meld_u, app.st.session_state))
     # Leeres Archiv: wie bisher, die erste Zeile entsteht
     app.st = _st_u()
@@ -3770,7 +3771,7 @@ finally:
 check("Bestaetigen uebergibt merge_archive kein archiv_removed", _entfernt_args == [set()], _entfernt_args)
 _schreiben_orig = app.archiv_schreiben
 _vorher = _copy.deepcopy(zf["entscheidungen"])
-app.archiv_schreiben = lambda neu, vorher, db=None: "x"
+app.archiv_schreiben = lambda neu, vorher, db=None, **_k: "x"
 try:
     ai.remove_orphan(zf, kf["key"], archiv_f)
     _fehler = None
@@ -3976,12 +3977,13 @@ def _ungeschuetzte_aufrufe(src, namen):
     return fehlend, gefunden
 
 
+# Der Import-Klick schreibt Korpus und Zustand ueber import_speichern (eine Transaktion)
 _kritisch = ("confirm_many", "remove_orphan", "keep_orphan", "zustand_speichern", "korpus_speichern",
-             "korpus_laden", "zustand_laden")
+             "import_speichern", "korpus_laden", "zustand_laden")
 _f1, _g1 = _ungeschuetzte_aufrufe(tab_src, _kritisch)
 _f2, _g2 = _ungeschuetzte_aufrufe(kand_src, _kritisch)
 check("Reiter: alle kritischen Aufrufe fangen ImportStateError",
-      not _f1 and {"confirm_many", "remove_orphan", "keep_orphan", "zustand_speichern", "korpus_speichern",
+      not _f1 and {"confirm_many", "remove_orphan", "keep_orphan", "zustand_speichern", "import_speichern",
                    "korpus_laden", "zustand_laden"} <= set(_g1), (_f1, sorted(set(_g1))))
 check("Kandidat: alle kritischen Aufrufe fangen ImportStateError",
       not _f2 and {"confirm_many", "zustand_speichern"} <= set(_g2), (_f2, sorted(set(_g2))))
@@ -3990,7 +3992,8 @@ check("Kandidat: alle kritischen Aufrufe fangen ImportStateError",
 import archiv_import as _ai7
 import types as _types
 _meldungen, _geschrieben = [], []
-_orig = (app.st, _ai7.zustand_laden, _ai7.zustand_speichern, _ai7.korpus_speichern, _ai7.korpus_laden)
+_orig = (app.st, _ai7.zustand_laden, _ai7.zustand_speichern, _ai7.korpus_speichern, _ai7.korpus_laden,
+         _ai7.import_speichern)
 
 
 def _kaputt(*a, **k):
@@ -4003,13 +4006,15 @@ try:
     _ai7.zustand_laden = _kaputt
     _ai7.zustand_speichern = lambda *a, **k: _geschrieben.append("state")
     _ai7.korpus_speichern = lambda *a, **k: _geschrieben.append("korpus")
+    _ai7.import_speichern = lambda *a, **k: _geschrieben.append("import")
     _ausnahme = None
     try:
         app._archive_import_tab(sp, fir, app.load_vehicles(str(app.VEHICLE_CSV)))
     except Exception as exc:  # noqa: BLE001
         _ausnahme = exc
 finally:
-    app.st, _ai7.zustand_laden, _ai7.zustand_speichern, _ai7.korpus_speichern, _ai7.korpus_laden = _orig
+    (app.st, _ai7.zustand_laden, _ai7.zustand_speichern, _ai7.korpus_speichern, _ai7.korpus_laden,
+     _ai7.import_speichern) = _orig
 check("ImportStateError beim Laden: angezeigt, nichts geschrieben",
       _ausnahme is None and _meldungen == [app._md_plain("archiv_import.json is unreadable (test).")]
       and not _geschrieben, (_ausnahme, _meldungen, _geschrieben))
@@ -4125,6 +4130,7 @@ def _tab_lauf(stub, **ersatz):
     basis = dict(
         korpus_laden=lambda *a, **k: {}, zustand_laden=lambda *a, **k: {"tage": {}},
         zustand_speichern=lambda *a, **k: None, korpus_speichern=lambda *a, **k: None,
+        import_speichern=lambda *a, **k: None,
         is_stale=lambda z: False, orphans=lambda z: [], keep_orphan=lambda z, key: None,
         load_gcat=_gcat, load_gcat_sites=lambda *a, **k: {},
         candidates=lambda z: [dict(k) for k in _kands], match_candidate=_match,
@@ -4281,7 +4287,7 @@ _kg_neu = dict(_kg, key=app.archive_key(_neu_row), row=_neu_row, notam_ids=["C00
                im_archiv=[], ersetzt=[])
 _schreib = []
 _schreiben_orig = app.archiv_schreiben
-app.archiv_schreiben = lambda neu, vorher, db=None: (_schreib.append(db), _schreiben_orig(neu, vorher, db=db))[1]
+app.archiv_schreiben = lambda neu, vorher, db=None, **_k: (_schreib.append(db), _schreiben_orig(neu, vorher, db=db))[1]
 try:
     _zahl = ai.confirm_many(zg, [(_kg, "CZ-2D", "Pengcheng", None), (_kg_neu, "CZ-4C", "Yaogan 50", None)], archiv_g)
 finally:
@@ -4312,7 +4318,7 @@ zv, archiv_v = _dub_zustand("fehl", [_TAG_ROW])
 _kv = ai.candidates(zv, archiv_v)[0]
 _vorher_v = _copy.deepcopy(zv["entscheidungen"])
 _inhalt_v = app.archiv_lesen(archiv_v).attrs["nola_stand"]
-app.archiv_schreiben = lambda neu, vorher, db=None: "x"
+app.archiv_schreiben = lambda neu, vorher, db=None, **_k: "x"
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -5359,7 +5365,9 @@ try:
         _c.execute("UPDATE startplaetze SET Name = 'fremd' WHERE Kurzel = 'JSLC'")
     app._add_reference_row("startplaetze", _alt_stand, app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", _neu)
     check("Konflikt: nichts geschrieben", "ZZZZ" not in set(app.referenz_lesen("startplaetze")["Kurzel"]))
-    check("Konflikt gemeldet", app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT)
+    check("Konflikt gemeldet (nur im Dialog, Entscheidung 3)",
+          app.st.session_state.get("ref_flash_warning") == _ndb.KONFLIKT_TEXT
+          and "db_meldung" not in app.st.session_state, dict(app.st.session_state))
     # Undo nach fremder Aenderung verweigert
     app._add_reference_row("startplaetze", app.referenz_lesen("startplaetze"),
                            app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", _neu)
@@ -5543,7 +5551,7 @@ try:
     # Zwei Laeufe mit derselben veralteten Ausgangslage: der andere schreibt zwischen Lesen und Schreiben
     _schreiben_echt = _orig_n[4]
     _aufrufe_n = []
-    def _schreiben_mit_vorlauf(neu, vorher, db=None):
+    def _schreiben_mit_vorlauf(neu, vorher, db=None, **_k):
         _aufrufe_n.append(1)
         if len(_aufrufe_n) == 1:
             _schreiben_echt(neu, vorher=vorher, db=db)  # der parallele Lauf gewinnt
@@ -5589,8 +5597,9 @@ try:
         app._remove_sea_launch_row(_sk)
     except Exception as exc:  # noqa: BLE001
         _e = exc
-    check("Seestart entfernen: Lesefehler -> Meldung, kein Abbruch",
-          _e is None and app.st.session_state.get("db_meldung", ("", ""))[0] == "error", repr(_e))
+    check("Seestart entfernen: Lesefehler -> Meldung im Dialog, nicht auf der Hauptseite, kein Abbruch",
+          _e is None and "Nothing was removed" in app.st.session_state.get("ref_flash_error", "")
+          and "db_meldung" not in app.st.session_state, repr(_e))
     # Schluessel oder Grund
     _kdb = _temp_db()
     check("archiv_schluessel_oder_grund: leeres Archiv -> leere Menge",
@@ -5628,7 +5637,7 @@ try:
     _st_o = {"tage": {}, "entscheidungen": {"x": {"status": "confirmed"}}}
     _vor_o = app.archiv_lesen(_idb)
     _lesen_echt = app.archiv_lesen
-    def _lesen_veraltet(db=None):
+    def _lesen_veraltet(db=None, **_k):
         _df = _lesen_echt(db)
         if db == _idb and not getattr(_lesen_veraltet, "fertig", False):
             _lesen_veraltet.fertig = True
@@ -5664,6 +5673,56 @@ try:
     except ai.ImportStateError as exc:
         _fk = str(exc)
     check("Korpus: DB fehlt -> ImportStateError", _fk is not None and "corpus" in _fk, _fk)
+    # Standvergleich (nola-a6c.6): zwei Reiter laden denselben Stand, der zweite schreibt veraltet
+    _MELDUNG_SV = ("The archive import changed meanwhile - nothing was written, please reload the tab.")
+    _za_sv, _zb_sv = ai.zustand_laden(_idb), ai.zustand_laden(_idb)
+    check("Standvergleich: zustand_laden traegt den Stand, Datenform unveraendert",
+          bool(getattr(_za_sv, "nola_stand", None)) and _za_sv == _zs_n and isinstance(_za_sv, dict))
+    _za_sv["review_bestaetigt"] = ["e1", "e2"]
+    ai.zustand_speichern(_za_sv, _idb)
+    _zb_sv["review_ausgeblendet"] = ["fremd"]
+    try:
+        ai.zustand_speichern(_zb_sv, _idb); _fsv = None
+    except ai.ImportStateError as exc:
+        _fsv = str(exc)
+    check("Standvergleich: veralteter Zustand -> ImportStateError, nichts geschrieben",
+          _fsv == _MELDUNG_SV and ai.zustand_laden(_idb)["review_bestaetigt"] == ["e1", "e2"]
+          and ai.zustand_laden(_idb)["review_ausgeblendet"] == [], (_fsv, ai.zustand_laden(_idb)))
+    _za_sv["review_bestaetigt"] = ["e1", "e2", "e3"]
+    ai.zustand_speichern(_za_sv, _idb)
+    check("Standvergleich: zweites Speichern derselben Sitzung nach eigenem Speichern geht durch",
+          ai.zustand_laden(_idb)["review_bestaetigt"] == ["e1", "e2", "e3"])
+    _ka_sv, _kb_sv = ai.korpus_laden(_idb), ai.korpus_laden(_idb)
+    check("Standvergleich: korpus_laden traegt den Stand, Datenform unveraendert",
+          bool(getattr(_ka_sv, "nola_stand", None)) and _ka_sv == _kx_n)
+    _ka_sv.pop(next(iter(_ka_sv)))
+    ai.korpus_speichern(_ka_sv, _idb)
+    try:
+        ai.korpus_speichern(_kb_sv, _idb); _fsv = None
+    except ai.ImportStateError as exc:
+        _fsv = str(exc)
+    check("Standvergleich: veralteter Korpus -> ImportStateError, nichts geschrieben",
+          _fsv == _MELDUNG_SV and len(ai.korpus_laden(_idb)) == len(_kx_n) - 1, _fsv)
+    # Import-Klick: Korpus und Zustand zusammen - veralteter Zustand -> auch Korpus unberuehrt
+    _ki_sv, _zi_sv = ai.korpus_laden(_idb), ai.zustand_laden(_idb)
+    _fremd_sv = ai.zustand_laden(_idb); _fremd_sv["review_ausgeblendet"] = ["x9"]
+    ai.zustand_speichern(_fremd_sv, _idb)
+    _ki_sv.update(_kx_n)
+    try:
+        ai.import_speichern(_ki_sv, _zi_sv, _idb); _fsv = None
+    except ai.ImportStateError as exc:
+        _fsv = str(exc)
+    check("Standvergleich: import_speichern mit veraltetem Zustand -> nichts geschrieben",
+          _fsv == _MELDUNG_SV and len(ai.korpus_laden(_idb)) == len(_kx_n) - 1, _fsv)
+    _ki_sv, _zi_sv = ai.korpus_laden(_idb), ai.zustand_laden(_idb)
+    _ki_sv.update(_kx_n)
+    ai.import_speichern(_ki_sv, _zi_sv, _idb)
+    ai.zustand_speichern(_zi_sv, _idb)
+    check("Standvergleich: import_speichern schreibt beides und merkt die neuen Staende",
+          ai.korpus_laden(_idb) == _kx_n)
+    check("Import-Reiter speichert Korpus und Zustand zusammen",
+          "ai.import_speichern(korpus, zustand)" in _inspect.getsource(app._archive_import_tab)
+          and "ai.korpus_speichern(" not in _inspect.getsource(app._archive_import_tab))
 finally:
     app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben, app.merge_archive = _orig_n
 import inspect as _ins_n
@@ -5765,15 +5824,16 @@ try:
         app._remove_archive_row("07.10.2026|Z8001/26")
     except Exception as exc:  # noqa: BLE001
         _e_f = exc
-    check("Fix3: Archivzeile entfernen, DB fehlt -> db_meldung error, keine Ausnahme",
-          _e_f is None and app.st.session_state.get("db_meldung", ("", ""))[0] == "error", repr(_e_f))
+    check("Fix3: Archivzeile entfernen, DB fehlt -> Dialog-Fehler (nicht db_meldung), keine Ausnahme",
+          _e_f is None and "Nothing was removed" in app.st.session_state.get("ref_flash_error", "")
+          and "db_meldung" not in app.st.session_state, repr(_e_f))
     check("  ... nichts entfernt, kein Undo, Schluessel nicht gemerkt",
           not app.st.session_state.get("ref_undo") and not app.st.session_state.get("archiv_removed")
           and not app.DB_PATH.exists())
     check("  ... kein sofortiges st.error (ginge im rerun verloren)", not app.st.session_state.get("_w"))
 
     # F3/F4: DbFehler beim Schreiben -> genau eine Warnung, Fehlertext entschaerft
-    def _wirf_db(neu, vorher, db=None):
+    def _wirf_db(neu, vorher, db=None, **_k):
         raise _ndb.DbFehler("x", "disk *full* [x](y)")
     _roh_f = "disk *full* [x](y)"
     app.st = _StR()
@@ -5808,8 +5868,50 @@ try:
     check("Fix3: Lesefehler-Warnungen entschaerft",
           len(_wf) == 2 and all("\\(file is not a database\\)" in w for w in _wf), _wf)
 
+    # Entscheidung 2: automatisches Fortschreiben wartet bei fremder Sperre nur kurz (~0,5 s),
+    # meldet hoechstens eine Warnung je Lauf und versucht es beim naechsten Durchlauf erneut
+    import sqlite3 as _sq_w, time as _time_w
+    for _nm_w, _upd_w, _rd_w in [
+            ("Archiv", lambda: app._update_archive([], _grp_f("voll"), _tab_f), app.archiv_lesen),
+            ("Seestart", lambda: app._update_sea_launches([], _grp_f("voll"), _tab_f, None), app.seestarts_lesen)]:
+        app.st = _StR()
+        app.DB_PATH = _temp_db()
+        _sperre_w = _sq_w.connect(str(app.DB_PATH), isolation_level=None)
+        _e_w = None
+        try:
+            _sperre_w.execute("BEGIN IMMEDIATE")
+            _t0_w = _time_w.monotonic()
+            try:
+                _upd_w()
+            except Exception as exc:  # noqa: BLE001
+                _e_w = exc
+            _dauer_w = _time_w.monotonic() - _t0_w
+        finally:
+            if _sperre_w.in_transaction:
+                _sperre_w.execute("ROLLBACK")
+            _sperre_w.close()
+        _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
+        # Obergrenze grosszuegig (Soll ~0,5 s; vorher 5 s): robust auf langsamen Maschinen
+        check("Entscheidung 2: {} bei fremder Sperre -> zurueck in < 1,5 s, keine Ausnahme".format(_nm_w),
+              _e_w is None and _dauer_w < 1.5, (repr(_e_w), round(_dauer_w, 2)))
+        check("  ... {}: genau eine Warnung, nennt den naechsten Versuch".format(_nm_w),
+              len(_wf) == 1 and "next run" in _wf[0], _wf)
+        check("  ... {}: nichts geschrieben, naechster Lauf schreibt".format(_nm_w), len(_rd_w()) == 0)
+        app.st = _StR()
+        _upd_w()
+        check("  ... {}: ohne Sperre schreibt der naechste Lauf fort".format(_nm_w),
+              len(_rd_w()) == 1 and not app.st.session_state.get("_w"))
+    import inspect as _ins_w2
+    check("Entscheidung 2: Klick-Aktionen behalten 5 s (Standard der Lese-/Schreibhelfer)",
+          all(_ins_w2.signature(f).parameters["wartezeit"].default == 5.0
+              for f in (app._db, app.archiv_lesen, app.seestarts_lesen, _orig_f[4], _orig_f[5]))
+          and app.WARTEZEIT_AUTOMATISCH == 0.5
+          and not any("WARTEZEIT_AUTOMATISCH" in _ins_w2.getsource(f) for f in
+                      (app._remove_archive_row, app._remove_sea_launch_row, app._write_reference,
+                       app._undo_reference, app._persist_workspace)))
+
     # F4: Konfliktpfad beim Entfernen
-    def _wirf_konflikt(neu, vorher, db=None):
+    def _wirf_konflikt(neu, vorher, db=None, **_k):
         raise _ndb.Konflikt("changed", _ndb.KONFLIKT_TEXT)
     app.st = _StR()
     app.DB_PATH = _temp_db()
@@ -5821,7 +5923,8 @@ try:
     finally:
         app.archiv_schreiben = _orig_f[4]
     check("Fix4: Archivzeile entfernen, Konflikt -> KONFLIKT_TEXT, kein Undo, Schluessel nicht gemerkt",
-          app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT
+          app.st.session_state.get("ref_flash_warning") == _ndb.KONFLIKT_TEXT
+          and "db_meldung" not in app.st.session_state
           and not app.st.session_state.get("ref_undo")
           and _ak_f not in app.st.session_state.get("archiv_removed", set())
           and list(app.archiv_lesen()["NOTAM"]) == ["Z8001/26"])
@@ -5834,7 +5937,8 @@ try:
     finally:
         app.seestarts_schreiben = _orig_f[5]
     check("Fix4: Seestart entfernen, Konflikt -> KONFLIKT_TEXT, kein Undo, Schluessel nicht gemerkt",
-          app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT
+          app.st.session_state.get("ref_flash_warning") == _ndb.KONFLIKT_TEXT
+          and "db_meldung" not in app.st.session_state
           and not app.st.session_state.get("ref_undo")
           and _sk_f not in app.st.session_state.get("seestarts_removed", set())
           and list(app.seestarts_lesen()["NOTAM"]) == ["Z8101/26"])
@@ -5865,6 +5969,40 @@ try:
                   "removal could not be saved" in _dlg_f and "may come back" in _dlg_f
                   and _txt_f in _dlg_f and not _ss_f.get("ref_flash")
                   and len(_rd_f()) == 0, (_dlg_f, _ss_f.get("ref_flash"), len(_rd_f())))
+            # Entscheidung 3: auch der Grund aus _persist_workspace nicht zusaetzlich auf der Hauptseite
+            check("  ... {} ({}): keine db_meldung auf der Hauptseite, genau eine Dialogmeldung".format(
+                      _nm_f, type(_exc_f).__name__),
+                  "db_meldung" not in _ss_f
+                  and sum(1 for k in ("ref_flash_warning", "ref_flash_error") if _ss_f.get(k)) == 1,
+                  dict(_ss_f))
+        # Zeile weg und Schluessel gespeichert, nur das Neuladen des Arbeitsstands scheitert ->
+        # Fehler im Dialog, nicht verloren und nicht auf der Hauptseite
+        app.st = _StR()
+        app.DB_PATH = _temp_db()
+        _upd_f()
+        _ladeorig_f = app._arbeitsstand_laden
+        def _wirf_laden(*a, **k):
+            raise _ndb.DbFehler("x", "reload **kaputt**")
+        app._arbeitsstand_laden = _wirf_laden
+        try:
+            _rm_f(_key_f)
+        finally:
+            app._arbeitsstand_laden = _ladeorig_f
+        _ss_f = app.st.session_state
+        check("Entscheidung 3: {} entfernen, Neuladen scheitert -> Fehler im Dialog, keine db_meldung".format(_nm_f),
+              "reload **kaputt**" in _ss_f.get("ref_flash_error", "") and "db_meldung" not in _ss_f,
+              dict(_ss_f))
+    # Meldungen ausserhalb des Dialogs bleiben auf der Hauptseite
+    app.st = _StR()
+    app._melde_db("warning", "main page")
+    check("Entscheidung 3: _melde_db bleibt Hauptseiten-Kanal",
+          app.st.session_state.get("db_meldung") == ("warning", "main page")
+          and not app.st.session_state.get("ref_flash_warning"))
+    app.st = _StR()
+    app._melde_db_dialog("warning", "nur im Dialog")
+    check("Entscheidung 3: _melde_db_dialog setzt keine db_meldung",
+          app.st.session_state.get("ref_flash_warning") == "nur im Dialog"
+          and "db_meldung" not in app.st.session_state, dict(app.st.session_state))
 finally:
     (app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben,
      app.seestarts_schreiben) = _orig_f

@@ -252,11 +252,16 @@ def schuetze_echte_orte(*pfade: Path) -> None:
             raise RuntimeError("NOLA_TEST is set: tests must never touch {}".format(p))
 
 
-def verbinde(pfad: Path, anlegen: bool = False) -> sqlite3.Connection:
+#: Wie lange eine Verbindung auf eine fremde Sperre wartet (Klick-Aktionen).
+WARTEZEIT = 5.0
+
+
+def verbinde(pfad: Path, anlegen: bool = False, wartezeit: float = WARTEZEIT) -> sqlite3.Connection:
     """
     Oeffnet die Datenbank. Ohne `anlegen` mit mode=rw: eine fehlende Datei
     bricht mit DateiFehlt ab, statt still eine leere Datenbank anzulegen.
     isolation_level=None: Transaktionen steuert dieses Modul selbst (BEGIN).
+    `wartezeit` (Sekunden) gilt fuer eine fremde Sperre; danach Gesperrt.
     """
     pfad = Path(pfad)
     schuetze_echte_orte(pfad)
@@ -266,8 +271,8 @@ def verbinde(pfad: Path, anlegen: bool = False) -> sqlite3.Connection:
         urllib.parse.quote(str(pfad.resolve())), "rwc" if anlegen else "rw"
     )
     try:
-        conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=5.0)
-        conn.execute("PRAGMA busy_timeout = 5000")
+        conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=wartezeit)
+        conn.execute("PRAGMA busy_timeout = {:d}".format(int(round(wartezeit * 1000))))
         conn.execute("PRAGMA foreign_keys = ON")
     except sqlite3.Error as exc:
         if not pfad.exists():
@@ -666,85 +671,186 @@ def schreibe_arbeitsstand_neu(conn: sqlite3.Connection, stand: Dict[str, Any], j
         raise _uebersetze(exc) from exc
 
 
-def lade_korpus(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+_KORPUS_SQL = "SELECT schluessel, notam_id, b, text, quellen_json FROM archiv_korpus ORDER BY schluessel"
+#: Alles, was zum Importzustand gehoert - Grundlage seines Stands.
+_IMPORT_SQL = (
+    ("tage", "SELECT iso, fingerprint, inhalt_json FROM archiv_import_tage ORDER BY iso"),
+    ("entscheidungen",
+     "SELECT schluessel, wert_json FROM archiv_import_entscheidungen ORDER BY schluessel"),
+    ("review", "SELECT art, pos, schluessel FROM archiv_import_review ORDER BY art, pos"),
+    ("erkennungsstand", "SELECT wert FROM meta WHERE schluessel = 'erkennungsstand'"),
+)
+
+
+@contextmanager
+def _lesetransaktion(conn: sqlite3.Connection):
+    """
+    Mehrere SELECTs auf EINEM Schnappschuss (WAL), damit Daten und Stand
+    zusammenpassen. Innerhalb einer laufenden Transaktion nur durchreichen.
+    """
+    if conn.in_transaction:
+        yield
+        return
+    conn.execute("BEGIN")
     try:
-        zeilen = conn.execute(
-            "SELECT notam_id, b, text, quellen_json FROM archiv_korpus ORDER BY schluessel"
-        ).fetchall()
+        yield
+    finally:
+        if conn.in_transaction:
+            conn.execute("COMMIT")
+
+
+def _korpus_zeilen(conn: sqlite3.Connection) -> List[Tuple[Any, ...]]:
+    return conn.execute(_KORPUS_SQL).fetchall()
+
+
+def _import_zeilen(conn: sqlite3.Connection) -> Dict[str, List[Tuple[Any, ...]]]:
+    return {name: conn.execute(sql).fetchall() for name, sql in _IMPORT_SQL}
+
+
+def _import_stand(zeilen: Dict[str, List[Tuple[Any, ...]]]) -> str:
+    return _stand([(name,) + tuple(z) for name, _ in _IMPORT_SQL for z in zeilen[name]])
+
+
+def lade_korpus_mit_stand(conn: sqlite3.Connection) -> Tuple[List[Dict[str, Any]], str]:
+    """Korpus und sein Stand (Pruefsumme) - den gibt speichere_korpus als `erwartet` mit."""
+    try:
+        with _lesetransaktion(conn):
+            zeilen = _korpus_zeilen(conn)
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
-    return [{"notam_id": n, "b": b, "text": t, "quellen": json.loads(q)} for n, b, t, q in zeilen]
+    eintraege = [{"notam_id": n, "b": b, "text": t, "quellen": json.loads(q)} for _, n, b, t, q in zeilen]
+    return eintraege, _stand(zeilen)
 
 
-def speichere_korpus(conn: sqlite3.Connection, eintraege: Sequence[Tuple[str, Dict[str, Any]]]) -> None:
+def lade_korpus(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    return lade_korpus_mit_stand(conn)[0]
+
+
+def _speichere_korpus_in_transaktion(
+    conn: sqlite3.Connection, eintraege: Sequence[Tuple[str, Dict[str, Any]]], erwartet: Optional[str]
+) -> str:
+    """Vergleichen und ersetzen ohne eigenes BEGIN; Rueckgabe: der neue Stand."""
+    if erwartet is not None and _stand(_korpus_zeilen(conn)) != erwartet:
+        raise Konflikt("changed", KONFLIKT_TEXT)
+    conn.execute("DELETE FROM archiv_korpus")
+    conn.executemany(
+        "INSERT INTO archiv_korpus (schluessel, notam_id, b, text, quellen_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(s, e["notam_id"], e["b"], e["text"], json.dumps(e["quellen"], ensure_ascii=False))
+         for s, e in eintraege],
+    )
+    return _stand(_korpus_zeilen(conn))
+
+
+def speichere_korpus(
+    conn: sqlite3.Connection,
+    eintraege: Sequence[Tuple[str, Dict[str, Any]]],
+    erwartet: Optional[str] = None,
+) -> str:
+    """
+    Ersetzt den Korpus - nur, wenn sein Stand noch `erwartet` ist (sonst Konflikt,
+    nichts geschrieben). `erwartet=None` nur fuer Umzug und Wiederherstellen.
+    Rueckgabe: der neue Stand.
+    """
     try:
         with _transaktion(conn):
-            conn.execute("DELETE FROM archiv_korpus")
-            conn.executemany(
-                "INSERT INTO archiv_korpus (schluessel, notam_id, b, text, quellen_json) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [(s, e["notam_id"], e["b"], e["text"], json.dumps(e["quellen"], ensure_ascii=False))
-                 for s, e in eintraege],
-            )
+            return _speichere_korpus_in_transaktion(conn, eintraege, erwartet)
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
 
 
-def lade_importzustand(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """Rohform wie archiv_import.json - die Strukturpruefung macht archiv_import."""
+def lade_importzustand_mit_stand(conn: sqlite3.Connection) -> Tuple[Dict[str, Any], str]:
+    """
+    Rohform wie archiv_import.json (die Strukturpruefung macht archiv_import) und
+    der Stand aller beteiligten Tabellen - den gibt speichere_importzustand als `erwartet` mit.
+    """
     try:
-        tage = {
-            iso: json.loads(inhalt)
-            for iso, inhalt in conn.execute(
-                "SELECT iso, inhalt_json FROM archiv_import_tage ORDER BY iso")
-        }
-        entscheidungen = {
-            k: json.loads(w)
-            for k, w in conn.execute(
-                "SELECT schluessel, wert_json FROM archiv_import_entscheidungen ORDER BY schluessel")
-        }
-        review = {"bestaetigt": [], "ausgeblendet": []}
-        for art, s in conn.execute(
-            "SELECT art, schluessel FROM archiv_import_review ORDER BY art, pos"
-        ):
-            review[art].append(s)
-        stand = lese_meta(conn, "erkennungsstand")
+        with _lesetransaktion(conn):
+            zeilen = _import_zeilen(conn)
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
+    tage = {iso: json.loads(inhalt) for iso, _, inhalt in zeilen["tage"]}
+    entscheidungen = {k: json.loads(w) for k, w in zeilen["entscheidungen"]}
+    review = {"bestaetigt": [], "ausgeblendet": []}  # type: Dict[str, List[str]]
+    for art, _, s in zeilen["review"]:
+        review[art].append(s)
+    stand = zeilen["erkennungsstand"][0][0] if zeilen["erkennungsstand"] else None
     if not (tage or entscheidungen or review["bestaetigt"] or review["ausgeblendet"] or stand):
-        return {}
+        return {}, _import_stand(zeilen)
     return {
         "version": 1, "tage": tage, "entscheidungen": entscheidungen,
         "review_bestaetigt": review["bestaetigt"], "review_ausgeblendet": review["ausgeblendet"],
         "erkennungsstand": stand or "",
-    }
+    }, _import_stand(zeilen)
 
 
-def speichere_importzustand(conn: sqlite3.Connection, state: Dict[str, Any]) -> None:
+def lade_importzustand(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Rohform wie archiv_import.json - die Strukturpruefung macht archiv_import."""
+    return lade_importzustand_mit_stand(conn)[0]
+
+
+def _speichere_importzustand_in_transaktion(
+    conn: sqlite3.Connection, state: Dict[str, Any], erwartet: Optional[str]
+) -> str:
+    """Vergleichen und ersetzen ohne eigenes BEGIN; Rueckgabe: der neue Stand."""
+    if erwartet is not None and _import_stand(_import_zeilen(conn)) != erwartet:
+        raise Konflikt("changed", KONFLIKT_TEXT)
+    for t in ("archiv_import_tage", "archiv_import_entscheidungen", "archiv_import_review"):
+        conn.execute("DELETE FROM {}".format(_q(t)))
+    conn.executemany(
+        "INSERT INTO archiv_import_tage (iso, fingerprint, inhalt_json) VALUES (?, ?, ?)",
+        [(iso, str(tag.get("fingerprint", "")), json.dumps(tag, ensure_ascii=False))
+         for iso, tag in state.get("tage", {}).items()],
+    )
+    conn.executemany(
+        "INSERT INTO archiv_import_entscheidungen (schluessel, wert_json) VALUES (?, ?)",
+        [(k, json.dumps(w, ensure_ascii=False)) for k, w in state.get("entscheidungen", {}).items()],
+    )
+    for art, liste in (("bestaetigt", state.get("review_bestaetigt", [])),
+                       ("ausgeblendet", state.get("review_ausgeblendet", []))):
+        conn.executemany(
+            "INSERT INTO archiv_import_review (art, pos, schluessel) VALUES (?, ?, ?)",
+            [(art, i, s) for i, s in enumerate(liste)],
+        )
+    conn.execute(
+        "INSERT INTO meta (schluessel, wert) VALUES ('erkennungsstand', ?) "
+        "ON CONFLICT(schluessel) DO UPDATE SET wert = excluded.wert",
+        (str(state.get("erkennungsstand", "")),),
+    )
+    return _import_stand(_import_zeilen(conn))
+
+
+def speichere_importzustand(
+    conn: sqlite3.Connection, state: Dict[str, Any], erwartet: Optional[str] = None
+) -> str:
+    """
+    Ersetzt den Importzustand - nur, wenn sein Stand noch `erwartet` ist (sonst
+    Konflikt, nichts geschrieben). `erwartet=None` nur fuer Umzug und Wiederherstellen.
+    Rueckgabe: der neue Stand.
+    """
     try:
         with _transaktion(conn):
-            for t in ("archiv_import_tage", "archiv_import_entscheidungen", "archiv_import_review"):
-                conn.execute("DELETE FROM {}".format(_q(t)))
-            conn.executemany(
-                "INSERT INTO archiv_import_tage (iso, fingerprint, inhalt_json) VALUES (?, ?, ?)",
-                [(iso, str(tag.get("fingerprint", "")), json.dumps(tag, ensure_ascii=False))
-                 for iso, tag in state.get("tage", {}).items()],
-            )
-            conn.executemany(
-                "INSERT INTO archiv_import_entscheidungen (schluessel, wert_json) VALUES (?, ?)",
-                [(k, json.dumps(w, ensure_ascii=False)) for k, w in state.get("entscheidungen", {}).items()],
-            )
-            for art, liste in (("bestaetigt", state.get("review_bestaetigt", [])),
-                               ("ausgeblendet", state.get("review_ausgeblendet", []))):
-                conn.executemany(
-                    "INSERT INTO archiv_import_review (art, pos, schluessel) VALUES (?, ?, ?)",
-                    [(art, i, s) for i, s in enumerate(liste)],
-                )
-            conn.execute(
-                "INSERT INTO meta (schluessel, wert) VALUES ('erkennungsstand', ?) "
-                "ON CONFLICT(schluessel) DO UPDATE SET wert = excluded.wert",
-                (str(state.get("erkennungsstand", "")),),
-            )
+            return _speichere_importzustand_in_transaktion(conn, state, erwartet)
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+
+
+def speichere_import(
+    conn: sqlite3.Connection,
+    eintraege: Sequence[Tuple[str, Dict[str, Any]]],
+    state: Dict[str, Any],
+    erwartet_korpus: Optional[str],
+    erwartet_zustand: Optional[str],
+) -> Tuple[str, str]:
+    """
+    Korpus und Importzustand in EINER Schreibtransaktion (Import-Klick): weicht
+    einer der beiden Staende ab, wird keiner geschrieben.
+    Rueckgabe: die neuen Staende (Korpus, Zustand).
+    """
+    try:
+        with _transaktion(conn):
+            return (_speichere_korpus_in_transaktion(conn, eintraege, erwartet_korpus),
+                    _speichere_importzustand_in_transaktion(conn, state, erwartet_zustand))
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
 

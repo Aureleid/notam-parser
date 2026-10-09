@@ -31,6 +31,26 @@ except RuntimeError:
     check("NOLA_TEST sperrt die Projektdatei", True)
 _p, _c = neue_db()
 check("Schema-Version 1", db.schema_version(_c) == 1)
+# Entscheidung 2: Klick-Aktionen warten 5 s auf eine fremde Sperre, das automatische
+# Fortschreiben nur kurz (Parameter wartezeit)
+check("verbinde: Standard-Wartezeit 5 s", _c.execute("PRAGMA busy_timeout").fetchone()[0] == 5000)
+_c_kurz = db.verbinde(_p, wartezeit=0.5)
+try:
+    check("verbinde(wartezeit=0.5): busy_timeout 500 ms", _c_kurz.execute("PRAGMA busy_timeout").fetchone()[0] == 500)
+    _c.execute("BEGIN IMMEDIATE")
+    _t0 = time.monotonic()
+    try:
+        db.ersetze_tabelle(_c_kurz, "startplaetze", pd.DataFrame(columns=list(db.FACHTABELLEN["startplaetze"])), None)
+        check("kurze Wartezeit: fremde Sperre -> Gesperrt", False)
+    except db.Gesperrt:
+        check("kurze Wartezeit: fremde Sperre -> Gesperrt", True)
+    _dauer = time.monotonic() - _t0
+    # Grosszuegige Obergrenze (Soll ~0,5 s, Standard waeren 5 s): robust auf langsamen Maschinen
+    check("kurze Wartezeit: kehrt nach < 2 s zurueck", _dauer < 2.0, round(_dauer, 2))
+finally:
+    if _c.in_transaction:
+        _c.execute("ROLLBACK")
+    _c_kurz.close()
 
 print("== 2. Spalten wie in app.py ==")
 import app
@@ -298,6 +318,71 @@ _zst = {"version": 1, "tage": {"2026-10-01": {"fingerprint": "f", "kandidaten": 
         "review_bestaetigt": ["r2", "r1"], "review_ausgeblendet": ["r3"], "erkennungsstand": "abc"}
 db.speichere_importzustand(_c2, _zst)
 check("Importzustand Rundlauf", db.lade_importzustand(_c2) == _zst)
+
+# Standvergleich (nola-a6c.6): zwei Verbindungen, die zweite schreibt mit veraltetem Stand
+_c2b = db.verbinde(_p2)
+try:
+    _z_a, _st_a = db.lade_importzustand_mit_stand(_c2)
+    _z_b, _st_b = db.lade_importzustand_mit_stand(_c2b)
+    check("Importzustand mit Stand: gleiche Daten wie ohne", _z_a == _zst and _st_a == _st_b and len(_st_a) == 64)
+    _z_neu = dict(_zst, erkennungsstand="neu1")
+    _st_neu = db.speichere_importzustand(_c2, _z_neu, erwartet=_st_a)
+    check("Importzustand: passender Stand -> geschrieben, neuer Stand zurueck",
+          db.lade_importzustand(_c2) == _z_neu and _st_neu == db.lade_importzustand_mit_stand(_c2)[1]
+          and _st_neu != _st_a)
+    try:
+        db.speichere_importzustand(_c2b, dict(_zst, erkennungsstand="veraltet"), erwartet=_st_b)
+        check("Importzustand: veralteter Stand -> Konflikt", False)
+    except db.Konflikt:
+        check("Importzustand: veralteter Stand -> Konflikt", True)
+    check("Importzustand: Konflikt schreibt nichts", db.lade_importzustand(_c2) == _z_neu)
+    check("Importzustand: keine offene Transaktion nach Konflikt", not _c2b.in_transaction)
+    # Jede beteiligte Tabelle zaehlt zum Stand
+    for _tab_s, _sql_s in [
+            ("archiv_import_tage", "UPDATE archiv_import_tage SET fingerprint = 'g'"),
+            ("archiv_import_entscheidungen", "UPDATE archiv_import_entscheidungen SET wert_json = '{}'"),
+            ("archiv_import_review", "DELETE FROM archiv_import_review WHERE schluessel = 'r3'"),
+            ("meta erkennungsstand", "UPDATE meta SET wert = 'fremd' WHERE schluessel = 'erkennungsstand'")]:
+        _vorher_s = db.lade_importzustand_mit_stand(_c2)[1]
+        _c2b.execute(_sql_s)
+        check("Stand aendert sich mit " + _tab_s, db.lade_importzustand_mit_stand(_c2)[1] != _vorher_s)
+    # Umzug/Wiederherstellen: ohne erwarteten Stand weiter moeglich
+    db.speichere_importzustand(_c2b, _zst)
+    check("Importzustand: erwartet=None (Umzug) schreibt ohne Vergleich", db.lade_importzustand(_c2) == _zst)
+
+    _k_a, _ks_a = db.lade_korpus_mit_stand(_c2)
+    _k_b, _ks_b = db.lade_korpus_mit_stand(_c2b)
+    check("Korpus mit Stand: gleiche Daten wie ohne", _k_a == db.lade_korpus(_c2) and _ks_a == _ks_b)
+    _ks_neu = db.speichere_korpus(_c2, _eintraege, erwartet=_ks_a)
+    check("Korpus: passender Stand -> geschrieben, neuer Stand zurueck",
+          db.lade_korpus(_c2) == [_eintraege[0][1]] and _ks_neu == db.lade_korpus_mit_stand(_c2)[1])
+    try:
+        db.speichere_korpus(_c2b, _umgekehrt, erwartet=_ks_b)
+        check("Korpus: veralteter Stand -> Konflikt", False)
+    except db.Konflikt:
+        check("Korpus: veralteter Stand -> Konflikt", True)
+    check("Korpus: Konflikt schreibt nichts", db.lade_korpus(_c2) == [_eintraege[0][1]])
+    db.speichere_korpus(_c2b, _umgekehrt)
+    check("Korpus: erwartet=None (Umzug) schreibt ohne Vergleich", len(db.lade_korpus(_c2)) == 2)
+
+    # Import-Klick schreibt Korpus und Zustand zusammen: veralteter Zustand -> auch Korpus unberuehrt
+    _k_v, _ks_v = db.lade_korpus_mit_stand(_c2)
+    _z_v, _zs_v = db.lade_importzustand_mit_stand(_c2)
+    _c2b.execute("UPDATE meta SET wert = 'fremd2' WHERE schluessel = 'erkennungsstand'")
+    try:
+        db.speichere_import(_c2, _eintraege, dict(_zst, erkennungsstand="mein"), _ks_v, _zs_v)
+        check("speichere_import: veralteter Zustand -> Konflikt", False)
+    except db.Konflikt:
+        check("speichere_import: veralteter Zustand -> Konflikt", True)
+    check("speichere_import: Konflikt -> Korpus und Zustand unberuehrt",
+          db.lade_korpus(_c2) == _k_v and db.lade_importzustand(_c2)["erkennungsstand"] == "fremd2")
+    _zs_v2 = db.lade_importzustand_mit_stand(_c2)[1]
+    _neu_ks, _neu_zs = db.speichere_import(_c2, _eintraege, dict(_zst, erkennungsstand="mein"), _ks_v, _zs_v2)
+    check("speichere_import: passende Staende -> beides geschrieben, neue Staende zurueck",
+          db.lade_korpus(_c2) == [_eintraege[0][1]] and db.lade_importzustand(_c2)["erkennungsstand"] == "mein"
+          and _neu_ks == db.lade_korpus_mit_stand(_c2)[1] and _neu_zs == db.lade_importzustand_mit_stand(_c2)[1])
+finally:
+    _c2b.close()
 _c2.close()
 
 print("== 11. Sicherung ==")

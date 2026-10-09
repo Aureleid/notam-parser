@@ -2147,9 +2147,13 @@ def persist_reference(path: Path, df: pd.DataFrame, columns: Sequence[str]) -> N
 
 
 @contextmanager
-def _db(db: Optional[Path] = None) -> Iterator[sqlite3.Connection]:
-    """Eine kurze Verbindung je Durchlauf bzw. Callback - nie ueber Threads geteilt."""
-    conn = nola_db.verbinde(db or DB_PATH)
+def _db(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> Iterator[sqlite3.Connection]:
+    """
+    Eine kurze Verbindung je Durchlauf bzw. Callback - nie ueber Threads geteilt.
+    `wartezeit`: Klick-Aktionen warten 5 s auf eine fremde Sperre, das automatische
+    Fortschreiben nur WARTEZEIT_AUTOMATISCH (Entscheidung 2).
+    """
+    conn = nola_db.verbinde(db or DB_PATH, wartezeit=wartezeit)
     try:
         yield conn
     finally:
@@ -5228,13 +5232,13 @@ def persist_archive(path: Path, df: pd.DataFrame) -> None:
 
 
 
-def archiv_lesen(db: Optional[Path] = None) -> pd.DataFrame:
+def archiv_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
     """
     Startarchiv aus der Datenbank fuer jeden Schreibvorgang. Ein Lesefehler wird
     ArchiveUnreadable - so greifen alle bestehenden Schutzpfade unveraendert.
     """
     try:
-        with _db(db) as conn:
+        with _db(db, wartezeit) as conn:
             return nola_db.lese_tabelle(conn, "startarchiv")
     except nola_db.DbFehler as exc:
         raise ArchiveUnreadable(
@@ -5260,30 +5264,36 @@ def archiv_schluessel_oder_grund(db: Optional[Path] = None) -> Tuple[Optional[Se
     return {archive_key(dict(r)) for _, r in bestand.iterrows()}, ""
 
 
-def archiv_schreiben(neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None) -> str:
+def archiv_schreiben(
+    neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None,
+    wartezeit: float = nola_db.WARTEZEIT,
+) -> str:
     """Ersetzt das Archiv - nur, wenn es noch dem Stand von `vorher` entspricht."""
     stand = vorher.attrs.get("nola_stand")
     if not stand:
         raise ValueError("archiv_schreiben needs `vorher` as read by archiv_lesen")
-    with _db(db) as conn:
+    with _db(db, wartezeit) as conn:
         return nola_db.ersetze_tabelle(conn, "startarchiv", neu[list(ARCHIVE_COLUMNS)], stand)
 
 
-def seestarts_lesen(db: Optional[Path] = None) -> pd.DataFrame:
+def seestarts_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
     """Seestart-Protokoll aus der Datenbank, Form wie load_sea_launches (Text, leer = '')."""
-    with _db(db) as conn:
+    with _db(db, wartezeit) as conn:
         roh = nola_db.lese_tabelle(conn, "seestarts")
     df = roh.fillna("").astype(str)
     df.attrs["nola_stand"] = roh.attrs["nola_stand"]
     return df
 
 
-def seestarts_schreiben(neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None) -> str:
+def seestarts_schreiben(
+    neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None,
+    wartezeit: float = nola_db.WARTEZEIT,
+) -> str:
     """Ersetzt das Seestart-Protokoll - nur, wenn es noch dem Stand von `vorher` entspricht."""
     stand = vorher.attrs.get("nola_stand")
     if not stand:
         raise ValueError("seestarts_schreiben needs `vorher` as read by seestarts_lesen")
-    with _db(db) as conn:
+    with _db(db, wartezeit) as conn:
         return nola_db.ersetze_tabelle(conn, "seestarts", neu[list(SEA_LAUNCH_COLUMNS)], stand)
 
 
@@ -5700,13 +5710,16 @@ def _arbeitsstand_laden() -> None:
     st.session_state["_ws_momentaufnahme"] = copy.deepcopy(stand)
 
 
-def _persist_workspace() -> Optional[str]:
+def _persist_workspace(im_dialog: bool = False) -> Optional[str]:
     """
     Schreibt die Aenderungen am Arbeitsstand seit der Momentaufnahme. Hat
     jemand anderes dieselben Eintraege inzwischen geaendert, wird nichts
     geschrieben und die Ansicht neu geladen.
 
     Rueckgabe: None bei Erfolg, sonst der Grund, warum nicht gespeichert wurde.
+    `im_dialog`: Aufruf aus dem Optionsdialog - der Aufrufer meldet den Grund
+    selbst im Dialog; nur ein Fehler beim Neuladen geht dann in den Dialog,
+    nichts auf die Hauptseite (Entscheidung 3).
     """
     grund = None
     vorher = st.session_state.get("_ws_momentaufnahme") or nola_db.leerer_arbeitsstand()
@@ -5729,15 +5742,17 @@ def _persist_workspace() -> Optional[str]:
             )
     except nola_db.Konflikt:
         grund = nola_db.KONFLIKT_TEXT
-        _melde_db("warning", grund)
+        if not im_dialog:
+            _melde_db("warning", grund)
     except nola_db.DbFehler as exc:
         grund = str(exc)
-        _melde_db("error", "Not saved: {}".format(exc))
+        if not im_dialog:
+            _melde_db("error", "Not saved: {}".format(exc))
     # In jedem Fall den echten Stand zeigen (neue NOTAMs bekommen ihre id).
     try:
         _arbeitsstand_laden()
     except nola_db.DbFehler as exc:
-        _melde_db("error", str(exc))
+        (_melde_db_dialog if im_dialog else _melde_db)("error", str(exc))
     return grund
 
 
@@ -5911,10 +5926,10 @@ def _melde_db(art: str, text: str) -> None:
 
 def _melde_db_dialog(art: str, text: str) -> None:
     """
-    Wie _melde_db, dazu im Optionsdialog: der oeffnet sich beim naechsten Durchlauf
-    ueber der Hauptseite neu, deren Meldung laege sonst verdeckt dahinter.
+    Meldung fuer Aktionen aus dem Optionsdialog - nur dort (Entscheidung 3): der
+    oeffnet sich beim naechsten Durchlauf ueber der Hauptseite neu, eine zweite
+    Meldung auf der Hauptseite laege verdeckt dahinter und kaeme danach doppelt.
     """
-    _melde_db(art, text)
     st.session_state["ref_flash_warning" if art == "warning" else "ref_flash_error"] = text
 
 
@@ -6584,6 +6599,12 @@ def _show_archive_status(platzhalter: Any) -> None:
     )
 
 
+#: Entscheidung 2: das automatische Fortschreiben (jeder Durchlauf) wartet auf eine
+#: fremde Sperre nur kurz und versucht es beim naechsten Durchlauf erneut.
+WARTEZEIT_AUTOMATISCH = 0.5
+GESPERRT_AUTOMATISCH = "{}: database is busy - not updated now, NOLA tries again on the next run."
+
+
 def _update_archive(
     events: Sequence["LaunchEvent"],
     groups: Sequence["LaunchGroup"],
@@ -6613,7 +6634,7 @@ def _update_archive(
     # schreibt erneut fort.
     for _ in range(2):
         try:
-            bestand = archiv_lesen()
+            bestand = archiv_lesen(wartezeit=WARTEZEIT_AUTOMATISCH)
         except ArchiveUnreadable as exc:
             # Nie ueber ein unlesbares Archiv schreiben; die Auswertung laeuft weiter.
             st.warning("Launch archive: {}".format(_md_plain(exc)))
@@ -6639,10 +6660,13 @@ def _update_archive(
         if neu.to_csv(index=False) == bestand.to_csv(index=False):
             return
         try:
-            archiv_schreiben(neu, vorher=bestand)
+            archiv_schreiben(neu, vorher=bestand, wartezeit=WARTEZEIT_AUTOMATISCH)
             return
         except nola_db.Konflikt:
             continue
+        except nola_db.Gesperrt:
+            st.warning(GESPERRT_AUTOMATISCH.format("Launch archive"))
+            return
         except nola_db.DbFehler as exc:
             st.warning("Launch archive: not updated ({})".format(_md_plain(exc)))
             return
@@ -6681,7 +6705,7 @@ def _update_sea_launches(
     # schreibt erneut fort.
     for _ in range(2):
         try:
-            bestand = seestarts_lesen()
+            bestand = seestarts_lesen(wartezeit=WARTEZEIT_AUTOMATISCH)
         except nola_db.DbFehler as exc:
             # Nie ueber ein unlesbares Protokoll schreiben; die Auswertung laeuft weiter.
             st.warning("Sea launch log: could not be read ({}) - not updated.".format(_md_plain(exc)))
@@ -6707,10 +6731,13 @@ def _update_sea_launches(
         if neu.to_csv(index=False) == bestand.to_csv(index=False):
             return
         try:
-            seestarts_schreiben(neu, vorher=bestand)
+            seestarts_schreiben(neu, vorher=bestand, wartezeit=WARTEZEIT_AUTOMATISCH)
             return
         except nola_db.Konflikt:
             continue
+        except nola_db.Gesperrt:
+            st.warning(GESPERRT_AUTOMATISCH.format("Sea launch log"))
+            return
         except nola_db.DbFehler as exc:
             st.warning("Sea launch log: not updated ({})".format(_md_plain(exc)))
             return
@@ -6743,7 +6770,7 @@ def _remove_sea_launch_row(schluessel: str) -> None:
         return
     _push_undo("seestarts", bestand, neu_stand, "Sea launch row removed")
     st.session_state.setdefault("seestarts_removed", set()).add(schluessel)
-    grund = _persist_workspace()
+    grund = _persist_workspace(im_dialog=True)
     if grund:
         _melde_schluessel_nicht_gespeichert(grund, "Sea launch row")
         return
@@ -6824,7 +6851,7 @@ def _remove_archive_row(schluessel: str) -> None:
     # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
     _push_undo("startarchiv", bestand, neu_stand, "Archivzeile entfernt")
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
-    grund = _persist_workspace()
+    grund = _persist_workspace(im_dialog=True)
     if grund:
         _melde_schluessel_nicht_gespeichert(grund, "Archive row")
         return
@@ -6957,8 +6984,8 @@ def _archive_import_tab(
             )
             balken.empty()
             try:
-                ai.korpus_speichern(korpus)
-                ai.zustand_speichern(zustand)
+                # Eine Transaktion: bei fremder Aenderung bleibt beides unberuehrt
+                ai.import_speichern(korpus, zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:

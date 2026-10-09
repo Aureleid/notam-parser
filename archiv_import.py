@@ -67,6 +67,34 @@ class ImportStateError(RuntimeError):
     """Eine Zustandsdatei ist unlesbar; sie wird dann nicht ueberschrieben."""
 
 
+#: Ein anderer Reiter/Durchlauf hat Korpus oder Zustand seit dem Laden geschrieben.
+IMPORT_KONFLIKT_TEXT = (
+    "The archive import changed meanwhile - nothing was written, please reload the tab."
+)
+
+
+class MitStand(dict):
+    """
+    Korpus bzw. Importzustand wie bisher (ein dict), dazu der beim Laden gelesene
+    Stand der Datenbank - wie df.attrs["nola_stand"] bei den Tabellen. Vergleiche
+    mit einem gewoehnlichen dict bleiben gleich; das Speichern gibt den Stand als
+    `erwartet` mit und merkt sich danach den neuen.
+    """
+
+    nola_stand: Optional[str] = None
+
+
+def _mit_stand(daten: Dict[str, Any], stand: str) -> "MitStand":
+    ergebnis = MitStand(daten)
+    ergebnis.nola_stand = stand
+    return ergebnis
+
+
+def _stand_merken(daten: Any, stand: str) -> None:
+    if isinstance(daten, MitStand):
+        daten.nola_stand = stand
+
+
 @dataclass
 class KorpusNotam:
     """Ein NOTAM im Rohkorpus, mit allen Stellen, an denen es gefunden wurde."""
@@ -323,24 +351,41 @@ def save_korpus(korpus: Dict[str, KorpusNotam], path: Path = KORPUS_JSON) -> Non
 
 
 def korpus_laden(db: Optional[Path] = None) -> Dict[str, KorpusNotam]:
-    """Liest den Archiv-Korpus aus der Datenbank; unerwartete Struktur bricht ab."""
+    """
+    Liest den Archiv-Korpus aus der Datenbank; unerwartete Struktur bricht ab.
+    Rueckgabe ist ein MitStand - korpus_speichern prueft damit, ob inzwischen
+    jemand anderes geschrieben hat.
+    """
     try:
         with app._db(db) as conn:
-            eintraege = app.nola_db.lade_korpus(conn)
+            eintraege, stand = app.nola_db.lade_korpus_mit_stand(conn)
     except app.nola_db.DbFehler as exc:
         raise ImportStateError("The archive corpus could not be read ({}).".format(exc)) from exc
-    return korpus_aus_daten({"notams": eintraege}, "archiv_korpus (nola.db)")
+    return _mit_stand(korpus_aus_daten({"notams": eintraege}, "archiv_korpus (nola.db)"), stand)
+
+
+def _korpus_eintraege(korpus: Dict[str, KorpusNotam]) -> List[Tuple[str, Dict[str, Any]]]:
+    return [
+        (n.schluessel, {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen})
+        for n in sorted(korpus.values(), key=lambda n: n.schluessel)
+    ]
 
 
 def korpus_speichern(korpus: Dict[str, KorpusNotam], db: Optional[Path] = None) -> None:
-    """Schreibt den Archiv-Korpus in die Datenbank."""
+    """
+    Schreibt den Archiv-Korpus in die Datenbank - mit Standvergleich, wenn er
+    von korpus_laden kommt (ein gewoehnliches dict schreibt ohne Vergleich).
+    """
     try:
         with app._db(db) as conn:
-            app.nola_db.speichere_korpus(conn, [
-                (n.schluessel, {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen})
-                for n in sorted(korpus.values(), key=lambda n: n.schluessel)])
+            neu = app.nola_db.speichere_korpus(
+                conn, _korpus_eintraege(korpus), erwartet=getattr(korpus, "nola_stand", None))
+    except app.nola_db.Konflikt as exc:
+        raise ImportStateError(IMPORT_KONFLIKT_TEXT) from exc
     except app.nola_db.DbFehler as exc:
         raise ImportStateError("The archive corpus was not saved ({}).".format(exc)) from exc
+    _stand_merken(korpus, neu)
+
 
 @dataclass
 class ImportReport:
@@ -1030,22 +1075,52 @@ def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
 
 
 def zustand_laden(db: Optional[Path] = None) -> Dict[str, Any]:
-    """Liest den Importzustand aus der Datenbank; unerwartete Struktur bricht ab."""
+    """
+    Liest den Importzustand aus der Datenbank; unerwartete Struktur bricht ab.
+    Rueckgabe ist ein MitStand (siehe korpus_laden).
+    """
     try:
         with app._db(db) as conn:
-            roh = app.nola_db.lade_importzustand(conn)
+            roh, stand = app.nola_db.lade_importzustand_mit_stand(conn)
     except app.nola_db.DbFehler as exc:
         raise ImportStateError("The import state could not be read ({}).".format(exc)) from exc
-    return zustand_aus_daten(roh, "archiv_import (nola.db)")
+    return _mit_stand(zustand_aus_daten(roh, "archiv_import (nola.db)"), stand)
 
 
 def zustand_speichern(state: Dict[str, Any], db: Optional[Path] = None) -> None:
-    """Schreibt den Importzustand in die Datenbank."""
+    """
+    Schreibt den Importzustand in die Datenbank - mit Standvergleich, wenn er
+    von zustand_laden kommt. Konflikt: ImportStateError, nichts geschrieben.
+    """
     try:
         with app._db(db) as conn:
-            app.nola_db.speichere_importzustand(conn, state)
+            neu = app.nola_db.speichere_importzustand(
+                conn, state, erwartet=getattr(state, "nola_stand", None))
+    except app.nola_db.Konflikt as exc:
+        raise ImportStateError(IMPORT_KONFLIKT_TEXT) from exc
     except app.nola_db.DbFehler as exc:
         raise ImportStateError("The import state was not saved ({}).".format(exc)) from exc
+    _stand_merken(state, neu)
+
+
+def import_speichern(
+    korpus: Dict[str, KorpusNotam], state: Dict[str, Any], db: Optional[Path] = None
+) -> None:
+    """
+    Import-Klick: Korpus und Zustand in einer Transaktion. Hat sich einer der
+    beiden seit dem Laden geaendert, wird keiner geschrieben (ImportStateError).
+    """
+    try:
+        with app._db(db) as conn:
+            neu_k, neu_z = app.nola_db.speichere_import(
+                conn, _korpus_eintraege(korpus), state,
+                getattr(korpus, "nola_stand", None), getattr(state, "nola_stand", None))
+    except app.nola_db.Konflikt as exc:
+        raise ImportStateError(IMPORT_KONFLIKT_TEXT) from exc
+    except app.nola_db.DbFehler as exc:
+        raise ImportStateError("The archive import was not saved ({}).".format(exc)) from exc
+    _stand_merken(korpus, neu_k)
+    _stand_merken(state, neu_z)
 
 def detection_stamp(
     paths: Sequence[Path] = (app.APP_DIR / "app.py", app.APP_DIR / "archiv_import.py"),
