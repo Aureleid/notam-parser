@@ -158,7 +158,11 @@ vergleicht NOLA die SHA-256-Prüfsummen der drei Referenz-CSVs mit dem Stand bei
 Einlesen und ersetzt bei einer Abweichung **nur die drei Referenztabellen** (in einer
 Transaktion) — Arbeitsstand, Archiv und Seestarts bleiben. Ist eine geänderte CSV unlesbar,
 bleibt die Datenbank unverändert und die Seite nennt den Grund. Änderungen in der Cloud sind
-nicht dauerhaft gesichert.
+nicht dauerhaft gesichert. Der Arbeitsstand (eingefügte NOTAMs, Entscheidungen, Zuweisungen)
+gilt dort **je Browser-Sitzung**: er beginnt leer, liegt nur in der Sitzung und geht mit ihr
+verloren; Referenzen, Archiv und Seestarts teilen sich alle Besucher. Eine in einer Sitzung
+entfernte Archiv- oder Seestartzeile kann daher in einer anderen Sitzung beim nächsten
+Fortschreiben wiederkommen, weil der Löschschlüssel nur in der entfernenden Sitzung liegt.
 
 ## Zwei Eingabewege
 

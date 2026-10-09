@@ -27,6 +27,23 @@ def _temp_db(archiv_csv=None):
     return _ziel
 
 
+def _kopie_der_test_db():
+    """
+    Eigene Kopie der gemeinsamen Temp-DB (gleicher Inhalt, eigener Ordner) fuer
+    Abschnitte, die Aktionen aufrufen - ihre Schreibzugriffe bleiben im Abschnitt.
+    """
+    import sqlite3 as _sq_k
+    _ziel = _P_db(_tf_db.mkdtemp()) / "nola.db"
+    _quelle = _sq_k.connect(str(app.DB_PATH))
+    _neu = _sq_k.connect(str(_ziel))
+    try:
+        _quelle.backup(_neu)
+    finally:
+        _neu.close()
+        _quelle.close()
+    return _ziel
+
+
 def _kaputte_db(name="kaputt.db"):
     """Vorhandene, aber unlesbare Datenbankdatei (kein SQLite-Kopf)."""
     _pfad = _P_db(_tf_db.mkdtemp()) / name
@@ -3063,7 +3080,7 @@ finally:
     app.WORKSPACE_FILE = echt_w2
 import inspect as _ins_pw
 _quelle_pw = _ins_pw.getsource(app._persist_workspace)
-check("save_workspace wird benannt aufgerufen - nicht nach Position",
+check("_persist_workspace schreibt ueber nola_db.schreibe_unterschiede(conn, vorher, aktuell, ...), nicht ueber save_workspace",
       "nola_db.schreibe_unterschiede(" in _quelle_pw
       and "conn, vorher, aktuell," in _quelle_pw
       and "save_workspace(" not in _quelle_pw)
@@ -5321,7 +5338,11 @@ class _StR:
     def warning(self, *a, **k): self.session_state.setdefault("_w", []).append(a)
     error = info = success = warning
 _st_orig_r = app.st; app.st = _StR()
+_db_orig_r = app.DB_PATH
 try:
+    # eigene Kopie: Hinzufuegen, Entfernen und die "fremden" Aenderungen bleiben im Abschnitt
+    app.DB_PATH = _kopie_der_test_db()
+    _sp_db = app.referenz_lesen("startplaetze")
     _neu = {"Kurzel": "ZZZZ", "Latitude": 1.0, "Longitude": 2.0, "Name": "**x**", "Land": "China"}
     app._add_reference_row("startplaetze", _sp_db, app.SPACEPORT_EXPORT_COLUMNS, "Kurzel", _neu)
     _nach = app.referenz_lesen("startplaetze")
@@ -5350,6 +5371,7 @@ try:
         check("Undo nach fremder Aenderung verweigert", str(e) == app.REFERENCE_UNDO_REFUSED)
 finally:
     app.st = _st_orig_r
+    app.DB_PATH = _db_orig_r
 # Entschaerfung der Editoren: Verhaltenstest unter "Folgepunkte Referenzen"
 import archiv_import as _ai_r
 _s1 = _ai_r.detection_stamp()
@@ -5359,10 +5381,13 @@ check("Erkennungsstand folgt der DB", _ai_r.detection_stamp() != _s1)
 
 print("== Lokale Datenbank: Arbeitsstand ==")
 _st_orig_w = app.st
+_db_orig_w = app.DB_PATH
 class _StW(_StR):
     pass
 app.st = _StW()
 try:
+    # eigene Temp-DB: die Aktionen dieses Abschnitts schreiben den Arbeitsstand
+    app.DB_PATH = _temp_db()
     app._arbeitsstand_laden()
     _basis = app.st.session_state["_ws_momentaufnahme"]
     check("Momentaufnahme vorhanden", set(app.WORKSPACE_KEYS) <= set(_basis))
@@ -5386,6 +5411,8 @@ try:
     app._add_manual_notams()
     _m = _db_stand()["manual_notams"]
     check("Regel: _add_manual_notams schreibt in die DB", any("A1111/26" in n["text"] for n in _m))
+    check("  ... und leert nach dem Speichern das Eingabefeld", app.st.session_state["manual_input"] == "",
+          app.st.session_state["manual_input"])
     app._arbeitsstand_laden()
     _id = [n["id"] for n in app.st.session_state["manual_notams"] if "A1111/26" in n["text"]][0]
     app._remove_manual(_id)
@@ -5409,8 +5436,39 @@ try:
     check("Konflikt gemeldet", app.st.session_state.get("db_meldung", ("", ""))[1] == _ndb.KONFLIKT_TEXT)
     check("Konflikt: nichts geschrieben", "rk9" not in _db_stand()["confirmed_launches"])
     check("session_state danach = DB", app.st.session_state["hidden_events"] == _db_stand()["hidden_events"])
+    check("  ... auch confirmed_launches = DB (die verworfene Bestaetigung ist weg)",
+          app.st.session_state["confirmed_launches"] == _db_stand()["confirmed_launches"]
+          and "rk9" not in app.st.session_state["confirmed_launches"],
+          (app.st.session_state["confirmed_launches"], _db_stand()["confirmed_launches"]))
+    # Speichern schlaegt fehl -> Eingabetext bleibt im Feld, keine neuen NOTAMs in der DB
+    _orig_su_w = _ndb.schreibe_unterschiede
+    for _name_w, _exc_w, _art_w in [
+        ("DbFehler", _ndb.DbFehler("io", "Disk full"), "error"),
+        ("Konflikt", _ndb.Konflikt("changed", _ndb.KONFLIKT_TEXT), "warning"),
+    ]:
+        app._arbeitsstand_laden()
+        app.st.session_state.pop("db_meldung", None)
+        _vor_w = _db_stand()["manual_notams"]
+        _text_w = "A2222/26 NOTAMN\nQ) ZJSA/QRTCA/IV/BO/W/000/999\nE) FEHLER"
+        app.st.session_state["manual_input"] = _text_w
+
+        def _wirf_w(*a, _e=_exc_w, **k):
+            raise _e
+
+        _ndb.schreibe_unterschiede = _wirf_w
+        try:
+            app._add_manual_notams()
+        finally:
+            _ndb.schreibe_unterschiede = _orig_su_w
+        check("_add_manual_notams bei {}: Eingabetext bleibt, Meldung, nichts in der DB".format(_name_w),
+              app.st.session_state.get("manual_input") == _text_w
+              and app.st.session_state.get("db_meldung", ("", ""))[0] == _art_w
+              and _db_stand()["manual_notams"] == _vor_w
+              and not any("A2222/26" in n["text"] for n in app.st.session_state["manual_notams"]),
+              (app.st.session_state.get("manual_input"), app.st.session_state.get("db_meldung")))
 finally:
     app.st = _st_orig_w
+    app.DB_PATH = _db_orig_w
 import inspect as _ins_w
 _main_q = _ins_w.getsource(app.main)
 check("kein workspace_loaded-Schalter mehr", "workspace_loaded" not in _main_q and "_arbeitsstand_laden()" in _main_q)
@@ -5418,7 +5476,10 @@ check("kein workspace_loaded-Schalter mehr", "workspace_loaded" not in _main_q a
 print("== Lokale Datenbank: Archiv und Seestarts ==")
 import pandas as _pd_a
 _st_orig_a = app.st; app.st = _StR()
+_db_orig_a = app.DB_PATH
 try:
+    # eigene Kopie: Archivzeilen und Loeschschluessel bleiben im Abschnitt
+    app.DB_PATH = _kopie_der_test_db()
     _a0 = app.archiv_lesen()
     check("Archiv aus DB mit Stand", "nola_stand" in _a0.attrs)
     _zeile = {s: "" for s in app.ARCHIVE_COLUMNS}
@@ -5463,6 +5524,7 @@ try:
     check("Seestarts aus DB, Text-Spalten", all(_s0[c].map(lambda v: isinstance(v, str)).all() for c in _s0.columns))
 finally:
     app.st = _st_orig_a
+    app.DB_PATH = _db_orig_a
 check("app.py schreibt keine Archiv-CSV mehr",
       "persist_archive(ARCHIVE_CSV" not in open(app.__file__, encoding="utf-8").read()
       and "persist_sea_launches(SEA_LAUNCH_CSV" not in open(app.__file__, encoding="utf-8").read())
@@ -6411,6 +6473,79 @@ try:
           and "NEU-1" in set(app.referenz_lesen("traegersysteme")["Abkürzung"]), (_zeile_f.to_dict("records"), _db_alt_f, _nan_f))
 finally:
     (app.st, app.DB_PATH, _db_s.ersetze_tabelle, app.referenz_lesen) = _orig_f
+
+print("== Lokale Datenbank: Arbeitsstand je Sitzung in der Cloud (nola-dfi) ==")
+_orig_c = (app.st, app.DB_PATH, app.is_public_deployment)
+
+
+def _ws_tabellen_c():
+    """Roher Inhalt der drei Arbeitsstand-Tabellen der Temp-DB."""
+    return tuple(_sql_lesen_f("SELECT * FROM {} ORDER BY 1, 2".format(t))
+                 for t in ("entscheidungen", "zuweisungen", "manuelle_notams"))
+
+
+try:
+    app.DB_PATH = _temp_db()
+    # ein lokaler Eintrag in der DB, der in der Cloud-Sitzung nicht auftauchen darf
+    _sql_f("INSERT INTO entscheidungen (schluessel, art, geaendert_utc) VALUES (?, ?, ?)",
+           "db-lokal", "bestaetigt", "x")
+    _vorher_c = _ws_tabellen_c()
+    app.is_public_deployment = lambda *a, **k: True
+    _a_c, _b_c = _StR(), _StR()
+    app.st = _a_c
+    app._arbeitsstand_laden()
+    check("Cloud: erster Durchlauf einer Sitzung startet leer, nicht aus der DB",
+          all(_a_c.session_state[k] == _ndb.leerer_arbeitsstand()[k] for k in app.WORKSPACE_KEYS),
+          {k: _a_c.session_state[k] for k in app.WORKSPACE_KEYS})
+    app._confirm_launch("ck1")
+    app._arbeitsstand_laden()
+    check("Cloud: Bestaetigung in Sitzung A bleibt ueber Durchlaeufe erhalten",
+          "ck1" in _a_c.session_state["confirmed_launches"], _a_c.session_state["confirmed_launches"])
+    app.st = _b_c
+    app._arbeitsstand_laden()
+    check("Cloud: Bestaetigung aus Sitzung A ist in Sitzung B nicht sichtbar",
+          _b_c.session_state["confirmed_launches"] == set(), _b_c.session_state["confirmed_launches"])
+    app.st = _a_c
+    _a_c.session_state["manual_input"] = "A3331/26 NOTAMN\nE) EINS\n\nA3332/26 NOTAMN\nE) ZWEI"
+    app._add_manual_notams()
+    app._arbeitsstand_laden()
+    _ids_c = [n.get("id") for n in _a_c.session_state["manual_notams"]]
+    check("Cloud: manuelle NOTAMs bekommen je Sitzung eindeutige ids, Feld geleert",
+          len(_ids_c) == 2 and None not in _ids_c and len(set(_ids_c)) == 2
+          and _a_c.session_state["manual_input"] == "", (_ids_c, _a_c.session_state["manual_input"]))
+    app._remove_manual(_ids_c[0])
+    app._arbeitsstand_laden()
+    check("Cloud: _remove_manual(id) entfernt genau diesen Eintrag",
+          [n["id"] for n in _a_c.session_state["manual_notams"]] == [_ids_c[1]],
+          _a_c.session_state["manual_notams"])
+    _a_c.session_state["vehicle_assignments"]["ek1"] = "CZ-2D"
+    _a_c.session_state["archiv_removed"].add("ak1")
+    _grund_c = app._persist_workspace()
+    app._arbeitsstand_laden()
+    check("Cloud: _persist_workspace meldet Erfolg (None), Zuweisung und Loeschschluessel in der Sitzung",
+          _grund_c is None and _a_c.session_state["vehicle_assignments"] == {"ek1": "CZ-2D"}
+          and "ak1" in _a_c.session_state["archiv_removed"], (_grund_c, _a_c.session_state))
+    app.st = _b_c
+    app._arbeitsstand_laden()
+    check("Cloud: Sitzung B sieht weder NOTAMs, Zuweisung noch Loeschschluessel aus A",
+          _b_c.session_state["manual_notams"] == [] and _b_c.session_state["vehicle_assignments"] == {}
+          and _b_c.session_state["archiv_removed"] == set(), _b_c.session_state)
+    check("Cloud: die DB-Tabellen des Arbeitsstands bleiben unveraendert",
+          _ws_tabellen_c() == _vorher_c, (_ws_tabellen_c(), _vorher_c))
+    # lokal (False): wie bisher aus der DB und in die DB
+    app.is_public_deployment = lambda *a, **k: False
+    _l_c = _StR()
+    app.st = _l_c
+    app._arbeitsstand_laden()
+    check("lokal: Arbeitsstand kommt aus der DB", _l_c.session_state["confirmed_launches"] == {"db-lokal"},
+          _l_c.session_state["confirmed_launches"])
+    app._confirm_launch("lk1")
+    with app._db() as _c:
+        _lk_c = _ndb.lade_arbeitsstand(_c)["confirmed_launches"]
+    check("lokal: Bestaetigung landet in der DB, keine Cloud-Ablage in der Sitzung",
+          _lk_c == {"db-lokal", "lk1"} and "_cloud_arbeitsstand" not in _l_c.session_state, _lk_c)
+finally:
+    (app.st, app.DB_PATH, app.is_public_deployment) = _orig_c
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

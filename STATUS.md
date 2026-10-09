@@ -121,8 +121,10 @@ Streamlit-Server unter `NOLA_TEST=1` nur in Temp-Ordnern.
   ohne Vergleich mit dem gelesenen Stand (nur lokal).
 - **Wartezeit unter fremder Sperre**: Hält ein anderes Programm die Datei gesperrt, wartet
   jeder Durchlauf bis zu 5 s.
-- **Cloud: geteilter Arbeitsstand**: In der öffentlichen Fassung teilen sich alle Besucher
-  eine `nola.db`.
+- **Cloud: Arbeitsstand je Sitzung**: In der öffentlichen Fassung gilt der Arbeitsstand je
+  Browser-Sitzung und ist flüchtig (`_cloud_arbeitsstand`); Referenzen, Archiv und Seestarts
+  teilen sich alle Besucher in einer `nola.db`. Eine entfernte Archiv-/Seestartzeile kann in
+  einer anderen Sitzung wiederkommen (Löschschlüssel nur in der entfernenden Sitzung).
 - **Fehlender Sicherungsordner**: Fehlt der iCloud-Ordner, steht „Daily backup failed: Backup
   folder … is missing.“ bei jedem Durchlauf in der Seitenleiste (gewollt laut „keine stillen
   Fehler“, aber dauerhaft sichtbar).

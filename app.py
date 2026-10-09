@@ -5665,16 +5665,36 @@ WORKSPACE_KEYS: Tuple[str, ...] = ("manual_notams",) + tuple(
 ) + tuple(nola_db.ZUWEISUNGS_SCHLUESSEL)
 
 
+CLOUD_ARBEITSSTAND = "_cloud_arbeitsstand"
+
+
+def _cloud_arbeitsstand() -> Dict[str, Any]:
+    """
+    Arbeitsstand der Browser-Sitzung in der oeffentlichen Fassung: beim ersten
+    Durchlauf leer, danach ueber die Durchlaeufe der Sitzung erhalten, nie in
+    der Datenbank. Referenzen und Archiv bleiben gemeinsam.
+    """
+    if CLOUD_ARBEITSSTAND not in st.session_state:
+        st.session_state[CLOUD_ARBEITSSTAND] = nola_db.leerer_arbeitsstand()
+        # ids der manuellen NOTAMs je Sitzung - _remove_manual braucht stabile ids
+        st.session_state["_cloud_naechste_id"] = 1
+    return st.session_state[CLOUD_ARBEITSSTAND]
+
+
 def _arbeitsstand_laden() -> None:
     """
     Fuellt den Arbeitsstand im session_state aus der Datenbank - in jedem
     Durchlauf, damit Aenderungen anderer Tabs und externer Werkzeuge beim
     naechsten Klick sichtbar sind. Die Momentaufnahme ist der Stand, den der
     Benutzer gerade sieht; _persist_workspace schreibt nur Abweichungen davon.
+    In der oeffentlichen Fassung kommt der Stand aus der Sitzung, nicht aus der DB.
     """
-    with _db() as conn:
-        stand = nola_db.lade_arbeitsstand(conn)
-    stand["archiv_removed"] = migrate_archive_keys(stand["archiv_removed"])
+    if is_public_deployment():
+        stand = copy.deepcopy(_cloud_arbeitsstand())
+    else:
+        with _db() as conn:
+            stand = nola_db.lade_arbeitsstand(conn)
+        stand["archiv_removed"] = migrate_archive_keys(stand["archiv_removed"])
     for k in WORKSPACE_KEYS:
         st.session_state[k] = copy.deepcopy(stand[k])
     st.session_state["_ws_momentaufnahme"] = copy.deepcopy(stand)
@@ -5691,6 +5711,17 @@ def _persist_workspace() -> Optional[str]:
     grund = None
     vorher = st.session_state.get("_ws_momentaufnahme") or nola_db.leerer_arbeitsstand()
     aktuell = {k: st.session_state.get(k, vorher.get(k)) for k in WORKSPACE_KEYS}
+    if is_public_deployment():
+        # Sitzungsstand: kein Konflikt moeglich, neue NOTAMs bekommen eine Sitzungs-id
+        _cloud_arbeitsstand()
+        neu = copy.deepcopy(aktuell)
+        for notam in neu["manual_notams"]:
+            if notam.get("id") is None:
+                notam["id"] = st.session_state["_cloud_naechste_id"]
+                st.session_state["_cloud_naechste_id"] += 1
+        st.session_state[CLOUD_ARBEITSSTAND] = neu
+        _arbeitsstand_laden()
+        return None
     try:
         with _db() as conn:
             nola_db.schreibe_unterschiede(
@@ -5717,9 +5748,12 @@ def _add_manual_notams() -> None:
     stamp = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%MZ")
     for chunk in chunks:
         st.session_state["manual_notams"].append({"text": chunk, "added": stamp})
+    if _persist_workspace() is not None:
+        # Nicht gespeichert: Text bleibt im Feld, die Meldung kommt aus _persist_workspace
+        st.session_state["manual_feedback"] = None
+        return
     st.session_state["manual_feedback"] = len(chunks)
     st.session_state["manual_input"] = ""
-    _persist_workspace()
 
 
 def _remove_manual(notam_id: int) -> None:
