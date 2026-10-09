@@ -5813,6 +5813,243 @@ if _launch.exists():
 else:
     print("  SKIP  launch.json (nicht vorhanden)")
 
+print("== Lokale Datenbank: Start und Sicherheit, Verhalten (Fix-Runde 1) ==")
+import types as _types_s, tempfile as _tf_s, shutil as _sh_s, re as _re_s
+import nola_db as _db_s
+import nola_umzug as _um_s
+
+
+class _Halt_s(Exception):
+    """Ersatz fuer st.stop/st.rerun: beendet den Ablauf im Test."""
+
+
+_aufr_s = []
+_klick_s = set()
+
+
+def _fake_st_s():
+    ns = _types_s.SimpleNamespace(session_state={})
+    for _n in ("error", "info", "warning", "success", "set_page_config", "caption", "markdown"):
+        setattr(ns, _n, lambda *a, _n=_n, **k: _aufr_s.append((_n, " ".join(map(str, a)))))
+
+    def _stop():
+        _aufr_s.append(("stop", ""))
+        raise _Halt_s("stop")
+
+    def _rerun():
+        _aufr_s.append(("rerun", ""))
+        raise _Halt_s("rerun")
+
+    def _radio(label, optionen, index=0, format_func=str, **k):
+        _aufr_s.append(("radio", [format_func(o) for o in optionen]))
+        return optionen[index]
+
+    def _button(label, *a, **k):
+        _aufr_s.append(("button", label))
+        return label in _klick_s
+
+    ns.stop, ns.rerun, ns.radio, ns.button = _stop, _rerun, _radio, _button
+    ns.columns = lambda n, **k: [_types_s.SimpleNamespace(button=_button)
+                                 for _ in range(n if isinstance(n, int) else len(n))]
+    return ns
+
+
+class _Cache_s:
+    """Wie st.cache_resource: ein Ergebnis bis clear(); zaehlt die Leerungen."""
+
+    def __init__(self, f):
+        self.f, self.memo, self.clears = f, None, 0
+
+    def __call__(self):
+        if self.memo is None:
+            self.memo = self.f()
+        return self.memo
+
+    def clear(self):
+        self.clears += 1
+        self.memo = None
+
+
+def _arten_s():
+    return [a for a, _ in _aufr_s]
+
+
+def _lauf_s(f, *a):
+    """Ruft f auf; liefert (Ergebnis, Ausnahme)."""
+    try:
+        return f(*a), None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+_orig_s = (app.st, app.DB_PATH, app.BACKUP_DIR, app.local_admin_allowed, app._datenbank_bereit,
+           os.environ.get("NOLA_DB"), _um_s.stelle_bereit, _um_s.altdateien_im, _um_s.exportieren,
+           _db_s.sichere, getattr(app, "_tages_sicherung_fehler", None))
+_bereit_roh_s = app._datenbank_bereit.__wrapped__
+_tmp_s = Path(_tf_s.mkdtemp())
+try:
+    app.st = _fake_st_s()
+    # --- Uebergangssperre ---
+    os.environ.pop("NOLA_DB", None)
+    app.DB_PATH = _tmp_s / "sperre" / "nola.db"
+    app.DB_PATH.parent.mkdir()
+    app.BACKUP_DIR = _tmp_s / "sich_leer"
+    app.BACKUP_DIR.mkdir()
+    _z_s, _e_s = _lauf_s(_bereit_roh_s)
+    check("Verhalten Sperre: ohne NOLA_DB fehlgeschlagen 'not enabled', keine Datei",
+          _e_s is None and _z_s[0].art == "fehlgeschlagen" and "not enabled" in _z_s[0].grund
+          and not app.DB_PATH.exists() and not list(app.DB_PATH.parent.iterdir()), (_z_s, _e_s))
+    # --- mit NOLA_DB=1 und Altdateien aus einem Temp-Ordner: Umzug ---
+    os.environ["NOLA_DB"] = "1"
+    _alt_ordner_s = _tmp_s / "alt"
+    _alt_ordner_s.mkdir()
+    for _p in (app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV):
+        _sh_s.copy(_p, _alt_ordner_s / _p.name)
+    _altdateien_orig_s = _orig_s[7]
+    _um_s.altdateien_im = lambda d: _altdateien_orig_s(_alt_ordner_s)
+    _z_s, _e_s = _lauf_s(_bereit_roh_s)
+    check("Verhalten Sperre: mit NOLA_DB=1 umgezogen, Datei da, Startsicherung im Temp-Ordner",
+          _e_s is None and _z_s[0].art == "umgezogen" and _z_s[1] == "" and app.DB_PATH.exists()
+          and len(_db_s.liste_sicherungen(app.BACKUP_DIR)) == 1, (_z_s, _e_s))
+    _um_s.altdateien_im = _altdateien_orig_s
+
+    # --- DateiFehlt: keine leere Datenbank ---
+    app.DB_PATH = _tmp_s / "fehlt" / "nola.db"
+    app.DB_PATH.parent.mkdir()
+
+    def _db_leer_s():
+        with app._db():
+            pass
+
+    _, _e1_s = _lauf_s(_db_leer_s)
+    _, _e2_s = _lauf_s(app._arbeitsstand_laden)
+    check("Verhalten DateiFehlt: _db und _arbeitsstand_laden werfen DateiFehlt, keine Datei",
+          isinstance(_e1_s, _db_s.DateiFehlt) and isinstance(_e2_s, _db_s.DateiFehlt)
+          and not list(app.DB_PATH.parent.iterdir()), (_e1_s, _e2_s))
+
+    # --- Gate Wiederherstellen ---
+    app._datenbank_bereit = _Cache_s(_bereit_roh_s)
+    app.local_admin_allowed = lambda: False
+    _aufr_s.clear()
+    _, _e_s = _lauf_s(app._wiederherstellen_auswahl)
+    check("Verhalten Wiederherstellen ohne Freigabe: error + stop, kein radio/button",
+          isinstance(_e_s, _Halt_s) and "error" in _arten_s() and _arten_s()[-1] == "stop"
+          and "radio" not in _arten_s() and "button" not in _arten_s(), _aufr_s)
+    app.local_admin_allowed = lambda: True
+    app.BACKUP_DIR = _tmp_s / "sich_eine"
+    app.BACKUP_DIR.mkdir()
+    _quelle_s = _temp_db()
+    with app._db(_quelle_s) as _c_s:
+        _db_s.sichere(_c_s, app.BACKUP_DIR, datetime(2026, 10, 1, 12, 0))
+    _aufr_s.clear()
+    _, _e_s = _lauf_s(app._wiederherstellen_auswahl)
+    _radio_s = [w for a, w in _aufr_s if a == "radio"]
+    _knoepfe_s = [w for a, w in _aufr_s if a == "button"]
+    check("Verhalten Wiederherstellen mit Freigabe: Radio mit der Sicherung und beide Knoepfe",
+          isinstance(_e_s, _Halt_s) and len(_radio_s) == 1 and len(_radio_s[0]) == 1
+          and "archive rows" in _radio_s[0][0]
+          and _knoepfe_s == ["Restore backup", "Rebuild from old files"], _aufr_s)
+    # nola.db ist inzwischen (von Hand) wieder da -> neu entscheiden
+    _sh_s.copy(_quelle_s, app.DB_PATH)
+    app._datenbank_bereit.clears = 0
+    _aufr_s.clear()
+    _, _e_s = _lauf_s(app._wiederherstellen_auswahl)
+    check("Fix F3: Wiederherstellen bei wieder vorhandener nola.db -> Cache geleert + rerun",
+          isinstance(_e_s, _Halt_s) and _arten_s()[-1:] == ["rerun"] and app._datenbank_bereit.clears == 1
+          and "radio" not in _arten_s() and "button" not in _arten_s(), (_aufr_s, app._datenbank_bereit.clears))
+
+    # --- F3: fehlgeschlagen bleibt nicht im Cache haengen ---
+    app.DB_PATH = _tmp_s / "f3" / "nola.db"
+    app.DB_PATH.parent.mkdir()
+    _zaehl_s = []
+
+    def _stelle_bereit_s(*a, **k):
+        _zaehl_s.append(1)
+        return _um_s.Startzustand("fehlgeschlagen", grund="voruebergehend (Test)")
+
+    _um_s.stelle_bereit = _stelle_bereit_s
+    app._datenbank_bereit = _Cache_s(_bereit_roh_s)
+    _aufr_s.clear()
+    _, _e1_s = _lauf_s(app.main)
+    _, _e2_s = _lauf_s(app.main)
+    check("Fix F3: fehlgeschlagen -> Cache geleert, zweiter Durchlauf entscheidet neu",
+          isinstance(_e1_s, _Halt_s) and isinstance(_e2_s, _Halt_s) and len(_zaehl_s) == 2
+          and ("error", "voruebergehend (Test)") in _aufr_s and not app.DB_PATH.exists(),
+          (_zaehl_s, _aufr_s, _e1_s, _e2_s))
+    _um_s.stelle_bereit = _orig_s[6]
+
+    # --- Gate Export und F4 ---
+    app.DB_PATH = _quelle_s
+    app.local_admin_allowed = lambda: False
+    _klick_s.add("Export to files")
+    _aufr_s.clear()
+    _, _e_s = _lauf_s(app._export_knopf)
+    check("Verhalten Export ohne Freigabe: kein Knopf", _e_s is None and not _aufr_s, _aufr_s)
+    app.local_admin_allowed = lambda: True
+    _ziele_s = []
+    _um_s.exportieren = lambda db, ziel: _ziele_s.append(Path(ziel)) or Path(ziel)
+    _aufr_s.clear()
+    _, _e_s = _lauf_s(app._export_knopf)
+    check("Fix F4: Exportordner mit Sekunden (JJJJ-MM-TT-HHMMSS) unter export/",
+          _e_s is None and len(_ziele_s) == 1 and _ziele_s[0].parent.name == "export"
+          and _re_s.fullmatch(r"\d{4}-\d{2}-\d{2}-\d{6}", _ziele_s[0].name) is not None
+          and any(a == "success" for a, _ in _aufr_s), (_ziele_s, _aufr_s, _e_s))
+
+    def _export_kaputt_s(db, ziel):
+        raise KeyError("startarchiv")
+
+    _um_s.exportieren = _export_kaputt_s
+    _aufr_s.clear()
+    _, _e_s = _lauf_s(app._export_knopf)
+    check("Fix F4: unerwartete Ausnahme im Export -> 'Export failed', keine Ausnahme",
+          _e_s is None and any(a == "error" and w.startswith("Export failed") for a, w in _aufr_s),
+          (_aufr_s, _e_s))
+    _klick_s.clear()
+    _um_s.exportieren = _orig_s[8]
+
+    # --- Taegliche Sicherung ---
+    app._tages_sicherung_fehler = None
+    app.BACKUP_DIR = _tmp_s / "sich_fehlt"
+    _w1_s, _e1_s = _lauf_s(app._taegliche_sicherung)
+    _w2_s, _e2_s = _lauf_s(app._taegliche_sicherung)
+    check("Verhalten Tagessicherung: fehlender Ordner -> Warnung (bei jedem Durchlauf)",
+          _e1_s is None and _e2_s is None and "missing" in (_w1_s or "") and "missing" in (_w2_s or ""),
+          (_w1_s, _w2_s, _e1_s))
+    app.BACKUP_DIR.mkdir()
+    _w1_s, _e1_s = _lauf_s(app._taegliche_sicherung)
+    _n1_s = len(_db_s.liste_sicherungen(app.BACKUP_DIR))
+    _w2_s, _e2_s = _lauf_s(app._taegliche_sicherung)
+    _n2_s = len(_db_s.liste_sicherungen(app.BACKUP_DIR))
+    check("Verhalten Tagessicherung: Ordner da -> genau eine Sicherung, zweiter Aufruf keine weitere",
+          _e1_s is None and _e2_s is None and _w1_s is None and _w2_s is None and _n1_s == 1 and _n2_s == 1,
+          (_w1_s, _w2_s, _n1_s, _n2_s, _e1_s))
+    # F2: Fehlschlag (nicht 'Ordner fehlt') wird je Tag gemerkt
+    app._tages_sicherung_fehler = None
+    app.BACKUP_DIR = _tmp_s / "sich_f2"
+    app.BACKUP_DIR.mkdir()
+    _sichere_zaehl_s = []
+
+    def _sichere_kaputt_s(*a, **k):
+        _sichere_zaehl_s.append(1)
+        raise _db_s.DbFehler("disk", "disk full (test)")
+
+    _db_s.sichere = _sichere_kaputt_s
+    _w1_s, _e1_s = _lauf_s(app._taegliche_sicherung)
+    _w2_s, _e2_s = _lauf_s(app._taegliche_sicherung)
+    check("Fix F2: fehlgeschlagene Tagessicherung nur einmal je Tag versucht, Warnung beide Male",
+          _e1_s is None and _e2_s is None and len(_sichere_zaehl_s) == 1
+          and "disk full (test)" in (_w1_s or "") and "disk full (test)" in (_w2_s or ""),
+          (_sichere_zaehl_s, _w1_s, _w2_s, _e1_s, _e2_s))
+finally:
+    (app.st, app.DB_PATH, app.BACKUP_DIR, app.local_admin_allowed, app._datenbank_bereit,
+     _nola_db_env_s, _um_s.stelle_bereit, _um_s.altdateien_im, _um_s.exportieren,
+     _db_s.sichere, app._tages_sicherung_fehler) = _orig_s
+    if _nola_db_env_s is None:
+        os.environ.pop("NOLA_DB", None)
+    else:
+        os.environ["NOLA_DB"] = _nola_db_env_s
+    _sh_s.rmtree(_tmp_s, ignore_errors=True)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

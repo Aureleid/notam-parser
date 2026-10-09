@@ -30,7 +30,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
@@ -7303,21 +7303,39 @@ def _datenbank_bereit() -> Tuple["nola_umzug.Startzustand", str]:
     return zustand, warnung
 
 
+# Fehlgeschlagene Tagessicherung (Datum, Warnung): an diesem Tag nicht bei jedem Durchlauf neu versuchen.
+_tages_sicherung_fehler: Optional[Tuple[date, str]] = None
+
+
 def _taegliche_sicherung() -> Optional[str]:
     """Beim ersten Durchlauf eines neuen Tages eine Sicherung; Fehler als Warnung zurueck."""
-    if is_public_deployment() or not nola_db.sicherung_faellig(BACKUP_DIR, datetime.now().date()):
+    global _tages_sicherung_fehler
+    heute = datetime.now().date()
+    if is_public_deployment():
+        return None
+    if _tages_sicherung_fehler is not None and _tages_sicherung_fehler[0] == heute:
+        return _tages_sicherung_fehler[1]
+    if not nola_db.sicherung_faellig(BACKUP_DIR, heute):
         return None
     try:
         with _db() as conn:
             nola_db.sichere(conn, BACKUP_DIR, datetime.now())
     except nola_db.DbFehler as exc:
-        return "Daily backup failed: {}".format(exc)
+        warnung = "Daily backup failed: {}".format(exc)
+        if exc.ursache != "backup folder missing":
+            # fehlender Ordner ist billig zu pruefen - nur teure Fehlschlaege je Tag merken
+            _tages_sicherung_fehler = (heute, warnung)
+        return warnung
     return None
 
 
 def _wiederherstellen_auswahl() -> None:
     """nola.db fehlt, Sicherungen gibt es: nichts still neu aufbauen - der Benutzer waehlt."""
     import nola_umzug
+    if DB_PATH.exists():
+        # inzwischen (z. B. von Hand) wieder da - neu entscheiden statt Auswahl zeigen
+        _datenbank_bereit.clear()
+        st.rerun()
     st.error("The database nola.db is missing. NOLA does not rebuild it silently.")
     if not local_admin_allowed():
         st.info("Restore is only possible on the local machine (http://localhost:8501).")
@@ -7367,12 +7385,12 @@ def _export_knopf() -> None:
     if not local_admin_allowed():
         return
     if st.button("Export to files", use_container_width=True,
-                 help="Writes all tables in the old CSV/JSON formats to export/<time>/."):
+                 help="Writes all tables in the old CSV/JSON formats to export/<date-time>/."):
         import nola_umzug
-        ziel = APP_DIR / "export" / datetime.now().strftime("%Y-%m-%d-%H%M")
+        ziel = APP_DIR / "export" / datetime.now().strftime("%Y-%m-%d-%H%M%S")
         try:
             nola_umzug.exportieren(DB_PATH, ziel)
-        except (nola_db.DbFehler, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - jede Ausnahme als Meldung, Dialog bleibt bedienbar
             st.error("Export failed: {}".format(exc))
         else:
             st.success("Exported to {}".format(ziel))
@@ -7389,6 +7407,8 @@ def main() -> None:
     zustand, start_warnung = _datenbank_bereit()
     if zustand.art == "fehlgeschlagen":
         st.error(zustand.grund)
+        # nicht bis zum Serverneustart festhalten - naechster Durchlauf entscheidet neu
+        _datenbank_bereit.clear()
         st.stop()
     if zustand.art == "fehlt_mit_sicherungen":
         _wiederherstellen_auswahl()
