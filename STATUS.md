@@ -1,6 +1,6 @@
 # Projektstand — NOLA
 
-Stand: 09.10.2026 · `app.py` 8388 Zeilen · 1646 Tests in beiden Läufen (`test_app.py` 1432, `test_nola_db.py` 214), alle grün
+Stand: 09.10.2026 · `app.py` 8388 Zeilen · 1650 Tests in beiden Läufen (`test_app.py` 1436, `test_nola_db.py` 214), alle grün
 
 ## Starten
 

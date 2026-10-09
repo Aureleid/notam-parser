@@ -5777,6 +5777,33 @@ try:
           and not app.st.session_state.get("ref_undo")
           and _sk_f not in app.st.session_state.get("seestarts_removed", set())
           and list(app.seestarts_lesen()["NOTAM"]) == ["Z8101/26"])
+
+    # Fix-Runde 2: Zeile weg, aber Schluessel nicht speicherbar -> Dialog sagt es
+    _sdb_orig = _ndb.schreibe_unterschiede
+    for _nm_f, _upd_f, _key_f, _rm_f, _rd_f, _okey_f in [
+            ("Archiv", lambda: app._update_archive([], _grp_f("voll"), _tab_f),
+             _ak_f, app._remove_archive_row, app.archiv_lesen, "archiv_removed"),
+            ("Seestart", lambda: app._update_sea_launches([], _grp_f("voll"), _tab_f, None),
+             _sk_f, app._remove_sea_launch_row, app.seestarts_lesen, "seestarts_removed")]:
+        for _exc_f, _txt_f in [(_ndb.Konflikt("changed", _ndb.KONFLIKT_TEXT), _ndb.KONFLIKT_TEXT),
+                               (_ndb.DbFehler("x", "disk **kaputt**"), "disk **kaputt**")]:
+            app.st = _StR()
+            app.DB_PATH = _temp_db()
+            _upd_f()
+            def _wirf_schluessel(*a, _e=_exc_f, **k):
+                raise _e
+            _ndb.schreibe_unterschiede = _wirf_schluessel
+            try:
+                _rm_f(_key_f)
+            finally:
+                _ndb.schreibe_unterschiede = _sdb_orig
+            _ss_f = app.st.session_state
+            _dlg_f = _ss_f.get("ref_flash_warning", "") + _ss_f.get("ref_flash_error", "")
+            check("Fix-R2 {} entfernen, Schluessel nicht gespeichert ({}) -> Dialog meldet es, kein Erfolgs-Flash, Zeile weg".format(
+                      _nm_f, type(_exc_f).__name__),
+                  "removal could not be saved" in _dlg_f and "may come back" in _dlg_f
+                  and _txt_f in _dlg_f and not _ss_f.get("ref_flash")
+                  and len(_rd_f()) == 0, (_dlg_f, _ss_f.get("ref_flash"), len(_rd_f())))
 finally:
     (app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben,
      app.seestarts_schreiben) = _orig_f

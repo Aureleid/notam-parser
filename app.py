@@ -5678,12 +5678,15 @@ def _arbeitsstand_laden() -> None:
     st.session_state["_ws_momentaufnahme"] = copy.deepcopy(stand)
 
 
-def _persist_workspace() -> None:
+def _persist_workspace() -> Optional[str]:
     """
     Schreibt die Aenderungen am Arbeitsstand seit der Momentaufnahme. Hat
     jemand anderes dieselben Eintraege inzwischen geaendert, wird nichts
     geschrieben und die Ansicht neu geladen.
+
+    Rueckgabe: None bei Erfolg, sonst der Grund, warum nicht gespeichert wurde.
     """
+    grund = None
     vorher = st.session_state.get("_ws_momentaufnahme") or nola_db.leerer_arbeitsstand()
     aktuell = {k: st.session_state.get(k, vorher.get(k)) for k in WORKSPACE_KEYS}
     try:
@@ -5692,14 +5695,17 @@ def _persist_workspace() -> None:
                 conn, vorher, aktuell, datetime.now(timezone.utc).isoformat()
             )
     except nola_db.Konflikt:
-        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        grund = nola_db.KONFLIKT_TEXT
+        _melde_db("warning", grund)
     except nola_db.DbFehler as exc:
+        grund = str(exc)
         _melde_db("error", "Not saved: {}".format(exc))
     # In jedem Fall den echten Stand zeigen (neue NOTAMs bekommen ihre id).
     try:
         _arbeitsstand_laden()
     except nola_db.DbFehler as exc:
         _melde_db("error", str(exc))
+    return grund
 
 
 def _add_manual_notams() -> None:
@@ -6669,6 +6675,15 @@ def _update_sea_launches(
             return
 
 
+def _melde_schluessel_nicht_gespeichert(grund: str, was: str) -> None:
+    """Zeile ist weg, ihr Schluessel nicht gemerkt: im Dialog sagen, dass sie wiederkommen kann."""
+    _melde_db_dialog(
+        "warning",
+        "{} removed, but the removal could not be saved ({}) - it may come back with the next "
+        "import. Please remove it again.".format(was, grund),
+    )
+
+
 def _remove_sea_launch_row(schluessel: str) -> None:
     """Loescht eine Protokollzeile dauerhaft."""
     try:
@@ -6687,7 +6702,10 @@ def _remove_sea_launch_row(schluessel: str) -> None:
         return
     _push_undo("seestarts", bestand, neu_stand, "Sea launch row removed")
     st.session_state.setdefault("seestarts_removed", set()).add(schluessel)
-    _persist_workspace()
+    grund = _persist_workspace()
+    if grund:
+        _melde_schluessel_nicht_gespeichert(grund, "Sea launch row")
+        return
     st.session_state["ref_flash"] = "Sea launch row removed"
 
 
@@ -6765,7 +6783,10 @@ def _remove_archive_row(schluessel: str) -> None:
     # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
     _push_undo("startarchiv", bestand, neu_stand, "Archivzeile entfernt")
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
-    _persist_workspace()
+    grund = _persist_workspace()
+    if grund:
+        _melde_schluessel_nicht_gespeichert(grund, "Archive row")
+        return
     st.session_state["ref_flash"] = "Archivzeile entfernt"
 
 
