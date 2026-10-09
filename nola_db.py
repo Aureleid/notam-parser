@@ -56,6 +56,17 @@ FACHTABELLEN: Dict[str, Tuple[str, ...]] = {
 }
 
 
+#: Tabellen des Arbeitsstands (Entscheidungen, Zuweisungen, eingefuegte NOTAMs).
+ARBEITSTABELLEN: Tuple[str, ...] = ("manuelle_notams", "entscheidungen", "zuweisungen")
+#: Tabellen des Archiv-Imports.
+IMPORTTABELLEN: Tuple[str, ...] = (
+    "archiv_korpus", "archiv_import_tage", "archiv_import_entscheidungen", "archiv_import_review",
+)
+#: Alle Tabellen, die _schema_sql anlegt - einzige Liste fuer zaehle und pruefe_sicherung.
+#: test_nola_db prueft, dass sie genau den Tabellen der angelegten Datei entspricht.
+ALLE_TABELLEN: Tuple[str, ...] = ("meta",) + tuple(FACHTABELLEN) + ARBEITSTABELLEN + IMPORTTABELLEN
+
+
 class DbFehler(Exception):
     """Lese- oder Schreibfehler. `ursache` ist eine kurze Kennung fuer die Meldung."""
 
@@ -80,18 +91,48 @@ class SchemaZuNeu(DbFehler):
     """Die Datei stammt von einer neueren NOLA-Fassung."""
 
 
+#: Primaere SQLite-Fehlercodes (sqlite3.h) - ab Python 3.11 als exc.sqlite_errorcode.
+_CODE_ART = {5: "locked", 6: "locked", 8: "read-only", 11: "database corrupt", 13: "disk full",
+             19: "constraint failed", 26: "database corrupt"}
+#: Feste Meldungstexte von SQLite je Art. Python 3.9 kennt keinen Fehlercode - dann
+#: zaehlt die Ausnahmeklasse, und nur innerhalb der Klasse diese ganzen Wendungen
+#: (nicht einzelne Woerter: "no such column: full_name" ist kein voller Datentraeger).
+_TEXT_ART = (
+    ("locked", ("database is locked", "database table is locked", "database schema is locked",
+                "database is busy")),
+    ("disk full", ("database or disk is full",)),
+    ("read-only", ("readonly database", "read-only database")),
+    ("database corrupt", ("database disk image is malformed", "file is not a database")),
+)
+
+
+def _art(exc: sqlite3.Error) -> str:
+    """Fehlerart: Code (falls vorhanden), sonst Klasse, Text nur innerhalb der Klasse."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and (code & 0xFF) in _CODE_ART:
+        return _CODE_ART[code & 0xFF]
+    if isinstance(exc, sqlite3.IntegrityError):
+        return "constraint failed"
+    if isinstance(exc, sqlite3.DatabaseError):  # OperationalError ist eine Unterklasse
+        klein = str(exc).lower()
+        for art, wendungen in _TEXT_ART:
+            if any(w in klein for w in wendungen):
+                return art
+    return "error"
+
+
 def _uebersetze(exc: sqlite3.Error) -> DbFehler:
     text = str(exc)
-    klein = text.lower()
-    if "locked" in klein or "busy" in klein:
+    art = _art(exc)
+    if art == "locked":
         return Gesperrt("locked", GESPERRT_TEXT)
-    if "full" in klein:
+    if art == "disk full":
         return DbFehler("disk full", "Not saved: the disk is full ({}).".format(text))
-    if "constraint" in klein:
+    if art == "constraint failed":
         return DbFehler("constraint failed", "Not saved: constraint failed: {}".format(text))
-    if "malformed" in klein or "not a database" in klein:
+    if art == "database corrupt":
         return DbFehler("database corrupt", "The database file is corrupt ({}).".format(text))
-    if "readonly" in klein or "read-only" in klein:
+    if art == "read-only":
         return DbFehler("read-only", "Not saved: the database is read-only ({}).".format(text))
     return DbFehler("error", "Database error: {}".format(text))
 
@@ -197,12 +238,17 @@ CREATE TABLE archiv_import_review (
 
 
 def schuetze_echte_orte(*pfade: Path) -> None:
-    """Unter NOLA_TEST: nie die Projektdatenbank oder den echten Sicherungsordner beruehren."""
+    """
+    Unter NOLA_TEST: nie die Projektdatenbank oder den echten Sicherungsordner
+    samt allem darunter beruehren. Pfade werden vorher aufgeloest (Symlinks, ..).
+    """
     if not os.environ.get("NOLA_TEST"):
         return
-    gesperrt = {PROJEKT_DB, ECHTER_SICHERUNGSORDNER.resolve()}
+    echte_db = Path(PROJEKT_DB).resolve()
+    echter_ordner = Path(ECHTER_SICHERUNGSORDNER).resolve()
     for p in pfade:
-        if Path(p).resolve() in gesperrt:
+        aufgeloest = Path(p).resolve()
+        if aufgeloest == echte_db or aufgeloest == echter_ordner or echter_ordner in aufgeloest.parents:
             raise RuntimeError("NOLA_TEST is set: tests must never touch {}".format(p))
 
 
@@ -457,11 +503,7 @@ def ersetze_tabellen(
 
 
 def zaehle(conn: sqlite3.Connection, tabelle: str) -> int:
-    erlaubt = set(FACHTABELLEN) | {
-        "manuelle_notams", "entscheidungen", "zuweisungen", "archiv_korpus",
-        "archiv_import_tage", "archiv_import_entscheidungen", "archiv_import_review",
-    }
-    if tabelle not in erlaubt:
+    if tabelle not in ALLE_TABELLEN:
         raise ValueError("unknown table {}".format(tabelle))
     try:
         return int(conn.execute("SELECT count(*) FROM {}".format(_q(tabelle))).fetchone()[0])
@@ -707,7 +749,10 @@ def speichere_importzustand(conn: sqlite3.Connection, state: Dict[str, Any]) -> 
         raise _uebersetze(exc) from exc
 
 
-_SICHERUNG = re.compile(r"^nola-(\d{4})-(\d{2})-(\d{2})-(\d{4})(-[a-z0-9-]+)?\.db$")
+#: Uhrzeit HHMMSS (seit 10/2026) oder HHMM (aeltere Sicherungen, z. B. nola-2026-10-09-0837.db).
+#: Beide beginnen mit HHMM, darum sortiert der Name auch gemischt richtig: gleiche Minute ->
+#: die Fassung mit Sekunden gilt als neuer (".db" und "-" sortieren vor jeder Ziffer).
+_SICHERUNG = re.compile(r"^nola-(\d{4})-(\d{2})-(\d{2})-(\d{6}|\d{4})(-[a-z0-9-]+)?\.db$")
 
 
 def liste_sicherungen(ordner: Path, nur_regulaer: bool = False) -> List[Path]:
@@ -748,9 +793,13 @@ def sichere(
     """
     ordner = Path(ordner)
     schuetze_echte_orte(ordner)
+    if behalten <= 0:
+        # 0 loeschte nach dem Schreiben alle regulaeren Sicherungen samt der neuen
+        raise ValueError("behalten must be at least 1, got {}".format(behalten))
     if not ordner.is_dir():
         raise DbFehler("backup folder missing", "Backup folder {} is missing.".format(ordner))
-    name = "nola-{}{}.db".format(jetzt.strftime("%Y-%m-%d-%H%M"), "-" + zusatz if zusatz else "")
+    # mit Sekunden: zwei Sicherungen derselben Minute ueberschreiben sich nicht
+    name = "nola-{}{}.db".format(jetzt.strftime("%Y-%m-%d-%H%M%S"), "-" + zusatz if zusatz else "")
     ziel = ordner / name
     tmp = ordner / ".{}.tmp".format(name)
     try:
@@ -818,7 +867,7 @@ def pruefe_sicherung(pfad: Path) -> Tuple[str, Optional[Dict[str, int]]]:
                 return "corrupt", None
             return "ok", {
                 t: int(conn.execute("SELECT count(*) FROM {}".format(_q(t))).fetchone()[0])
-                for t in list(FACHTABELLEN) + ["manuelle_notams", "entscheidungen", "zuweisungen"]
+                for t in tuple(FACHTABELLEN) + ARBEITSTABELLEN
             }
         finally:
             conn.close()

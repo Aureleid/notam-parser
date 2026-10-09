@@ -119,7 +119,10 @@ try:
     db.ersetze_tabelle(_c, "startplaetze", _sp(), None); check("gesperrt erkannt", False)
 except db.Gesperrt as e:
     check("gesperrt erkannt", e.ursache == "locked")
-check("Wartezeit hoechstens 6 s", time.monotonic() - _t0 < 6.5)
+_warte = time.monotonic() - _t0
+# busy_timeout ist 5 s: die Wartezeit belegt, dass wirklich gewartet wurde (>= 4,5 s), und
+# bleibt mit 1,5 s Luft fuer langsame Rechner sicher unter 6,5 s - nicht wackelig.
+check("Wartezeit belegt busy_timeout 5 s (4,5 s bis 6,5 s)", 4.5 <= _warte <= 6.5, round(_warte, 2))
 _zweite.execute("ROLLBACK"); _zweite.close()
 check("Sperre aenderte nichts", db.lese_tabelle(_c, "startplaetze").loc[0, "Name"] == "neu")
 
@@ -308,7 +311,7 @@ except db.DbFehler as e:
     check("fehlender Ordner -> Fehler", e.ursache == "backup folder missing")
 check("ohne Sicherung faellig", db.sicherung_faellig(_ord, _date(2026, 10, 8)))
 _s1 = db.sichere(_c3, _ord, _dt(2026, 10, 8, 9, 0))
-check("Name nach Muster", _s1.name == "nola-2026-10-08-0900.db")
+check("Name nach Muster (mit Sekunden)", _s1.name == "nola-2026-10-08-090000.db", _s1.name)
 check("keine Temp-Datei uebrig", not any(p.name.endswith(".tmp") for p in _ord.iterdir()))
 check("Sicherung geprueft und vollstaendig", db.pruefe_sicherung(_s1)[0] == "ok"
       and db.pruefe_sicherung(_s1)[1]["startplaetze"] == 1)
@@ -323,7 +326,7 @@ _reg = db.liste_sicherungen(_ord, nur_regulaer=True)
 check("30 regulaere bleiben", len(_reg) == 30, len(_reg))
 check("aelteste regulaere entfernt", not _s1.exists())
 check("vor-schema bleibt", _vs.exists())
-check("neueste zuerst", _reg[0].name == "nola-2026-10-08-1030.db", _reg[0].name)
+check("neueste zuerst", _reg[0].name == "nola-2026-10-08-103000.db", _reg[0].name)
 _kaputt = _ord / "nola-2026-10-01-0000.db"; _kaputt.write_bytes(b"kein sqlite")
 check("zerstoerte Sicherung -> corrupt", db.pruefe_sicherung(_kaputt) == ("corrupt", None))
 class _StatAus: st_flags = 0x40000000
@@ -361,7 +364,7 @@ except OSError:
     check("Rotation-Fehler -> DbFehler", False, "roher OSError")
 finally:
     Path.unlink = _unlink_orig
-check("Sicherung trotz Rotation-Fehler vorhanden", (_ord2 / "nola-2026-10-09-0900.db").exists())
+check("Sicherung trotz Rotation-Fehler vorhanden", (_ord2 / "nola-2026-10-09-090000.db").exists())
 
 _stat_orig = os.stat
 _connect_orig = db.sqlite3.connect
@@ -720,7 +723,7 @@ db.SCHRITTE[0] = "SELECT 1"
 try:
     _zs5 = um.stelle_bereit(_sdb5, _alt5, _sord5, _dt2(2026, 10, 8, 9, 0))
     check("F5 Schema-Anhebung -> bereit", _zs5.art == "bereit", _zs5)
-    check("F5  Sicherung vor-schema-1", [p.name for p in _sord5.iterdir() if not p.name.startswith(".")] == ["nola-2026-10-08-0900-vor-schema-1.db"],
+    check("F5  Sicherung vor-schema-1", [p.name for p in _sord5.iterdir() if not p.name.startswith(".")] == ["nola-2026-10-08-090000-vor-schema-1.db"],
           [p.name for p in _sord5.iterdir()])
     _cc = db.verbinde(_sdb5); check("F5  Version danach 1", db.schema_version(_cc) == 1); _cc.close()
     # Sicherungsordner fehlt -> fehlgeschlagen, Version bleibt 0
@@ -972,6 +975,217 @@ check("M1 fremder Schreibvorgang waehrend des Exports kam an",
 _c_m1.close()
 check("M1 Export zeigt den Stand vor dem Schreibvorgang",
       _e is None and "ZZM1" not in set(app._read_csv_any(str(_ex_m1 / app.VEHICLE_CSV.name))["Abkürzung"]), repr(_e))
+
+print("== 18. Folgepunkte Aufgabe 1 ==")
+from datetime import datetime as _dt14, date as _date14
+import errno as _errno14
+
+# --- Fehlerzuordnung: echte SQLite-Fehler je Art ---
+def _fang(aufruf):
+    try:
+        aufruf()
+    except sqlite3.Error as exc:
+        return db._uebersetze(exc)
+    return None
+
+_d14 = Path(tempfile.mkdtemp())
+_k14 = sqlite3.connect(str(_d14 / "k.db"), isolation_level=None)
+_k14.execute('CREATE TABLE t (full_name TEXT UNIQUE, locked_by TEXT NOT NULL, readonly TEXT)')
+_k14.execute("INSERT INTO t VALUES ('a', 'x', 'r')")
+_f = _fang(lambda: _k14.execute("INSERT INTO t VALUES ('a', 'y', 'r')"))
+check("Fehler: UNIQUE auf Spalte full_name -> constraint", _f is not None and _f.ursache == "constraint failed",
+      None if _f is None else (_f.ursache, str(_f)))
+_f = _fang(lambda: _k14.execute("INSERT INTO t (full_name) VALUES ('b')"))
+check("Fehler: NOT NULL auf Spalte locked_by -> constraint, nicht gesperrt",
+      _f is not None and _f.ursache == "constraint failed" and not isinstance(_f, db.Gesperrt),
+      None if _f is None else (_f.ursache, str(_f)))
+_f = _fang(lambda: _k14.execute("SELECT full_name_x FROM t"))
+check("Fehler: unbekannte Spalte mit 'full' -> allgemein, nicht disk full",
+      _f is not None and _f.ursache == "error", None if _f is None else (_f.ursache, str(_f)))
+_f = _fang(lambda: _k14.execute("SELECT readonly_x FROM t"))
+check("Fehler: unbekannte Spalte mit 'readonly' -> allgemein",
+      _f is not None and _f.ursache == "error", None if _f is None else (_f.ursache, str(_f)))
+# Platte voll: Seitenzahl deckeln, dann viel schreiben
+_k14.execute("CREATE TABLE gross (x TEXT)")
+_k14.execute("PRAGMA max_page_count = {}".format(_k14.execute("PRAGMA page_count").fetchone()[0]))
+_f = _fang(lambda: _k14.execute("INSERT INTO gross VALUES (?)", ("x" * 100000,)))
+check("Fehler: Datenbank voll -> disk full", _f is not None and _f.ursache == "disk full",
+      None if _f is None else (_f.ursache, str(_f)))
+_k14.close()
+# nur lesend geoeffnet
+_ro14 = sqlite3.connect("file:{}?mode=ro".format(str(_d14 / "k.db")), uri=True, isolation_level=None)
+_f = _fang(lambda: _ro14.execute("INSERT INTO t VALUES ('z', 'z', 'z')"))
+check("Fehler: schreibgeschuetzt -> read-only", _f is not None and _f.ursache == "read-only",
+      None if _f is None else (_f.ursache, str(_f)))
+_ro14.close()
+# defekte Datei
+(_d14 / "kaputt.db").write_bytes(b"das ist keine sqlite-datei" * 200)
+_kp14 = sqlite3.connect(str(_d14 / "kaputt.db"))
+_f = _fang(lambda: _kp14.execute("SELECT * FROM sqlite_master").fetchall())
+check("Fehler: keine Datenbank -> database corrupt", _f is not None and _f.ursache == "database corrupt",
+      None if _f is None else (_f.ursache, str(_f)))
+_kp14.close()
+# gesperrt (echte zweite Schreibtransaktion, kurze Wartezeit)
+_g1 = sqlite3.connect(str(_d14 / "k.db"), isolation_level=None)
+_g2 = sqlite3.connect(str(_d14 / "k.db"), isolation_level=None, timeout=0.1)
+_g1.execute("BEGIN IMMEDIATE")
+_f = _fang(lambda: _g2.execute("BEGIN IMMEDIATE"))
+check("Fehler: zweite Schreibtransaktion -> Gesperrt", isinstance(_f, db.Gesperrt) and _f.ursache == "locked",
+      None if _f is None else (_f.ursache, str(_f)))
+_g1.execute("ROLLBACK"); _g1.close(); _g2.close()
+# Klasse vor Text: IntegrityError mit irrefuehrendem Text bleibt constraint
+_f = db._uebersetze(sqlite3.IntegrityError("database is locked"))
+check("Fehler: IntegrityError -> constraint (Klasse vor Text)", _f.ursache == "constraint failed", _f.ursache)
+
+# --- Eine Tabellenliste fuer Schema, zaehle und pruefe_sicherung ---
+_p14, _c14 = neue_db()
+_schema_tab = {n for (n,) in _c14.execute(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")}
+check("Tabellenliste = Schema", set(getattr(db, "ALLE_TABELLEN", ())) == _schema_tab,
+      sorted(_schema_tab ^ set(getattr(db, "ALLE_TABELLEN", ()))))
+_nicht_zaehlbar = []
+for _t in sorted(_schema_tab):
+    try:
+        db.zaehle(_c14, _t)
+    except ValueError:
+        _nicht_zaehlbar.append(_t)
+check("jede Schema-Tabelle zaehlbar", _nicht_zaehlbar == [], _nicht_zaehlbar)
+try:
+    db.zaehle(_c14, "sqlite_master"); check("unbekannte Tabelle -> ValueError", False)
+except ValueError:
+    check("unbekannte Tabelle -> ValueError", True)
+
+# --- setze_wal, Meta, NULL ---
+db.setze_wal(_c14)
+_jm14 = _c14.execute("PRAGMA journal_mode").fetchone()[0]
+check("setze_wal -> Modus wal", _jm14 == "wal", _jm14)
+check("lese_meta: fehlender Schluessel -> None", db.lese_meta(_c14, "gibts_nicht") is None)
+db.setze_meta(_c14, "test_schluessel", "eins")
+check("Meta Rundlauf", db.lese_meta(_c14, "test_schluessel") == "eins")
+db.setze_meta(_c14, "test_schluessel", "zwei")
+check("Meta ueberschreiben", db.lese_meta(_c14, "test_schluessel") == "zwei"
+      and _c14.execute("SELECT count(*) FROM meta WHERE schluessel = 'test_schluessel'").fetchone()[0] == 1)
+_c14.execute('INSERT INTO startplaetze ("Kurzel", "Latitude", "Longitude", "Name", "Land") '
+             "VALUES ('NUL', '1', '2', NULL, NULL)")
+_n14 = db.lese_tabelle(_c14, "startplaetze")
+check("SQL-NULL -> NaN in lese_tabelle", pd.isna(_n14.loc[0, "Name"]) and pd.isna(_n14.loc[0, "Land"])
+      and isinstance(_n14.loc[0, "Name"], float), repr(_n14.loc[0, "Name"]))
+
+# --- sichere: Aufraeumen auf den Fehlerpfaden ---
+class _QuelleKaputt:
+    """Quelle, deren backup() mitten in der Kopie scheitert (Kopie schon angelegt)."""
+    def backup(self, ziel):
+        ziel.execute("PRAGMA journal_mode = WAL"); ziel.execute("CREATE TABLE x (a)")
+        raise sqlite3.OperationalError("disk I/O error")
+_ord14a = Path(tempfile.mkdtemp())
+try:
+    db.sichere(_QuelleKaputt(), _ord14a, _dt14(2026, 10, 9, 9, 0)); check("Backup-Fehler -> DbFehler", False)
+except db.DbFehler as e:
+    check("Backup-Fehler -> DbFehler", True, e.ursache)
+check("Backup-Fehler: Ordner leer (keine .tmp/Nebendateien)", list(_ord14a.iterdir()) == [],
+      [p.name for p in _ord14a.iterdir()])
+
+class _KopieDefekt:
+    def __init__(self, echt): self.echt = echt
+    def execute(self, sql, *a):
+        if "integrity_check" in sql:
+            class _C:
+                def fetchone(self): return ("*** in database main ***",)
+            return _C()
+        return self.echt.execute(sql, *a)
+    def close(self): self.echt.close()
+class _QuelleGut:
+    def __init__(self, echt): self.echt = echt
+    def backup(self, ziel): self.echt.backup(ziel.echt if isinstance(ziel, _KopieDefekt) else ziel)
+_ord14b = Path(tempfile.mkdtemp())
+_connect14 = db.sqlite3.connect
+_p14b, _c14b = neue_db(); db.setze_wal(_c14b)
+db.sqlite3.connect = lambda *a, **k: _KopieDefekt(_connect14(*a, **k))
+try:
+    db.sichere(_QuelleGut(_c14b), _ord14b, _dt14(2026, 10, 9, 9, 0)); check("integrity-Fehler -> DbFehler", False)
+except db.DbFehler as e:
+    check("integrity-Fehler -> DbFehler", e.ursache == "backup corrupt", e.ursache)
+finally:
+    db.sqlite3.connect = _connect14
+check("integrity-Fehler: Ordner leer (keine .tmp/Nebendateien)", list(_ord14b.iterdir()) == [],
+      [p.name for p in _ord14b.iterdir()])
+
+# --- Sicherungsnamen: Sekunden, alte 4-stellige Namen, gemischte Sortierung ---
+_ord14c = Path(tempfile.mkdtemp())
+_s14a = db.sichere(_c14b, _ord14c, _dt14(2026, 10, 9, 9, 0, 5))
+_s14b = db.sichere(_c14b, _ord14c, _dt14(2026, 10, 9, 9, 0, 40))
+check("zwei Sicherungen derselben Minute ueberschreiben sich nicht",
+      _s14a != _s14b and _s14a.exists() and _s14b.exists(), (_s14a.name, _s14b.name))
+_ord14d = Path(tempfile.mkdtemp())
+for _n in ("nola-2026-10-09-0837.db", "nola-2026-10-09-083712.db", "nola-2026-10-09-0901.db",
+           "nola-2026-10-09-090030.db", "nola-2026-10-08-235959.db", "nola-2026-10-09-0837-vor-schema-2.db",
+           "nola-2026-10-09-08371.db", "nola-2026-10-09-0837.db.tmp"):
+    (_ord14d / _n).write_bytes(b"x")
+_reg14 = [p.name for p in db.liste_sicherungen(_ord14d, nur_regulaer=True)]
+check("gemischte Namen: neueste zuerst ueber beide Formate", _reg14 == [
+    "nola-2026-10-09-0901.db", "nola-2026-10-09-090030.db", "nola-2026-10-09-083712.db",
+    "nola-2026-10-09-0837.db", "nola-2026-10-08-235959.db"], _reg14)
+check("gemischte Namen: Zusatz erkannt, Fremdnamen nicht",
+      sorted(p.name for p in db.liste_sicherungen(_ord14d)) == sorted(_reg14 + ["nola-2026-10-09-0837-vor-schema-2.db"]))
+_neu14 = db.sichere(_c14b, _ord14d, _dt14(2026, 10, 9, 9, 5, 7), behalten=3)
+_rest14 = sorted(p.name for p in _ord14d.iterdir())
+check("Rotation ueber beide Formate", _rest14 == sorted([
+    "nola-2026-10-09-090507.db", "nola-2026-10-09-0901.db", "nola-2026-10-09-090030.db",
+    "nola-2026-10-09-0837-vor-schema-2.db", "nola-2026-10-09-08371.db", "nola-2026-10-09-0837.db.tmp"]), _rest14)
+_ord14e = Path(tempfile.mkdtemp()); (_ord14e / "nola-2026-10-09-0837.db").write_bytes(b"x")
+check("faellig: alter 4-stelliger Name zaehlt fuer heute",
+      not db.sicherung_faellig(_ord14e, _date14(2026, 10, 9)) and db.sicherung_faellig(_ord14e, _date14(2026, 10, 10)))
+_ord14f = Path(tempfile.mkdtemp()); (_ord14f / "nola-2026-10-09-083712.db").write_bytes(b"x")
+check("faellig: neuer 6-stelliger Name zaehlt fuer heute",
+      not db.sicherung_faellig(_ord14f, _date14(2026, 10, 9)) and db.sicherung_faellig(_ord14f, _date14(2026, 10, 10)))
+_ord14g = Path(tempfile.mkdtemp()); (_ord14g / "nola-2026-10-09-083712-vor-schema-2.db").write_bytes(b"x")
+check("faellig: Zusatz-Sicherung zaehlt nicht", db.sicherung_faellig(_ord14g, _date14(2026, 10, 9)))
+
+# --- behalten <= 0 ---
+for _b in (0, -1):
+    _ord14h = Path(tempfile.mkdtemp()); (_ord14h / "nola-2026-10-01-0000.db").write_bytes(b"x")
+    try:
+        db.sichere(_c14b, _ord14h, _dt14(2026, 10, 9, 9, 0), behalten=_b)
+        check("behalten={} -> ValueError".format(_b), False)
+    except ValueError:
+        check("behalten={} -> ValueError".format(_b), True)
+    check("behalten={}: nichts geschrieben oder geloescht".format(_b),
+          [p.name for p in _ord14h.iterdir()] == ["nola-2026-10-01-0000.db"], [p.name for p in _ord14h.iterdir()])
+_c14b.close(); _c14.close()
+
+# --- schuetze_echte_orte: Unterordner und Symlinks ---
+_echt14 = Path(tempfile.mkdtemp()) / "Backups"; (_echt14 / "unter" / "tief").mkdir(parents=True)
+_link_d14 = Path(tempfile.mkdtemp())
+(_link_d14 / "auf_ordner").symlink_to(_echt14)
+(_link_d14 / "auf_unter").symlink_to(_echt14 / "unter")
+_frei14 = Path(tempfile.mkdtemp())
+_echt_orig14 = db.ECHTER_SICHERUNGSORDNER
+db.ECHTER_SICHERUNGSORDNER = _echt14
+try:
+    for _label, _pf in [("Ordner selbst", _echt14), ("Unterordner", _echt14 / "unter"),
+                        ("tiefer Unterordner", _echt14 / "unter" / "tief"),
+                        ("Datei im Unterordner", _echt14 / "unter" / "nola-2026-10-09-0837.db"),
+                        ("Symlink auf Ordner", _link_d14 / "auf_ordner"),
+                        ("Symlink auf Unterordner", _link_d14 / "auf_unter"),
+                        ("Datei hinter Symlink", _link_d14 / "auf_unter" / "x.db"),
+                        ("Pfad mit ..", _frei14 / ".." / _echt14.parent.name / "Backups" / "unter")]:
+        try:
+            db.schuetze_echte_orte(_pf); check("Schutz sperrt " + _label, False, _pf)
+        except RuntimeError:
+            check("Schutz sperrt " + _label, True)
+    try:
+        db.sichere(None, _echt14 / "unter", _dt14(2026, 10, 9, 9, 0)); check("sichere sperrt Unterordner", False)
+    except RuntimeError:
+        check("sichere sperrt Unterordner", True)
+    try:
+        db.schuetze_echte_orte(_frei14, _echt14.parent / "Backups-Nachbar", _link_d14)
+        check("Schutz laesst Nachbarordner frei", True)
+    except RuntimeError as e:
+        check("Schutz laesst Nachbarordner frei", False, e)
+finally:
+    db.ECHTER_SICHERUNGSORDNER = _echt_orig14
+check("echter Sicherungsordner wieder eingesetzt", db.ECHTER_SICHERUNGSORDNER == _echt_orig14)
+check("Testordner unberuehrt", sorted(p.name for p in _echt14.iterdir()) == ["unter"])
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
