@@ -5882,14 +5882,13 @@ def _lauf_s(f, *a):
 
 
 _orig_s = (app.st, app.DB_PATH, app.BACKUP_DIR, app.local_admin_allowed, app._datenbank_bereit,
-           os.environ.get("NOLA_DB"), _um_s.stelle_bereit, _um_s.altdateien_im, _um_s.exportieren,
+           _um_s.stelle_bereit, _um_s.altdateien_im, _um_s.exportieren,
            _db_s.sichere, getattr(app, "_tages_sicherung_fehler", None))
 _bereit_roh_s = app._datenbank_bereit.__wrapped__
 _tmp_s = Path(_tf_s.mkdtemp())
 try:
     app.st = _fake_st_s()
     # --- ohne Sperre: nola.db fehlt, keine Sicherungen, lokal -> Umzug aus Temp-Altdateien ---
-    os.environ.pop("NOLA_DB", None)
     app.DB_PATH = _tmp_s / "umzug" / "nola.db"
     app.DB_PATH.parent.mkdir()
     app.BACKUP_DIR = _tmp_s / "sich_leer"
@@ -5898,10 +5897,10 @@ try:
     _alt_ordner_s.mkdir()
     for _p in (app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV):
         _sh_s.copy(_p, _alt_ordner_s / _p.name)
-    _altdateien_orig_s = _orig_s[7]
+    _altdateien_orig_s = _orig_s[6]
     _um_s.altdateien_im = lambda d: _altdateien_orig_s(_alt_ordner_s)
     _z_s, _e_s = _lauf_s(_bereit_roh_s)
-    check("Verhalten Start ohne NOLA_DB: nola.db fehlt -> umgezogen, Datei da, Startsicherung im Temp-Ordner",
+    check("Verhalten Start ohne Datenbank: nola.db fehlt -> umgezogen, Datei da, Startsicherung im Temp-Ordner",
           _e_s is None and _z_s[0].art == "umgezogen" and _z_s[1] == "" and app.DB_PATH.exists()
           and len(_db_s.liste_sicherungen(app.BACKUP_DIR)) == 1, (_z_s, _e_s))
     _um_s.altdateien_im = _altdateien_orig_s
@@ -5969,7 +5968,7 @@ try:
           isinstance(_e1_s, _Halt_s) and isinstance(_e2_s, _Halt_s) and len(_zaehl_s) == 2
           and ("error", "voruebergehend (Test)") in _aufr_s and not app.DB_PATH.exists(),
           (_zaehl_s, _aufr_s, _e1_s, _e2_s))
-    _um_s.stelle_bereit = _orig_s[6]
+    _um_s.stelle_bereit = _orig_s[5]
 
     # --- Gate Export und F4 ---
     app.DB_PATH = _quelle_s
@@ -5998,7 +5997,7 @@ try:
           _e_s is None and any(a == "error" and w.startswith("Export failed") for a, w in _aufr_s),
           (_aufr_s, _e_s))
     _klick_s.clear()
-    _um_s.exportieren = _orig_s[8]
+    _um_s.exportieren = _orig_s[7]
 
     # --- Taegliche Sicherung ---
     app._tages_sicherung_fehler = None
@@ -6035,12 +6034,8 @@ try:
           (_sichere_zaehl_s, _w1_s, _w2_s, _e1_s, _e2_s))
 finally:
     (app.st, app.DB_PATH, app.BACKUP_DIR, app.local_admin_allowed, app._datenbank_bereit,
-     _nola_db_env_s, _um_s.stelle_bereit, _um_s.altdateien_im, _um_s.exportieren,
+     _um_s.stelle_bereit, _um_s.altdateien_im, _um_s.exportieren,
      _db_s.sichere, app._tages_sicherung_fehler) = _orig_s
-    if _nola_db_env_s is None:
-        os.environ.pop("NOLA_DB", None)
-    else:
-        os.environ["NOLA_DB"] = _nola_db_env_s
     _sh_s.rmtree(_tmp_s, ignore_errors=True)
 
 print()

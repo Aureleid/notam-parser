@@ -542,7 +542,7 @@ aber ohne Formular zum Anlegen: Zeilen entstehen aus der Auswertung, die Nutzlas
 unter *NOTAM Data* nach. Eine gelöschte Zeile bleibt gelöscht, auch wenn ihr NOTAM noch in
 der Tagesdatei steht — der Schlüssel wandert dafür in die Tabelle `entscheidungen`.
 
-Die Datei ist in `.gitignore` aufgeführt: sie leitet sich aus den lokalen NOTAM-Rohdaten ab
+Die Datenbank `nola.db` samt `nola.db-wal` und `nola.db-shm` ist in `.gitignore` aufgeführt (ebenso die alte `startarchiv_updated.csv`): sie leitet sich aus den lokalen NOTAM-Rohdaten ab
 und bleibt wie diese lokal.
 
 ## Archiv-Import

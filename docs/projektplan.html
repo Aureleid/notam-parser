@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>8.353</b> Zeilen app.py</span><span><b>1.608</b> Tests grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>8.353</b> Zeilen app.py</span><span><b>1.608</b> Tests (beide Läufe) grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -194,7 +194,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
  {t:"Gestaltung",s:8,c:[{t:"Zweizeilige Wortmarke"},{t:"Maskottchen im Kopf",f:"_mascot_img, _render_header"},{t:"Unbunte Bühne, bunte Signale"},{t:"Farbschema in .streamlit/config.toml"}]}]},
 {t:"Referenzdaten und Archiv",s:6,c:[
  {t:"Optionsmenü",f:"_reference_dialog, _spaceport_editor, _fir_editor, _vehicle_editor",c:[{t:"Rückgängig-Stapel",f:"_push_undo, _undo_reference",c:[
-   {t:"Archiv nur bei unverändertem Stand zurücknehmen",s:11,f:"_undo_archive, UndoRefused"}]}]},
+   {t:"Archiv nur bei unverändertem Stand zurücknehmen",s:11,f:"_undo_reference, UndoRefused",s2:13}]}]},
  {t:"Trägersystem zuweisen",f:"_vehicle_picker, apply_vehicle_assignments"},
  {t:"Payload eintragen",f:"_payload_field, apply_payload_assignments"},
  {t:"Startplatz von Hand wählen",s:9,f:"_launch_site_picker, _set_launch_site, apply_launch_site_assignments",c:[
