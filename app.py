@@ -5603,11 +5603,13 @@ def _persist_workspace(im_dialog: bool = False) -> Optional[str]:
         st.session_state[CLOUD_ARBEITSSTAND] = neu
         _arbeitsstand_laden()
         return None
+    geschrieben = False
     try:
         with _db() as conn:
             nola_db.schreibe_unterschiede(
                 conn, vorher, aktuell, datetime.now(timezone.utc).isoformat()
             )
+        geschrieben = True
     except nola_db.Konflikt:
         grund = nola_db.KONFLIKT_TEXT
         if not im_dialog:
@@ -5621,6 +5623,17 @@ def _persist_workspace(im_dialog: bool = False) -> Optional[str]:
         _arbeitsstand_laden()
     except nola_db.DbFehler as exc:
         (_melde_db_dialog if im_dialog else _melde_db)("error", str(exc))
+        if geschrieben:
+            # Geschrieben, aber nicht neu geladen: die neuen NOTAMs stehen ohne id in
+            # der Sitzung und kaemen beim naechsten Schreiben ein zweites Mal in die DB.
+            # Darum heraus damit (sie sind gespeichert und erscheinen beim naechsten
+            # Neuladen mit id) und die Momentaufnahme auf den geschriebenen Stand setzen.
+            ohne_neue = [n for n in aktuell["manual_notams"] if n.get("id") is not None]
+            st.session_state["manual_notams"] = copy.deepcopy(ohne_neue)
+            stand = copy.deepcopy(vorher)
+            stand.update(copy.deepcopy(aktuell))
+            stand["manual_notams"] = copy.deepcopy(ohne_neue)
+            st.session_state["_ws_momentaufnahme"] = stand
     return grund
 
 

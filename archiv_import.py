@@ -1251,8 +1251,8 @@ def _mit_entscheidungen(state: Dict[str, Any], neu: Mapping[str, Dict[str, Any]]
 
 #: Pruefung nach dem Speichern gescheitert - gespeichert wurde schon, ob vollstaendig, ist offen.
 ARCHIV_PRUEFUNG_TEXT = (
-    "The check of the launch archive in nola.db after saving failed ({}). The change may "
-    "or may not be in the launch archive - please reload the tab and check it."
+    "The check of the launch archive in nola.db after saving failed ({}). Whether the "
+    "change was saved completely is unclear - please reload the tab and check it."
 )
 
 
@@ -1282,7 +1282,7 @@ def _archiv_pruefen(
         for spalte, wert in (werte or {}).get(key, {}).items()
     )
     if not vorhanden <= keys or fehlend & keys or falsch:
-        raise ImportStateError(ARCHIV_PRUEFUNG_TEXT.format("the change is not in the launch archive"))
+        raise ImportStateError(ARCHIV_PRUEFUNG_TEXT.format("the launch archive does not match the change"))
 
 
 def remove_orphan(state: Dict[str, Any], key: str, archiv: Optional[Path] = None) -> None:

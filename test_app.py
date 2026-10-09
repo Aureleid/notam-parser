@@ -2468,7 +2468,7 @@ check("geloeschte Zeile kommt nicht zurueck",
 
 quelle_see = Path("app.py").read_text(encoding="utf-8")
 check("das Protokoll fliesst NICHT in die Startplatz-Suche zurueck",
-      "load_sea_launches" not in quelle_see.split("def _find_spaceport")[1].split("\ndef ")[0]
+      "seestarts_lesen" not in quelle_see.split("def _find_spaceport")[1].split("\ndef ")[0]
       and "SEA_LAUNCH_CSV" not in quelle_see.split("def _select_spaceport_for_zones")[1].split("\ndef ")[0])
 check("  ... und wird gesondert gefuehrt", "seestarts_updated.csv" in quelle_see)
 
@@ -2993,10 +2993,10 @@ check("die Wahl wird im Arbeitsstand gesichert",
 # Pad-Wahl im Arbeitsstand (Datei-Fassung samt test_workspace_pad.json entfernt): test_nola_db.py, Abschnitte 9 und 19.
 import inspect as _ins_pw
 _quelle_pw = _ins_pw.getsource(app._persist_workspace)
-check("_persist_workspace schreibt ueber nola_db.schreibe_unterschiede(conn, vorher, aktuell, ...), nicht ueber save_workspace",
+check("_persist_workspace schreibt ueber nola_db.schreibe_unterschiede(conn, vorher, aktuell, ...); save/load_workspace gibt es nicht mehr",
       "nola_db.schreibe_unterschiede(" in _quelle_pw
       and "conn, vorher, aktuell," in _quelle_pw
-      and "save_workspace(" not in _quelle_pw)
+      and not hasattr(app, "save_workspace") and not hasattr(app, "load_workspace"))
 check("die Pad-Wahl greift vor Tabelle und Archiv",
       quelle_x.index("apply_launch_site_assignments(")
       < quelle_x.index("table = events_to_dataframe(visible_events, vehicles)"))
@@ -3829,7 +3829,7 @@ check("Space Launch: Bestaetigung gemerkt, Tag trotz gleichem Fingerabdruck neu 
 
 quelle_ai = (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8")
 check("Archiv-Import fasst die Tageslage nicht an",
-      all(w not in quelle_ai for w in ("manual_notams", "WORKSPACE_FILE", "save_workspace", "session_state")))
+      all(w not in quelle_ai for w in ("manual_notams", "WORKSPACE_FILE", "_persist_workspace", "session_state")))
 
 # --- Aufgabe 7: Reiter "Archive Import", nur lokal sichtbar ---
 check("oeffentliche Fassung erkannt", app.is_public_deployment(_P("/mount/src/notam-parser")))
@@ -3852,7 +3852,7 @@ check("ohne Streamlit-Kontext verborgen (fail-closed)", app.archive_import_allow
 check("GCAT-Treffer zeigt den Startplatz", "s.site" in kand_src)
 check("Reiter fasst die Tageslage nicht an",
       all(w not in tab_src + kand_src
-          for w in ("manual_notams", "WORKSPACE_FILE", "notam_workspace", "save_workspace")))
+          for w in ("manual_notams", "WORKSPACE_FILE", "notam_workspace", "_persist_workspace")))
 
 # Jeder schreibende/ladende Aufruf steht in einem try, das ai.ImportStateError faengt.
 import ast as _ast
@@ -5434,9 +5434,13 @@ try:
 finally:
     app.st = _st_orig_a
     app.DB_PATH = _db_orig_a
-check("app.py schreibt keine Archiv-CSV mehr",
-      "persist_archive(ARCHIVE_CSV" not in open(app.__file__, encoding="utf-8").read()
-      and "persist_sea_launches(SEA_LAUNCH_CSV" not in open(app.__file__, encoding="utf-8").read())
+_q_csv = open(app.__file__, encoding="utf-8").read()
+import inspect as _inspect_a
+_q_upd = _inspect_a.getsource(app._update_archive) + _inspect_a.getsource(app._update_sea_launches)
+check("app.py schreibt keine Archiv-CSV mehr: CSV-Pfade nur definiert, Fortschreiben ueber nola.db",
+      _q_csv.count("ARCHIVE_CSV") == 1 and _q_csv.count("SEA_LAUNCH_CSV") == 1
+      and not hasattr(app, "persist_archive") and not hasattr(app, "persist_sea_launches")
+      and "archiv_schreiben(" in _q_upd and "seestarts_schreiben(" in _q_upd)
 
 print("== Lokale Datenbank: Archiv und Seestarts, Fortschreiben und Import ==")
 import types as _types_n, copy as _copy_n
@@ -5723,7 +5727,8 @@ import inspect as _ins_n
 _q_tab = _ins_n.getsource(app._archive_import_tab)
 check("Import-Reiter liest und schreibt Korpus und Zustand ueber die Datenbank",
       "ai.korpus_laden()" in _q_tab and "ai.zustand_laden()" in _q_tab
-      and "ai.load_korpus(" not in _q_tab and "ai.save_state(" not in _q_tab)
+      and "ai.load_korpus(" not in _q_tab and not hasattr(ai, "save_state")
+      and "ai.zustand_speichern(" in _q_tab)
 check("Editoren entschaerfen Archiv- und Seestartwerte",
       "_md_plain(" in _ins_n.getsource(app._archive_editor) and "_md_plain(" in _ins_n.getsource(app._sea_launch_editor))
 _q_dlg = _ins_n.getsource(app._reference_dialog)
@@ -6781,6 +6786,45 @@ try:
     check("  ... zweiter Klick (DB wieder in Ordnung) speichert den Eintrag genau einmal",
           sum("A5551/26" in n["text"] for n in _m5) == 1, [n["text"][:20] for n in _m5])
 
+    # --- _add_manual_notams: Schreiben gelingt, nur das Neuladen scheitert -> keine Doppel-NOTAMs ---
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._arbeitsstand_laden()
+    _texte_5b = ["A5552/26 NOTAMN\nQ) ZJSA/QRTCA/IV/BO/W/000/999\nE) EINS",
+                 "A5553/26 NOTAMN\nQ) ZJSA/QRTCA/IV/BO/W/000/999\nE) ZWEI"]
+    app.st.session_state["manual_input"] = "\n\n".join(_texte_5b)
+    _texte_5b = app.split_pasted_notams(app.st.session_state["manual_input"])  # so, wie gespeichert wird
+
+    def _laden_wirft_5(*a, **k):
+        raise _ndb5.DbFehler("io", "Disk full")
+
+    _ndb5.lade_arbeitsstand = _laden_wirft_5
+    try:
+        _, _e_5 = _lauf_s(app._add_manual_notams)
+    finally:
+        _ndb5.lade_arbeitsstand = _orig_5[4]
+    _ss5b = app.st.session_state
+    check("_add_manual_notams: Schreiben ok, Neuladen scheitert -> Sitzung haelt keine Eintraege ohne id",
+          _e_5 is None and [n for n in _ss5b["manual_notams"] if n.get("id") is None] == [],
+          (_e_5, _ss5b["manual_notams"]))
+    check("  ... gespeichert: Feld geleert, Rueckmeldung nennt 2 Eintraege",
+          _ss5b.get("manual_input") == "" and _ss5b.get("manual_feedback") == 2,
+          (_ss5b.get("manual_input"), _ss5b.get("manual_feedback")))
+    # Zweite, fremde Aktion (Entscheidung setzen) schreibt erneut ueber _persist_workspace
+    _ek_5 = next(iter(_ndb5.ENTSCHEIDUNGS_SCHLUESSEL))
+    _ss5b[_ek_5] = set(_ss5b[_ek_5]) | {"K5|X"}
+    _, _e_5 = _lauf_s(app._persist_workspace)
+    with app._db() as _c5:
+        _st5b = _ndb5.lade_arbeitsstand(_c5)
+    _m5b = [n["text"] for n in _st5b["manual_notams"]]
+    check("  ... naechste Aktion danach: jedes eingefuegte NOTAM genau einmal in der DB, Entscheidung gespeichert",
+          _e_5 is None and all(_m5b.count(t) == 1 for t in _texte_5b) and len(_m5b) == 2
+          and "K5|X" in _st5b[_ek_5],
+          (_e_5, [t[:9] for t in _m5b], _st5b[_ek_5]))
+    check("  ... danach zeigt die Sitzung beide NOTAMs mit id",
+          sorted(n["text"] for n in app.st.session_state["manual_notams"] if n.get("id") is not None)
+          == sorted(_texte_5b), app.st.session_state["manual_notams"])
+
     # --- Cloud: Entfernen im Archiv / Seestart-Protokoll ---
     app.DB_PATH = _temp_db()
     app.is_public_deployment = lambda *a, **k: True
@@ -6791,7 +6835,15 @@ try:
     _s5 = {s: "" for s in app.SEA_LAUNCH_COLUMNS}
     _s5.update({"Datum": "08.10.2026", "Nation": "China", "Breite": "10.0", "Länge": "120.0", "NOTAM": "S5/26"})
     app.seestarts_schreiben(pd.DataFrame([_s5], columns=list(app.SEA_LAUNCH_COLUMNS)), vorher=app.seestarts_lesen())
-    _ws_vorher_5 = _sq_5.connect(str(app.DB_PATH)).execute("SELECT count(*) FROM entscheidungen").fetchone()[0]
+
+    def _zaehle_entsch_5():
+        _cz5 = _sq_5.connect(str(app.DB_PATH))
+        try:
+            return _cz5.execute("SELECT count(*) FROM entscheidungen").fetchone()[0]
+        finally:
+            _cz5.close()
+
+    _ws_vorher_5 = _zaehle_entsch_5()
     for _fn5, _schl5, _feld5, _flash5, _lesen5 in (
         (app._remove_archive_row, app.archive_key(_z5), "archiv_removed", "Archivzeile entfernt", app.archiv_lesen),
         (app._remove_sea_launch_row, app.sea_launch_key(_s5), "seestarts_removed", "Sea launch row removed",
@@ -6809,7 +6861,7 @@ try:
               and _lesen5().empty,
               {k: _ss5.get(k) for k in ("ref_flash", "ref_flash_warning", "ref_flash_error", _feld5)})
     check("  ... Cloud: Loeschschluessel nicht in der gemeinsamen DB",
-          _sq_5.connect(str(app.DB_PATH)).execute("SELECT count(*) FROM entscheidungen").fetchone()[0] == _ws_vorher_5)
+          _zaehle_entsch_5() == _ws_vorher_5)
 
     # --- Klick-Aktion unter fremder Sperre wartet die vollen 5 s (Verhaltenstest) ---
     app.is_public_deployment = lambda *a, **k: False
@@ -6849,8 +6901,10 @@ try:
         raise app.ArchiveUnreadable("The launch archive could not be read from the database (io). "
                                     "It was left untouched and not updated.")
 
-    for _name5, _nachher5 in (("Rueckgabe ohne die Zeile", lambda echt: echt.iloc[0:0]),
-                              ("Lesefehler", _nachher_fehler)):
+    # Eine Meldung fuer beide Faelle, nur der Grund in Klammern unterscheidet sich - neutral formuliert
+    _abw5 = "the launch archive does not match the change"
+    for _name5, _nachher5, _grund5 in (("Rueckgabe ohne die Zeile", lambda echt: echt.iloc[0:0], _abw5),
+                                       ("Lesefehler", _nachher_fehler, "it could not be read back")):
         _zaehler_5.clear()
         _za5 = _ai5.zustand_laden(_db5)
         app.archiv_lesen = _lesen_dann(_nachher5)
@@ -6862,6 +6916,9 @@ try:
               .format(_name5),
               _f5 is not None and "Nothing was recorded" not in _f5 and "untouched" not in _f5
               and "after saving" in _f5 and "reload" in _f5, _f5)
+        check("  ... Meldung = ARCHIV_PRUEFUNG_TEXT mit neutralem Grund ({}), ohne 'is not in the launch archive'"
+              .format(_name5),
+              _f5 == _ai5.ARCHIV_PRUEFUNG_TEXT.format(_grund5) and "is not in the launch archive" not in _f5, _f5)
     check("  ... die Bestaetigung ist tatsaechlich gespeichert (Archivzeile vorhanden)",
           _kand5["key"] in {app.archive_key(dict(r)) for _, r in app.archiv_lesen(_db5).iterrows()})
     _zaehler_5.clear()
@@ -6874,6 +6931,11 @@ try:
         app.archiv_lesen = _orig_5[5]
     check("remove_orphan: Pruefung nach dem Speichern scheitert -> Meldung sagt das, nicht 'Nothing was recorded'",
           _f5 is not None and "Nothing was recorded" not in _f5 and "after saving" in _f5 and "reload" in _f5, _f5)
+    check("  ... remove_orphan: dieselbe Meldung mit neutralem Grund",
+          _f5 == _ai5.ARCHIV_PRUEFUNG_TEXT.format(_abw5) and "is not in the launch archive" not in _f5, _f5)
+    check("ARCHIV_PRUEFUNG_TEXT widerspricht sich nicht (kein 'may or may not' neben dem Grund)",
+          "may or may not" not in _ai5.ARCHIV_PRUEFUNG_TEXT and "unclear" in _ai5.ARCHIV_PRUEFUNG_TEXT,
+          _ai5.ARCHIV_PRUEFUNG_TEXT)
 
     # --- detection_stamp: KeyError ist kein erwartbarer Fehler (nola_stand ist immer gesetzt) ---
     def _wirf_key_5(*a, **k):

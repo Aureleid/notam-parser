@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>8.361</b> Zeilen app.py</span><span><b>1.775</b> Tests (beide Läufe) grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>8.374</b> Zeilen app.py</span><span><b>1.783</b> Tests (beide Läufe) grün</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -136,7 +136,7 @@ var STEPS=[
  r:"Ergebnis: jede Verhaltensänderung zuerst mit rotem Test belegt; echter Sicherungsordner und Projektordner unberührt. 1.646 Tests grün (1.432 + 214)."},
 {id:15,name:"Folgepunkte",h:"Lokale Datenbank: Folgepunkte aus dem Abschlussreview",
  p:"Fünf Aufgaben. Speicherschicht: Fehler werden über Code und Klasse statt Textsuche zugeordnet, eine Tabellenliste für Zählen, Prüfen und Umzug, Sicherungsnamen mit Sekunden, behalten ≤ 0 abgelehnt, der Testschutz sperrt auch Unterordner und Symlinks. Referenzen: Entschärfung der Editoren als Verhaltenstest, Fehlerzweige von Schreiben und Rückgängig, Undo-Knopf als eigene Funktion, leere Trägersystem-Felder bleiben leer statt nan. Arbeitsstand: der Eingabetext bleibt bei einem Speicherfehler stehen, die öffentliche Fassung führt den Arbeitsstand je Browser-Sitzung. Archiv-Import: Korpus und Importzustand mit Standvergleich, Bestätigen und Entfernen schreiben Startarchiv und Importzustand in einer Transaktion; das automatische Fortschreiben wartet unter fremder Sperre nur 0,5 s, Klick-Aktionen weiter 5 s; Meldungen aus dem Optionsdialog nur im Dialog. Aufräumen: die alten Datei-Helfer sind entfernt, nur Umzug und Export behalten ihre Leser und Schreiber; der Referenzdialog bleibt nach X oder Escape zu; scheitern Speichern und Neuladen, bleiben keine Einträge ohne id zurück; eine Nachprüfung nach dem Speichern meldet nicht mehr, es sei nichts geschrieben.",
- r:"Ergebnis: jede Verhaltensänderung zuerst mit rotem Test belegt; echte nola.db und Sicherungsordner unberührt. 1.775 Tests grün (1.485 + 290)."},
+ r:"Ergebnis: jede Verhaltensänderung zuerst mit rotem Test belegt; echte nola.db und Sicherungsordner unberührt. 1.783 Tests grün (1.493 + 290)."},
 {id:0,name:"Offen",h:"Offene Punkte",
  p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten. Aus dem Archiv-Import: Spaltenverschiebung durch ein Zusatzfeld in der ersten Archivzeile (nola-djk), echte NSF-Seite als Testfixture, Archivspalte Quelle, alte Dubletten, Zweitzeile des Tagesbetriebs neben einer Importzeile, kein Rückgängig für ergänzte Zeilen. Aus Vergangene Starts: Sammelknopf zum Verwerfen eingefügter Einträge vergangener Starts. Aus der lokalen Datenbank: Dauerwarnung bei fehlendem Sicherungsordner, wählbare defekte Sicherungen, maskierte Schrägstriche in Rohmeldungen, in der Cloud kann eine entfernte Zeile in einer anderen Sitzung wiederkommen. Aus den Folgepunkten: Browser-Nachweis für X/Escape am Referenzdialog, Prüfsummen des Archiv-Imports bei wachsendem Korpus, Importzustand ohne Stand schreibt ohne Vergleich, Sicherungen derselben Sekunde.",
  r:"Quelle: STATUS.md, Abschnitt Offene Punkte."}
@@ -226,7 +226,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"Derselbe Start",s:11,n:"Kennung · ±1 Tag · Nation",f:"_gleicher_start, _start_index"},
      {t:"Vorgänger ersetzen mit seinen Werten",s:11,n:"ersetzt_werte",f:"_werte_des_vorgaengers"},
      {t:"Archiv und Importzustand in einer Transaktion",s:15,n:"auch Remove",f:"ersetze_archiv_und_importzustand, archiv_und_importzustand_schreiben, _archiv_und_zustand_schreiben"},
-     {t:"Nachprüfung nach dem Speichern",s:15,n:"Meldung sagt: gespeichert, Prüfung gescheitert",f:"_archiv_pruefen, ARCHIV_PRUEFUNG_TEXT"}]},
+     {t:"Nachprüfung nach dem Speichern",s:15,n:"eine Meldung, neutraler Grund: gespeichert, Prüfung gescheitert",f:"_archiv_pruefen, ARCHIV_PRUEFUNG_TEXT"}]},
    {t:"Prüfliste",f:"review_items, review_launch, review_hide"},
    {t:"Nicht mehr erkannt",f:"orphans, keep_orphan, remove_orphan"},
    {t:"Reiter im Optionsmenü",f:"_archive_import_tab, _archive_import_candidate",c:[
@@ -237,7 +237,8 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"Fehler über Code und Klasse zuordnen",s:15,f:"_art, _uebersetze"}]},
    {t:"Arbeitsstand lesen und abgleichen",s:13,n:"nur Abweichungen, Konfliktschutz",f:"_arbeitsstand_laden, _persist_workspace, lade_arbeitsstand, schreibe_unterschiede",c:[
      {t:"Cloud: Arbeitsstand je Browser-Sitzung",s:15,n:"flüchtig",f:"_cloud_arbeitsstand, _arbeitsstand_laden, _persist_workspace"},
-     {t:"Eingabetext bleibt bei Speicherfehler",s:15,n:"keine Einträge ohne id",f:"_add_manual_notams"}]},
+     {t:"Eingabetext bleibt bei Speicherfehler",s:15,n:"keine Einträge ohne id",f:"_add_manual_notams"},
+     {t:"Gespeichert, Neuladen gescheitert",s:15,n:"keine Doppel-NOTAMs, Momentaufnahme = geschriebener Stand",f:"_persist_workspace"}]},
    {t:"Referenzen aus der Datenbank",s:13,f:"referenz_lesen, ersetze_tabelle",c:[
      {t:"Cloud: geänderte Referenz-CSVs übernehmen",s:14,n:"SHA-256 in meta · nur die drei Referenztabellen",f:"_referenzen_auffrischen, _referenz_shas, ersetze_tabellen"}]},
    {t:"Meldungen aus dem Optionsdialog im Dialog",s:14,n:"entschärft",f:"_melde_db_dialog, _zeige_dialog_meldungen, _zeige_db_meldung",c:[
@@ -257,8 +258,8 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"Eine Momentaufnahme",s:14,n:"eine Lesetransaktion",f:"_schreibe_export"}]},
    {t:"Nur lokal",s:13,n:"--server.address 127.0.0.1",f:"local_admin_allowed, server_address_is_loopback"}]}]},
 {t:"Qualität und Betrieb",s:8,c:[
- {t:"test_app.py",s:15,n:"1.485 Tests · 6.899 Zeilen"},
- {t:"test_nola_db.py",s:15,n:"290 Tests · 1.361 Zeilen"},
+ {t:"test_app.py",s:15,n:"1.493 Tests · 6.961 Zeilen"},
+ {t:"test_nola_db.py",s:15,n:"290 Tests · 1.365 Zeilen"},
  {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
  {t:"Veröffentlichung",n:"Streamlit Community Cloud"},
  {t:"Dokumentation",n:"README · STATUS · docs/intent · docs/decisions"}]},

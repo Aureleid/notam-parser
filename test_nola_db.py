@@ -458,7 +458,11 @@ check("Name nach Muster (mit Sekunden)", _s1.name == "nola-2026-10-08-090000.db"
 check("keine Temp-Datei uebrig", not any(p.name.endswith(".tmp") for p in _ord.iterdir()))
 check("Sicherung geprueft und vollstaendig", db.pruefe_sicherung(_s1)[0] == "ok"
       and db.pruefe_sicherung(_s1)[1]["startplaetze"] == 1)
-_jm = sqlite3.connect(str(_s1)).execute("PRAGMA journal_mode").fetchone()[0]
+_cjm = sqlite3.connect(str(_s1))
+try:
+    _jm = _cjm.execute("PRAGMA journal_mode").fetchone()[0]
+finally:
+    _cjm.close()
 check("Sicherung im Journalmodus delete", _jm == "delete", _jm)
 check("heute nicht mehr faellig", not db.sicherung_faellig(_ord, _date(2026, 10, 8)))
 check("morgen wieder faellig", db.sicherung_faellig(_ord, _date(2026, 10, 9)))
