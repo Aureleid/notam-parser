@@ -213,11 +213,8 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
     return zaehlung
 
 
-_ZAEHLTABELLEN = (
-    "startplaetze", "firs", "traegersysteme", "seestarts", "startarchiv", "manuelle_notams",
-    "entscheidungen", "zuweisungen", "archiv_korpus", "archiv_import_tage",
-    "archiv_import_entscheidungen", "archiv_import_review",
-)
+#: Gezaehlte Tabellen: die eine Liste aus nola_db, ohne die Verwaltungstabelle meta.
+_ZAEHLTABELLEN = tuple(t for t in db.ALLE_TABELLEN if t != "meta")
 
 
 def _zaehle_alle(datenbank: Path) -> Dict[str, int]:

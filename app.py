@@ -1714,18 +1714,6 @@ def _require_columns(df: pd.DataFrame, expected: Sequence[str], label: str) -> p
 VEHICLE_COLUMNS = ["Land", "Name", "Alternativname englisch", "Abkürzung"]
 
 
-@st.cache_data(show_spinner=False)
-def load_vehicles(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
-    """
-    Laedt die Referenz der aktiven Traegersysteme.
-
-    Anders als Startplaetze und FIRs traegt sie keine Koordinaten, sondern
-    ordnet jedem Traegersystem eine Nation zu. mtime gehoert zum Cache-
-    Schluessel, damit Aenderungen an der Datei sofort greifen.
-    """
-    return prepare_vehicles(_read_csv_any(path_str))
-
-
 def prepare_vehicles(df: pd.DataFrame) -> pd.DataFrame:
     """Aufbereitung der Traegersysteme - gleich fuer CSV und Datenbank."""
     fehlend = [c for c in VEHICLE_COLUMNS if c not in df.columns]
@@ -2008,26 +1996,12 @@ def apply_payload_assignments(
     apply_manual_attribute(events, groups, assignments, "payload")
 
 
-@st.cache_data(show_spinner=False)
-def load_spaceports(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
-    # mtime gehoert zum Cache-Schluessel: wird die Referenzdatei gepflegt,
-    # laedt die App sie beim naechsten Aufruf neu statt die alte Fassung zu
-    # behalten, bis der Server neu startet.
-    return prepare_spaceports(_read_csv_any(path_str))
-
-
 def prepare_spaceports(df: pd.DataFrame) -> pd.DataFrame:
     """Aufbereitung der Startplaetze - gleich fuer CSV und Datenbank."""
     df = _require_columns(df, SPACEPORT_COLUMNS, "Weltraumbahnhoefe")
     df["Kurzel"] = df["Kurzel"].astype(str).str.strip().str.upper()
     df["Land"] = df["Land"].astype(str).str.strip()
     return df
-
-
-@st.cache_data(show_spinner=False)
-def load_firs(path_str: str, mtime: float = 0.0) -> pd.DataFrame:
-    # siehe load_spaceports: der Zeitstempel erzwingt das Neuladen.
-    return prepare_firs(_read_csv_any(path_str))
 
 
 def prepare_firs(df: pd.DataFrame) -> pd.DataFrame:
@@ -2139,7 +2113,7 @@ UNDO_LIMIT = 20
 
 def persist_reference(path: Path, df: pd.DataFrame, columns: Sequence[str]) -> None:
     """
-    Schreibt eine Referenztabelle als CSV - nur noch fuer den Export
+    Nur fuer Umzug/Export: schreibt eine Referenztabelle als CSV
     (nola_umzug.exportieren); Quelle der Wahrheit ist nola.db. Die abgeleitete
     Spalte ``Nationen`` wird nicht geschrieben, sie entsteht beim Laden neu.
     """
@@ -2172,67 +2146,6 @@ def referenz_lesen(tabelle: str, db: Optional[Path] = None) -> pd.DataFrame:
     df = _PREPARE[tabelle](roh.copy())
     df.attrs["nola_stand"] = stand
     return df
-
-
-def load_workspace() -> Dict[str, Any]:
-    """Liest den gespeicherten Arbeitsstand; fehlt oder bricht er, beginnt man leer."""
-    try:
-        data = json.loads(WORKSPACE_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
-
-
-def save_workspace(
-    manual_notams: Sequence[Dict[str, Any]],
-    confirmed: Sequence[str],
-    hidden: Sequence[str],
-    rejected: Sequence[str] = (),
-    vehicle_assignments: Optional[Dict[str, str]] = None,
-    payload_assignments: Optional[Dict[str, str]] = None,
-    launch_site_assignments: Optional[Dict[str, str]] = None,
-    archiv_removed: Sequence[str] = (),
-    restored: Sequence[str] = (),
-    seestarts_removed: Sequence[str] = (),
-) -> None:
-    """Schreibt den Arbeitsstand in die Projektdatei."""
-    try:
-        WORKSPACE_FILE.write_text(
-            json.dumps(
-                {
-                    "gespeichert_utc": datetime.now(timezone.utc).isoformat(),
-                    "manual_notams": list(manual_notams),
-                    "confirmed_launches": sorted(confirmed),
-                    "hidden_events": sorted(hidden),
-                    "rejected_launches": sorted(rejected),
-                    "vehicle_assignments": {
-                        k: v
-                        for k, v in sorted((vehicle_assignments or {}).items())
-                        if v
-                    },
-                    "payload_assignments": {
-                        k: v
-                        for k, v in sorted((payload_assignments or {}).items())
-                        if v
-                    },
-                    "launch_site_assignments": {
-                        k: v
-                        for k, v in sorted((launch_site_assignments or {}).items())
-                        if v
-                    },
-                    "archiv_removed": sorted(archiv_removed),
-                    "restored_events": sorted(restored),
-                    "seestarts_removed": sorted(seestarts_removed),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-    except OSError:  # pragma: no cover - Schreibfehler duerfen die App nicht stoppen
-        pass
 
 
 def apply_reference_overrides(
@@ -4890,15 +4803,6 @@ def fallback_points(
     ]
 
 
-def archive_keys_or_reason(path: Path) -> Tuple[Optional[Set[str]], str]:
-    """Schluessel des Archivs; bei unlesbarer Datei None und der Grund."""
-    try:
-        bestand = read_archive_strict(path)
-    except ArchiveUnreadable as exc:
-        return None, str(exc)
-    return {archive_key(dict(r)) for _, r in bestand.iterrows()}, ""
-
-
 def migrate_archive_keys(keys: Iterable[str]) -> Set[str]:
     """
     Bringt gespeicherte Loeschschluessel auf die heutige Form.
@@ -5064,21 +4968,6 @@ def sea_launch_key(row: Dict[str, Any]) -> str:
     )
 
 
-def load_sea_launches(path: Path) -> pd.DataFrame:
-    """Liest das Seestart-Protokoll; fehlt es, beginnt es leer."""
-    leer = pd.DataFrame(columns=list(SEA_LAUNCH_COLUMNS))
-    if not path.exists():
-        return leer
-    try:
-        df = _read_csv_any(str(path))
-    except Exception:
-        return leer
-    for spalte in SEA_LAUNCH_COLUMNS:
-        if spalte not in df.columns:
-            df[spalte] = ""
-    return df[list(SEA_LAUNCH_COLUMNS)].fillna("").astype(str)
-
-
 def merge_sea_launches(
     bestand: pd.DataFrame,
     neue: Sequence[Dict[str, Any]],
@@ -5109,28 +4998,19 @@ def merge_sea_launches(
     return pd.DataFrame(zeilen, columns=list(SEA_LAUNCH_COLUMNS))
 
 
-def persist_sea_launches(path: Path, df: pd.DataFrame) -> None:
-    """Schreibt das Seestart-Protokoll in die Projektdatei."""
-    try:
-        path.write_text(
-            df[list(SEA_LAUNCH_COLUMNS)].to_csv(index=False), encoding="utf-8-sig"
-        )
-    except OSError:  # pragma: no cover - Schreibfehler duerfen die App nicht stoppen
-        pass
-
-
 class ArchiveUnreadable(Exception):
     """Das Startarchiv ist vorhanden, aber nicht lesbar - es darf nicht geschrieben werden."""
 
 
 def read_archive_strict(path: Path) -> pd.DataFrame:
     """
-    Liest das Startarchiv fuer jeden Schreibvorgang.
+    Nur fuer Umzug/Export: liest die alte Archiv-CSV streng (nola_umzug.umziehen);
+    im Betrieb liest die Anwendung das Archiv aus nola.db (archiv_lesen).
 
     Fehlt die Datei, beginnt das Archiv leer. Ist sie vorhanden, aber nicht
     lesbar (Zerlegungs-, Rechte-, Encodingfehler, leer oder mit anderer
-    Kopfzeile), bricht es mit ArchiveUnreadable ab: ein leeres Archiv
-    darueberzuschreiben hiesse, den ganzen Bestand zu verlieren.
+    Kopfzeile), bricht es mit ArchiveUnreadable ab: ein leeres Archiv zu
+    uebernehmen hiesse, den ganzen Bestand zu verlieren.
     """
     if not path.exists():
         return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
@@ -5173,20 +5053,6 @@ def read_archive_strict(path: Path) -> pd.DataFrame:
     return df[list(ARCHIVE_COLUMNS)].fillna("").astype(str)
 
 
-def load_archive(path: Path) -> pd.DataFrame:
-    """
-    Liest das Startarchiv fuer Anzeige und Zaehlung; fehlt oder bricht die
-    Datei, beginnt es leer. Wer schreibt, liest mit read_archive_strict.
-
-    Bewusst ohne Cache: die Anwendung schreibt diese Datei selbst, ein
-    veralteter Zwischenstand waere hier gefaehrlicher als der Lesevorgang teuer.
-    """
-    try:
-        return read_archive_strict(path)
-    except ArchiveUnreadable:
-        return pd.DataFrame(columns=list(ARCHIVE_COLUMNS))
-
-
 def _write_bytes_atomic(path: Path, daten: bytes) -> None:
     """
     Schreibt erst eine temporaere Datei und benennt sie dann um.
@@ -5218,20 +5084,6 @@ def _write_bytes_atomic(path: Path, daten: bytes) -> None:
         raise
 
 
-def persist_archive(path: Path, df: pd.DataFrame) -> None:
-    """
-    Schreibt das Archiv atomar in die Projektdatei - ein Absturz hinterlaesst
-    die alte oder die neue Fassung, nie eine halbe.
-    """
-    try:
-        _write_bytes_atomic(
-            path, df[list(ARCHIVE_COLUMNS)].to_csv(index=False).encode("utf-8-sig")
-        )
-    except OSError:  # Schreibfehler duerfen die App nicht stoppen; der Import prueft nach
-        pass
-
-
-
 def archiv_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
     """
     Startarchiv aus der Datenbank fuer jeden Schreibvorgang. Ein Lesefehler wird
@@ -5248,7 +5100,7 @@ def archiv_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT
 
 
 def archiv_anzeigen(db: Optional[Path] = None) -> pd.DataFrame:
-    """Fuer Anzeige und Zaehlung; bei Fehler leer (wie load_archive)."""
+    """Fuer Anzeige und Zaehlung; bei Fehler leer (ein leeres Archiv mit allen Spalten)."""
     try:
         return archiv_lesen(db)
     except ArchiveUnreadable:
@@ -5293,7 +5145,7 @@ def archiv_und_importzustand_schreiben(
 
 
 def seestarts_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
-    """Seestart-Protokoll aus der Datenbank, Form wie load_sea_launches (Text, leer = '')."""
+    """Seestart-Protokoll aus der Datenbank, als Text (leer = '', nie NaN)."""
     with _db(db, wartezeit) as conn:
         roh = nola_db.lese_tabelle(conn, "seestarts")
     df = roh.fillna("").astype(str)
@@ -5314,7 +5166,7 @@ def seestarts_schreiben(
 
 
 def _seestarts_anzeigen(db: Optional[Path] = None) -> pd.DataFrame:
-    """Fuer Anzeige und Zaehlung; bei Fehler leer (wie load_sea_launches)."""
+    """Fuer Anzeige und Zaehlung; bei Fehler leer (ein leeres Protokoll mit allen Spalten)."""
     try:
         return seestarts_lesen(db)
     except nola_db.DbFehler:
@@ -5777,10 +5629,16 @@ def _add_manual_notams() -> None:
     raw = st.session_state.get("manual_input", "")
     chunks = split_pasted_notams(raw)
     stamp = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%MZ")
-    for chunk in chunks:
-        st.session_state["manual_notams"].append({"text": chunk, "added": stamp})
+    angehaengt = [{"text": chunk, "added": stamp} for chunk in chunks]
+    st.session_state["manual_notams"].extend(angehaengt)
     if _persist_workspace() is not None:
-        # Nicht gespeichert: Text bleibt im Feld, die Meldung kommt aus _persist_workspace
+        # Nicht gespeichert: Text bleibt im Feld, die Meldung kommt aus _persist_workspace.
+        # Scheiterte auch das Neuladen, stuenden die Eintraege ohne id noch in der
+        # Sitzung - ein zweiter Klick fuegte sie doppelt ein. Darum wieder heraus.
+        st.session_state["manual_notams"] = [
+            e for e in st.session_state.get("manual_notams", [])
+            if not any(e is a for a in angehaengt)
+        ]
         st.session_state["manual_feedback"] = None
         return
     st.session_state["manual_feedback"] = len(chunks)
@@ -6250,7 +6108,15 @@ def _vehicle_editor(vehicles: pd.DataFrame) -> None:
                 st.rerun(scope="app")
 
 
-@st.dialog("Reference Data", width="large")
+def _ref_dialog_geschlossen() -> None:
+    """
+    on_dismiss des Referenzdialogs (X, Escape, Klick daneben): das Flag faellt,
+    sonst oeffnete main() den Dialog beim naechsten Durchlauf wieder (nola-o25).
+    """
+    st.session_state["ref_dialog_open"] = False
+
+
+@st.dialog("Reference Data", width="large", on_dismiss=_ref_dialog_geschlossen)
 def _reference_dialog(
     spaceports: pd.DataFrame, firs: pd.DataFrame, vehicles: pd.DataFrame
 ) -> None:
@@ -7565,6 +7431,8 @@ def main() -> None:
             ", ".join("{} {}".format(v, k) for k, v in zaehlung.items())))
     tages_warnung = _taegliche_sicherung()
 
+    # In der oeffentlichen Fassung liest _arbeitsstand_laden nur die Sitzung, die beiden
+    # Zweige greifen dann nie; sie bleiben fuer den lokalen Betrieb (eine Pruefung weniger).
     try:
         _arbeitsstand_laden()
     except nola_db.DateiFehlt:

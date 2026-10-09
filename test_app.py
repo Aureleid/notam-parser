@@ -44,6 +44,45 @@ def _kopie_der_test_db():
     return _ziel
 
 
+# Alte Dateiformate nur fuer Tests lesen/schreiben: die App liest und schreibt nola.db,
+# die Dateien sind Quelle des Umzugs und Format des Exports (die Datei-Helfer der App
+# sind entfernt, Folgepunkte Aufgabe 5).
+def _sp_csv(pfad=None):
+    """Startplatz-CSV, aufbereitet wie in der App (prepare_spaceports)."""
+    return app.prepare_spaceports(app._read_csv_any(str(pfad or app.SPACEPORT_CSV)))
+
+
+def _fir_csv(pfad=None):
+    """FIR-CSV, aufbereitet wie in der App (prepare_firs)."""
+    return app.prepare_firs(app._read_csv_any(str(pfad or app.FIR_CSV)))
+
+
+def _veh_csv(pfad=None):
+    """Traegersystem-CSV, aufbereitet wie in der App (prepare_vehicles)."""
+    return app.prepare_vehicles(app._read_csv_any(str(pfad or app.VEHICLE_CSV)))
+
+
+def _archiv_csv_schreiben(pfad, df):
+    """Archiv-CSV im alten Format (Quelle fuer _temp_db / den Umzug)."""
+    pfad.write_bytes(df[list(app.ARCHIVE_COLUMNS)].to_csv(index=False).encode("utf-8-sig"))
+
+
+def _see_csv(pfad=None):
+    """Seestart-CSV als Text wie seestarts_lesen (leer = '', fehlende Spalten leer)."""
+    pfad = pfad or app.SEA_LAUNCH_CSV
+    df = app._read_csv_any(str(pfad))
+    for spalte in app.SEA_LAUNCH_COLUMNS:
+        if spalte not in df.columns:
+            df[spalte] = ""
+    return df[list(app.SEA_LAUNCH_COLUMNS)].fillna("").astype(str)
+
+
+def _leerer_zustand():
+    """Frischer, leerer Importzustand (wie aus einer fehlenden Datei)."""
+    import archiv_import as _ai_l
+    return _ai_l.zustand_aus_daten({}, "test")
+
+
 def _kaputte_db(name="kaputt.db"):
     """Vorhandene, aber unlesbare Datenbankdatei (kein SQLite-Kopf)."""
     _pfad = _P_db(_tf_db.mkdtemp()) / name
@@ -122,8 +161,8 @@ check("Hoehenprofil bleibt sauber", app.extract_altitude_profile(joined, it2) ==
 check("E-Item endet am Spalten-Trenner", it2["E"] == "ROCKET LAUNCH", repr(it2.get("E")))
 
 print("== 4. Referenzdaten ==")
-sp = app.load_spaceports(str(app.SPACEPORT_CSV))
-fir = app.load_firs(str(app.FIR_CSV))
+sp = _sp_csv()
+fir = _fir_csv()
 check("Weltraumbahnhoefe geladen", len(sp) >= 31, len(sp))
 check("FIRs geladen", len(fir) >= 86, len(fir))
 check("FIR-Referenz nennt das Land der FIR", "Land" in fir.columns)
@@ -1317,8 +1356,7 @@ shutil.copy(app.SPACEPORT_CSV, sp_datei)
 shutil.copy(app.FIR_CSV, fir_datei)
 
 app.persist_reference(sp_datei, sp[sp["Kurzel"] != "TSLC"], app.SPACEPORT_EXPORT_COLUMNS)
-app.load_spaceports.clear()
-nach_entfernen = app.load_spaceports(str(sp_datei))
+nach_entfernen = _sp_csv(sp_datei)
 check("Entfernen landet in der Datei",
       "TSLC" not in set(nach_entfernen["Kurzel"]) and len(nach_entfernen) == len(sp) - 1,
       len(nach_entfernen))
@@ -1330,8 +1368,7 @@ zeile = {"Kurzel": "NEUX", "Latitude": 12.0, "Longitude": 34.0,
 app.persist_reference(
     sp_datei, pd.concat([nach_entfernen, pd.DataFrame([zeile])], ignore_index=True),
     app.SPACEPORT_EXPORT_COLUMNS)
-app.load_spaceports.clear()
-nach_hinzu = app.load_spaceports(str(sp_datei))
+nach_hinzu = _sp_csv(sp_datei)
 check("Hinzufuegen landet in der Datei", "NEUX" in set(nach_hinzu["Kurzel"]))
 check("  ... mit den richtigen Werten",
       float(nach_hinzu[nach_hinzu["Kurzel"] == "NEUX"]["Latitude"].iloc[0]) == 12.0)
@@ -1340,8 +1377,7 @@ check("geschriebene Datei hat das Originalformat",
       list(pd.read_csv(sp_datei).columns))
 
 app.persist_reference(fir_datei, fir[fir["ICAO Code"] != "ZBPE"], app.FIR_EXPORT_COLUMNS)
-app.load_firs.clear()
-fir_neu = app.load_firs(str(fir_datei))
+fir_neu = _fir_csv(fir_datei)
 check("FIR-Entfernen landet in der Datei", "ZBPE" not in set(fir_neu["ICAO Code"]))
 check("  ... abgeleitete Spalte wird nicht mitgeschrieben",
       "Nationen" not in list(pd.read_csv(fir_datei).columns),
@@ -1349,34 +1385,11 @@ check("  ... abgeleitete Spalte wird nicht mitgeschrieben",
 check("  ... entsteht beim Laden neu", "Nationen" in fir_neu.columns)
 
 print("== 55. Arbeitsstand ueberlebt den Neustart ==")
-ws_original = app.WORKSPACE_FILE
-try:
-    app.WORKSPACE_FILE = tmp / "workspace.json"
-    check("ohne Datei ein leerer Stand", app.load_workspace() == {})
-    app.save_workspace(
-        [{"text": "A1/26 TEST NOTAM", "added": "21.09.2026 20:00Z"}],
-        {"key-eins", "key-zwei"}, {"key-drei"},
-    )
-    geladen = app.load_workspace()
-    check("manuelle NOTAMs gespeichert", len(geladen["manual_notams"]) == 1,
-          geladen["manual_notams"])
-    check("Bestaetigungen gespeichert",
-          set(geladen["confirmed_launches"]) == {"key-eins", "key-zwei"},
-          geladen["confirmed_launches"])
-    check("Ausblendungen gespeichert", geladen["hidden_events"] == ["key-drei"],
-          geladen["hidden_events"])
-    check("Zeitstempel vermerkt", "gespeichert_utc" in geladen)
-    app.WORKSPACE_FILE.write_text("kein json", encoding="utf-8")
-    check("beschaedigte Datei bricht die App nicht", app.load_workspace() == {})
-finally:
-    app.WORKSPACE_FILE = ws_original
-    app.load_spaceports.clear()
-    app.load_firs.clear()
-    shutil.rmtree(tmp, ignore_errors=True)
-
+# Die Datei-Fassung (load_workspace/save_workspace) ist entfernt; den Rundlauf ueber nola.db
+# pruefen test_nola_db.py (Abschnitte 9 und 19) und "Lokale Datenbank: Arbeitsstand" weiter unten.
+shutil.rmtree(tmp, ignore_errors=True)
 check("Projektdateien unveraendert geblieben",
-      len(app.load_spaceports(str(app.SPACEPORT_CSV))) == len(sp)
-      and len(app.load_firs(str(app.FIR_CSV))) == len(fir))
+      len(_sp_csv()) == len(sp) and len(_fir_csv()) == len(fir))
 
 print("== 56. Einheitliche Markierung in allen Ansichten ==")
 md = app.mark_id_markdown("A4457/26", True)
@@ -1465,21 +1478,7 @@ check("Zurueckstellung ueberschreibt keine echte Review-Begruendung",
       e_r4.review_reason == review_ziel.review_reason, e_r4.review_reason)
 
 print("== 59. Arbeitsstand sichert die Zurueckstellungen ==")
-ws_alt = app.WORKSPACE_FILE
-try:
-    import tempfile as _tf
-    from pathlib import Path as _P
-    app.WORKSPACE_FILE = _P(_tf.mkdtemp()) / "ws.json"
-    app.save_workspace([], {"bestaetigt"}, {"versteckt"}, {"zurueckgestellt"})
-    g = app.load_workspace()
-    check("Zurueckstellungen gespeichert",
-          g["rejected_launches"] == ["zurueckgestellt"], g.get("rejected_launches"))
-    check("  ... neben Bestaetigungen und Ausblendungen",
-          g["confirmed_launches"] == ["bestaetigt"] and g["hidden_events"] == ["versteckt"])
-    check("alter Arbeitsstand ohne das Feld bleibt lesbar",
-          app.load_workspace().get("rejected_launches") is not None)
-finally:
-    app.WORKSPACE_FILE = ws_alt
+# Datei-Fassung entfernt; Zurueckstellungen im Arbeitsstand prueft test_nola_db.py (Abschnitte 9 und 19).
 
 print("== 60. Sprung von der Launch Overview zum Volltext ==")
 class _Auswahl:
@@ -1523,7 +1522,7 @@ check("Sprungkennzeichen wird gesetzt und verbraucht",
 check("gewaehlte Zeilen werden gemerkt", '"focus_rows"' in quelle)
 
 print("== 62. Referenz der Traegersysteme ==")
-veh = app.load_vehicles(str(app.VEHICLE_CSV))
+veh = _veh_csv()
 check("Traegersysteme geladen", len(veh) >= 51, len(veh))
 check("Spalten wie in der Quelldatei",
       list(veh.columns) == app.VEHICLE_COLUMNS, list(veh.columns))
@@ -1575,30 +1574,26 @@ veh_datei = tmp_v / "veh.csv"
 _sh.copy(app.VEHICLE_CSV, veh_datei)
 try:
     app.persist_reference(veh_datei, ohne, app.VEHICLE_EXPORT_COLUMNS)
-    app.load_vehicles.clear()
-    nach = app.load_vehicles(str(veh_datei))
+    nach = _veh_csv(veh_datei)
     check("Entfernen landet in der Datei",
           "CZ-5B" not in set(nach["Abkürzung"]) and len(nach) == len(veh) - 1, len(nach))
     check("geschriebene Datei hat das Originalformat",
           list(pd.read_csv(veh_datei).columns) == list(app.VEHICLE_EXPORT_COLUMNS),
           list(pd.read_csv(veh_datei).columns))
     app.persist_reference(veh_datei, mit, app.VEHICLE_EXPORT_COLUMNS)
-    app.load_vehicles.clear()
     check("Hinzufuegen landet in der Datei",
-          "CZ-9" in set(app.load_vehicles(str(veh_datei))["Abkürzung"]))
+          "CZ-9" in set(_veh_csv(veh_datei)["Abkürzung"]))
     fehlerhaft = tmp_v / "kaputt.csv"
     fehlerhaft.write_text("Land,Name\nChina,Test\n", encoding="utf-8")
-    app.load_vehicles.clear()
     try:
-        app.load_vehicles(str(fehlerhaft))
+        _veh_csv(fehlerhaft)
         check("fehlende Spalten werden gemeldet", False, "keine Ausnahme")
     except ValueError as e:
         check("fehlende Spalten werden gemeldet", "Abkürzung" in str(e), str(e)[:60])
 finally:
-    app.load_vehicles.clear()
     _sh.rmtree(tmp_v, ignore_errors=True)
 check("Projektdatei unveraendert",
-      len(app.load_vehicles(str(app.VEHICLE_CSV))) == len(veh))
+      len(_veh_csv()) == len(veh))
 
 print("== 65. Einbindung wie die anderen Referenzen ==")
 quelle_v = Path("app.py").read_text(encoding="utf-8")
@@ -1615,7 +1610,7 @@ def _ev_n(nation=None, hint=None, fir=None):
     return e
 
 print("== 66. Traegersystem-Dropdown: gestaffelte Auswahlliste ==")
-veh_ref = app.load_vehicles(str(app.VEHICLE_CSV))
+veh_ref = _veh_csv()
 opt = app.vehicle_options(veh_ref, "China")
 check("erster Eintrag ist die leere Zuweisung", opt[0] == app.VEHICLE_NONE, opt[0])
 check("Trennzeile vorhanden", app.VEHICLE_SEPARATOR in opt)
@@ -1701,28 +1696,7 @@ check("ohne Referenz bleibt der Code lesbar",
 
 print("== 70. Zuweisungen ueberleben den Neustart ==")
 import json as _json, shutil as _shutil, tempfile as _tempfile
-tmp_w = Path(_tempfile.mkdtemp())
-echt_w = app.WORKSPACE_FILE
-try:
-    app.WORKSPACE_FILE = tmp_w / "notam_workspace.json"
-    app.save_workspace([], [], [], vehicle_assignments={"k1": "CZ-2D", "k2": "CZ-2D", "k3": ""})
-    daten = _json.loads(app.WORKSPACE_FILE.read_text(encoding="utf-8"))
-    check("Zuweisungen stehen in der Datei",
-          daten["vehicle_assignments"] == {"k1": "CZ-2D", "k2": "CZ-2D"},
-          daten["vehicle_assignments"])
-    check("leere Zuweisung wird nicht gespeichert", "k3" not in daten["vehicle_assignments"])
-    check("gelesen wie geschrieben",
-          app.load_workspace()["vehicle_assignments"]["k1"] == "CZ-2D")
-    app.save_workspace([], [], [], [])
-    check("ohne Argument bleibt der Eintrag leer",
-          app.load_workspace()["vehicle_assignments"] == {})
-    alt_stand = {"manual_notams": [], "confirmed_launches": []}
-    app.WORKSPACE_FILE.write_text(_json.dumps(alt_stand), encoding="utf-8")
-    check("alter Arbeitsstand ohne das Feld bricht nicht",
-          app.load_workspace().get("vehicle_assignments", {}) == {})
-finally:
-    app.WORKSPACE_FILE = echt_w
-    _shutil.rmtree(tmp_w, ignore_errors=True)
+# Datei-Fassung entfernt; Zuweisungen im Arbeitsstand prueft test_nola_db.py (Abschnitte 9 und 19).
 
 print("== 71. Einbindung in die Oberflaeche ==")
 quelle_tr = Path("app.py").read_text(encoding="utf-8")
@@ -1768,25 +1742,7 @@ check("Payload steht direkt hinter dem Traegersystem",
       list(app.events_to_dataframe([pe1]).columns).index("Payload")
       - list(app.events_to_dataframe([pe1]).columns).index("Trägersystem") == 1)
 
-tmp_p = Path(_tempfile.mkdtemp())
-echt_p = app.WORKSPACE_FILE
-try:
-    app.WORKSPACE_FILE = tmp_p / "notam_workspace.json"
-    app.save_workspace([], [], [], vehicle_assignments={"p1": "CZ-2D"},
-                   payload_assignments={"p1": "Yaogan-XX", "p2": ""})
-    daten_p = _json.loads(app.WORKSPACE_FILE.read_text(encoding="utf-8"))
-    check("Payload steht in der Arbeitsdatei",
-          daten_p["payload_assignments"] == {"p1": "Yaogan-XX"}, daten_p["payload_assignments"])
-    check("Traegersystem steht unabhaengig daneben",
-          daten_p["vehicle_assignments"] == {"p1": "CZ-2D"})
-    check("gelesen wie geschrieben",
-          app.load_workspace()["payload_assignments"]["p1"] == "Yaogan-XX")
-    app.WORKSPACE_FILE.write_text(_json.dumps({"manual_notams": []}), encoding="utf-8")
-    check("alter Arbeitsstand ohne das Feld bricht nicht",
-          app.load_workspace().get("payload_assignments", {}) == {})
-finally:
-    app.WORKSPACE_FILE = echt_p
-    _shutil.rmtree(tmp_p, ignore_errors=True)
+# Payload im Arbeitsstand (Datei-Fassung entfernt): test_nola_db.py, Abschnitte 9 und 19.
 
 quelle_p = Path("app.py").read_text(encoding="utf-8")
 check("Feld nur unter NOTAM Data", quelle_p.count("_payload_field(") == 2)
@@ -1877,31 +1833,18 @@ zwei = app.merge_archive(erst, [app.archive_row(ag2, [z1, z2])])
 check("ein anderer Start kommt hinzu", len(zwei) == 2, len(zwei))
 check("Reihenfolge bleibt stabil", zwei["Weltraumbahnhof"].tolist() == ["JSLC", "XSLC"])
 
-print("== 75. Archivdatei lesen und schreiben ==")
+print("== 75. Archivdatei lesen (nur noch Quelle des Umzugs) ==")
 tmp_a = Path(_tempfile.mkdtemp())
 try:
-    datei = tmp_a / "startarchiv_updated.csv"
-    check("fehlende Datei ergibt ein leeres Archiv",
-          app.load_archive(datei).empty and list(app.load_archive(datei).columns)
-          == list(app.ARCHIVE_COLUMNS))
-    app.persist_archive(datei, zwei)
-    zurueck = app.load_archive(datei)
-    check("gelesen wie geschrieben", len(zurueck) == 2)
-    check("Spaltenreihenfolge in der Datei bleibt",
-          list(zurueck.columns) == list(app.ARCHIVE_COLUMNS))
-    check("Payload ueberlebt den Dateiweg", zurueck["Payload"].iloc[0] == "Yaogan-XX")
     (tmp_a / "halb.csv").write_text("NOTAM,Payload\nA/26,Yaogan\n", encoding="utf-8")
-    # nola-3dq.11: fehlende Spalten wuerden beim Schreiben geleert - die Datei
-    # gilt als unlesbar (wird nie ueberschrieben), die Anzeige zeigt sie leer
-    halb = app.load_archive(tmp_a / "halb.csv")
+    # nola-3dq.11: fehlende Spalten wuerden beim Umzug geleert - die Datei gilt als unlesbar
     try:
         app.read_archive_strict(tmp_a / "halb.csv")
         _halb_e = None
     except app.ArchiveUnreadable as exc:
         _halb_e = exc
     check("unvollstaendige Datei gilt als unlesbar statt still ergaenzt",
-          halb.empty and _halb_e is not None and "Weltraumbahnhof" in str(_halb_e),
-          (halb.to_dict("records"), repr(_halb_e)))
+          _halb_e is not None and "Weltraumbahnhof" in str(_halb_e), repr(_halb_e))
 finally:
     _shutil.rmtree(tmp_a, ignore_errors=True)
 
@@ -1917,19 +1860,10 @@ check("Statuszeile in der Seitenleiste", "Launch archive: {} launch(es)" in quel
 check("Statuszeile zeigt den Stand nach der Auswertung",
       quelle_a.count("_show_archive_status(") == 3, quelle_a.count("_show_archive_status("))
 check("Loeschungen werden im Arbeitsstand gemerkt",
-      '"archiv_removed": sorted(archiv_removed)' in quelle_a)
+      'st.session_state.setdefault("archiv_removed", set()).add(schluessel)' in quelle_a)
 check("kein Anlege-Formular fuers Archiv", 'st.form("add_archive"' not in quelle_a)
 
-tmp_w2 = Path(_tempfile.mkdtemp())
-echt_w2 = app.WORKSPACE_FILE
-try:
-    app.WORKSPACE_FILE = tmp_w2 / "w.json"
-    app.save_workspace([], [], [], archiv_removed=["k-a", "k-b"])
-    check("geloeschte Archivzeilen ueberleben den Neustart",
-          app.load_workspace()["archiv_removed"] == ["k-a", "k-b"])
-finally:
-    app.WORKSPACE_FILE = echt_w2
-    _shutil.rmtree(tmp_w2, ignore_errors=True)
+# Loeschschluessel im Arbeitsstand (Datei-Fassung entfernt): test_nola_db.py, Abschnitte 9 und 19.
 
 print("== 77. Anzeigesprache und Tabellenformat ==")
 gt = app.groups_to_dataframe([pg])
@@ -2187,18 +2121,7 @@ check("Regel greift erst in der Oberflaeche, nicht in der Auswertung",
 check("Excluded weist Urheber aus", '"Excluded by"' in quelle_h)
 check("  ... und die Begruendung", "e.auto_hidden_reason if e.key in auto_hidden_keys" in quelle_h)
 
-tmp_h = Path(_tempfile.mkdtemp()); echt_h = app.WORKSPACE_FILE
-try:
-    app.WORKSPACE_FILE = tmp_h / "w.json"
-    app.save_workspace([], [], [], restored=["key-x"])
-    check("zurueckgeholte NOTAMs ueberleben den Neustart",
-          app.load_workspace()["restored_events"] == ["key-x"])
-    app.WORKSPACE_FILE.write_text(_json.dumps({"manual_notams": []}), encoding="utf-8")
-    check("alter Arbeitsstand ohne das Feld bricht nicht",
-          app.load_workspace().get("restored_events", []) == [])
-finally:
-    app.WORKSPACE_FILE = echt_h
-    _shutil.rmtree(tmp_h, ignore_errors=True)
+# Zurueckgeholte NOTAMs im Arbeitsstand (Datei-Fassung entfernt): test_nola_db.py, Abschnitte 9 und 19.
 
 print("== 83. Befunde der Fremdpruefung vom 25.09.2026 ==")
 
@@ -3067,17 +2990,7 @@ check("Auswahlliste nur bei Nachbarplaetzen",
 check("Vorgabe ist 'not determined'", '"not determined" if not code' in quelle_x)
 check("die Wahl wird im Arbeitsstand gesichert",
       "launch_site_assignments" in quelle_x)
-echt_w2 = app.WORKSPACE_FILE
-app.WORKSPACE_FILE = Path("test_workspace_pad.json")
-try:
-    app.save_workspace([], [], [], launch_site_assignments={"kx": "HAIN", "ky": ""})
-    wieder = app.load_workspace()
-    check("gespeichert und wieder gelesen",
-          wieder.get("launch_site_assignments") == {"kx": "HAIN"},
-          wieder.get("launch_site_assignments"))
-finally:
-    app.WORKSPACE_FILE.unlink(missing_ok=True)
-    app.WORKSPACE_FILE = echt_w2
+# Pad-Wahl im Arbeitsstand (Datei-Fassung samt test_workspace_pad.json entfernt): test_nola_db.py, Abschnitte 9 und 19.
 import inspect as _ins_pw
 _quelle_pw = _ins_pw.getsource(app._persist_workspace)
 check("_persist_workspace schreibt ueber nola_db.schreibe_unterschiede(conn, vorher, aktuell, ...), nicht ueber save_workspace",
@@ -3188,8 +3101,7 @@ except Exception as exc:  # noqa: BLE001
 check("strikt lesen: fehlende Datei -> leeres Archiv",
       _e2_u is None and _r_u is not None and _r_u.empty
       and list(_r_u.columns) == list(app.ARCHIVE_COLUMNS), repr(_e2_u))
-check("Anzeige: load_archive liefert fuer die unlesbare Datei weiter leer",
-      app.load_archive(_kaputt_u).empty)
+# (Anzeige liest nola.db: archiv_anzeigen, siehe "Lokale Datenbank: Archiv und Seestarts")
 
 # Tagesbetrieb: _update_archive mit Stub-st und Ersatz-Datenbank
 _orig_u = (app.st, app.DB_PATH, app.archive_row, app._persist_workspace)
@@ -3315,9 +3227,11 @@ check("Korpus: drei neu, dann eine Dublette", (neu, dup, neu2, dup2) == (3, 0, 0
 check("  ... Quellen zusammengefuehrt",
       korpus["A4631/26|2609200354"].quellen == ["test.txt", "seite2.txt"],
       korpus["A4631/26|2609200354"].quellen)
-ai.save_korpus(korpus, _tmp / "k.json")
+# Datei im Format des Umzugs/Exports (save_korpus ist entfernt; load_korpus liest sie fuer den Umzug)
+ai.write_json_atomic(_tmp / "k.json", {"version": 1, "notams": [
+    {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen} for n in korpus.values()]})
 _gel = ai.load_korpus(_tmp / "k.json")
-check("Korpus: speichern und laden", set(_gel) == set(korpus))
+check("Korpus: Datei (Umzugsformat) laden", set(_gel) == set(korpus))
 check("  ... Quellen und Text ueberleben", all(
     _gel[k].quellen == korpus[k].quellen and _gel[k].text == korpus[k].text for k in korpus))
 for _nm, _inhalt in (("kaputt_a.json", '{"notams":[{"x":1}]}'), ("kaputt_b.json", '{"notams":5}')):
@@ -3610,7 +3524,7 @@ fremd = dict(kand, row=dict(kand["row"], Weltraumbahnhof="XSLC"))
 abg_f = ai.match_candidate(fremd, gs, sites)
 check("Hinweis nennt nicht zugeordnete GCAT-Plaetze im Fenster",
       any("VSFBS" in h for h in abg_f.hinweise), abg_f.hinweise)
-veh = app.load_vehicles(str(app.VEHICLE_CSV))
+veh = _veh_csv()
 check("Rakete: Chang Zheng 2D/YZ-3 -> CZ-2D", ai.vehicle_code_for("Chang Zheng 2D/YZ-3", veh) == "CZ-2D")
 check("Rakete: Soyuz-2-1A -> Soyuz-2.1a", ai.vehicle_code_for("Soyuz-2-1A", veh) == "Soyuz-2.1a")
 _alias = {ai._norm_name("PSLV-XL"): "PSLV", ai._norm_name("Cheonlima-1"): "Chollima-1",
@@ -3669,7 +3583,7 @@ check("kaputte Alias-CSV: ImportStateError mit Datei und Spalte",
       _fehler is not None and "alias_kaputt.csv" in _fehler and "Abkürzung" in _fehler, _fehler)
 
 # Aufgabe 6: Importzustand, Wiederaufnahme, Bestaetigen, Sammelbestaetigung
-zst = ai.load_state(_tmp / "s.json")
+zst = _leerer_zustand()
 archiv_t = _temp_db()  # Temp-Datenbank mit leerem Startarchiv
 _kein_archiv = _temp_db()  # nie geschrieben: Kandidaten ohne Archivbezug
 kx = {}
@@ -3692,8 +3606,6 @@ check("  ... mit Rakete und Payload", (a1.iloc[0]["Trägersystem"], a1.iloc[0]["
       a1.iloc[0].to_dict())
 check("  ... Quelle im Nebenbestand", zst["entscheidungen"][kl[0]["key"]]["quellen"] == ["seite1.html#msg_1"])
 check("  ... danach nicht mehr in der Sammelauswahl", ai.bulk_candidates(ai.candidates(zst, archiv_t), gs, sites, veh) == [])
-ai.save_state(zst, _tmp / "s.json")
-check("Zustand speichern und laden", ai.load_state(_tmp / "s.json")["entscheidungen"] == zst["entscheidungen"])
 check("leere Auswahl schreibt nichts", ai.confirm_many(zst, [], _tmp / "nie.db") == 0 and not (_tmp / "nie.db").exists())
 
 # Kaputte Zustandsdatei (gueltiges JSON, falsche Typen): Abbruch, Datei bleibt unberuehrt
@@ -3704,7 +3616,8 @@ for _nm, _inhalt in (("st_a.json", '{"tage": []}'), ("st_b.json", '{"entscheidun
                      ("st_g.json", '{"entscheidungen": {"k": "confirmed"}}')):
     (_tmp / _nm).write_text(_inhalt, encoding="utf-8")
     try:
-        ai.load_state(_tmp / _nm)
+        # wie der Umzug die alte Datei liest (load_state ist entfernt)
+        ai.zustand_aus_daten(ai.read_json(_tmp / _nm), _nm)
         check("Zustand mit kaputter Struktur bricht ab: " + _inhalt, False)
     except ai.ImportStateError as _e:
         check("Zustand mit kaputter Struktur bricht ab: " + _inhalt,
@@ -3736,7 +3649,7 @@ check("  ... alter Schluessel als ersetzt vermerkt",
 check("Bestaetigen ignoriert archiv_removed", "entfernt=set()" in (_P(app.APP_DIR) / "archiv_import.py").read_text(encoding="utf-8"))
 
 # Fixrunde 1: Bestaetigung erst nach geprueftem Schreiben, Ersatz mehrerer Vorgaenger
-zf = ai.load_state(_tmp / "f.json")
+zf = _leerer_zustand()
 ai.reevaluate(kx, zf, sp, fir)
 kfl = ai.candidates(zf, _kein_archiv)
 kf = kfl[0]
@@ -3810,9 +3723,9 @@ _r1 = dict(_roh["row"], NOTAM=_roh["notam_ids"][0])
 _r2 = dict(_roh["row"], NOTAM=_roh["notam_ids"][1])
 _k1, _k2 = app.archive_key(_r1), app.archive_key(_r2)
 archiv_z = _tmp / "archiv_z.csv"
-app.persist_archive(archiv_z, app.merge_archive(None, [_r1, _r2]))
+_archiv_csv_schreiben(archiv_z, app.merge_archive(None, [_r1, _r2]))
 archiv_z = _temp_db(archiv_z)
-zz = ai.load_state(_tmp / "z.json")
+zz = _leerer_zustand()
 zz["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [_roh], "pruefliste": [], "usa": 0, "ausgeblendet": 0}
 for _k, _r in ((_k1, _r1), (_k2, _r2)):
     zz["entscheidungen"][_k] = {"status": "confirmed", "rakete": "CZ-2D", "payload": "", "gcat": "",
@@ -3831,7 +3744,7 @@ check("  ... beide als ersetzt vermerkt",
       zz["entscheidungen"])
 
 # Verwerfen
-zr = ai.load_state(_tmp / "r.json")
+zr = _leerer_zustand()
 ai.reevaluate(kx, zr, sp, fir)
 _kr = ai.candidates(zr, _kein_archiv)[0]["key"]
 ai.reject(zr, _kr)
@@ -3843,7 +3756,7 @@ MITTERNACHT = [AI_CN[1].replace("B)2609200354 C)2609200415", "B)2609192350 C)260
                AI_CN[2].replace("B)2609200356 C)2609200435", "B)2609200002 C)2609200041")]
 km = {}
 ai.merge_korpus(km, ai.extract_notams("\n\n".join(MITTERNACHT), "m")[0])
-zm = ai.load_state(_tmp / "m.json")
+zm = _leerer_zustand()
 ai.reevaluate(km, zm, sp, fir)
 check("Start ueber Mitternacht: ein Kandidat mit beiden Zonen",
       [k["notam_ids"] for k in ai.candidates(zm, _kein_archiv)] == [["A4631/26", "A4632/26"]],
@@ -3861,7 +3774,7 @@ check("candidates: Bruchstueck verworfen", [k["key"] for k in ai.candidates(zm2,
 # Erkennungsstand und nicht mehr erkannte Starts
 check("Erkennungsstand nach dem ersten Lauf gesetzt", not ai.is_stale(zst), zst.get("erkennungsstand"))
 check("  ... anderer Stand -> Neuauswertung faellig", ai.is_stale(zst, stamp="anders"))
-check("  ... leerer Zustand ist nie veraltet", not ai.is_stale(ai.load_state(_tmp / "leer.json"), stamp="anders"))
+check("  ... leerer Zustand ist nie veraltet", not ai.is_stale(_leerer_zustand(), stamp="anders"))
 _ref = _tmp / "ref.csv"
 _ref.write_text("a", encoding="utf-8")
 _st1 = ai.detection_stamp([_ref])
@@ -3890,7 +3803,7 @@ check("  ... und vermerkt es", zst["entscheidungen"][neu_k[0]["key"]] == {"statu
 zst["tage"] = _tage_vorher
 
 # Pruefliste: reine Zustandsfunktionen, mit einem synthetischen Tag geprueft
-zp = ai.load_state(_tmp / "p.json")
+zp = _leerer_zustand()
 _p = {"event_key": "ek1", "schluessel": "X1/26|2609200000", "notam_id": "X1/26", "tag": "2026-09-20",
       "grund": "Foreign airspace without evidence.", "text": "X1/26 ...", "quellen": ["p"]}
 zp["tage"]["2026-09-20"] = {"fingerprint": "f", "kandidaten": [], "pruefliste": [_p], "usa": 0, "ausgeblendet": 0}
@@ -3906,7 +3819,7 @@ check("  ... Ausblenden entfernt ihn", ai.review_items(zp) == [], ai.review_item
 check("  ... und zaehlt ihn als ausgeblendet", ai.totals(zp)["ausgeblendet"] == 2, ai.totals(zp))
 
 # Space Launch aus der Pruefliste: Bestaetigung gemerkt, Tag erzwungen neu ausgewertet
-zl = ai.load_state(_tmp / "l.json")
+zl = _leerer_zustand()
 ai.reevaluate(kx, zl, sp, fir)
 zl["tage"]["2026-09-20"]["kandidaten"] = []
 ai.review_launch(zl, kx, "ek9", "2026-09-20", sp, fir)
@@ -4009,7 +3922,7 @@ try:
     _ai7.import_speichern = lambda *a, **k: _geschrieben.append("import")
     _ausnahme = None
     try:
-        app._archive_import_tab(sp, fir, app.load_vehicles(str(app.VEHICLE_CSV)))
+        app._archive_import_tab(sp, fir, _veh_csv())
     except Exception as exc:  # noqa: BLE001
         _ausnahme = exc
 finally:
@@ -4144,7 +4057,7 @@ def _tab_lauf(stub, **ersatz):
         app.st = stub
         for n, v in basis.items():
             setattr(ai, n, v)
-        app._archive_import_tab(sp, fir, app.load_vehicles(str(app.VEHICLE_CSV)))
+        app._archive_import_tab(sp, fir, _veh_csv())
     finally:
         app.st = alt_st
         for n, v in alt_ai.items():
@@ -4212,8 +4125,8 @@ ai.merge_korpus(_kd, ai.extract_notams("\n\n".join(AI_CN[1:3]), "seite_d.html#ms
 def _dub_zustand(name, zeilen):
     """Frischer Zustand aus AI_CN[1]/AI_CN[2] und eine Temp-Datenbank mit den gegebenen Archivzeilen."""
     pfad = _tmp / ("dub_" + name + ".csv")
-    app.persist_archive(pfad, app.merge_archive(None, zeilen))
-    z = ai.load_state(_tmp / ("dub_" + name + ".json"))
+    _archiv_csv_schreiben(pfad, app.merge_archive(None, zeilen))
+    z = _leerer_zustand()
     ai.reevaluate(_kd, z, sp, fir)
     return z, _temp_db(pfad)
 
@@ -4469,7 +4382,7 @@ check("Reiter: Vorgaenger-Importzeile mit Hinweis auf 'Launch Archive' genannt",
 
 
 # Referenz: 13 Traegersysteme (freigegeben 06.10.2026, nola-3dq.5)
-_veh_neu = app.load_vehicles(str(app.VEHICLE_CSV), app.VEHICLE_CSV.stat().st_mtime)
+_veh_neu = _veh_csv()
 _neue_codes = ["LJ-1", "LJ-2", "CZ-8A", "CZ-6C", "CZ-10B", "CZ-12A", "CZ-12B",
                "ZQ-2E", "ZQ-3", "TL-2", "TL-3", "GSX-2", "Vikram-1"]
 _alle_codes = [str(c) for c in _veh_neu["Abkürzung"]]
@@ -4590,7 +4503,7 @@ _r, _e = _strikt(_gut)
 check("Spalten: korrektes Archiv liest weiter",
       _e is None and len(_r) == 1 and _r["Trägersystem"].iloc[0] == "CZ-2D", repr(_e))
 _leer_kopf = _tmp_u / "nur_kopf.csv"
-app.persist_archive(_leer_kopf, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)))
+_archiv_csv_schreiben(_leer_kopf, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)))
 _r, _e = _strikt(_leer_kopf)
 check("Spalten: Archiv nur mit Kopfzeile liest als leer", _e is None and _r is not None and _r.empty,
       repr(_e))
@@ -4617,13 +4530,7 @@ for _name_l, _inh_l in (("leer.csv", b""), ("leer_ws.csv", b"  \n\n \t\n"), ("le
                                                       [(_kand_k, "CZ-2D", "P", None)], _p_l))[1],
                      ai.ImportStateError) and _p_l.read_bytes() == _inh_l)
 
-# Atomares Schreiben
-_df_a = app.read_archive_strict(_gut)
-_alt_a, _neu_a = _tmp_u / "alt_weg.csv", _tmp_u / "neu_weg.csv"
-_alt_a.write_text(_df_a[list(app.ARCHIVE_COLUMNS)].to_csv(index=False), encoding="utf-8-sig")
-app.persist_archive(_neu_a, _df_a)
-check("Atomar: persist_archive schreibt byte-gleich zur bisherigen Fassung",
-      _neu_a.read_bytes() == _alt_a.read_bytes())
+# Atomares Schreiben (der Export schreibt ueber _write_bytes_atomic; persist_archive ist entfernt)
 check("Atomar: app._write_bytes_atomic vorhanden", hasattr(app, "_write_bytes_atomic"))
 _vorher_a = _gut.read_bytes()
 _replace_orig = os.replace
@@ -4635,11 +4542,12 @@ def _replace_kaputt(*a, **k):
 
 os.replace = _replace_kaputt
 try:
-    _r, _e = _versuch(lambda: app.persist_archive(_gut, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS))))
+    _r, _e = _versuch(lambda: app._write_bytes_atomic(
+        _gut, pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS)).to_csv(index=False).encode("utf-8-sig")))
 finally:
     os.replace = _replace_orig
-check("Atomar: Schreibfehler stoppt die App nicht, alte Datei byte-gleich, keine Temp-Reste",
-      _e is None and _gut.read_bytes() == _vorher_a
+check("Atomar: Schreibfehler beim Export -> OSError, alte Datei byte-gleich, keine Temp-Reste",
+      isinstance(_e, OSError) and _gut.read_bytes() == _vorher_a
       and not list(_tmp_u.glob("*.tmp")), (repr(_e), list(_tmp_u.glob("*.tmp"))))
 _spion_a = []
 _wba_orig = getattr(app, "_write_bytes_atomic", None)
@@ -4703,7 +4611,7 @@ finally:
     app.st, app.DB_PATH = _orig_e
 
 # Einzelkandidat: Confirm ruft confirm_many; unlesbares Archiv -> st.error, nichts gespeichert
-_veh_k = app.load_vehicles(str(app.VEHICLE_CSV))
+_veh_k = _veh_csv()
 _kand_e = {"key": "einzel", "row": {"Startdatum": "05.01.2026", "Startzeit": "10:00",
                                      "Weltraumbahnhof": "JSLC", "Orbit": "SSO", "NOTAM": "A8/26",
                                      "Nation": "China"},
@@ -4753,7 +4661,7 @@ if _fns:
                 len(_st.get("groups", [])))
     _vorher_lage = _lage()
     _tmp_g = _P(tempfile.mkdtemp())
-    _zg = ai.load_state(_tmp_g / "g.json")
+    _zg = _leerer_zustand()
     _kg = {}
     _bg = ai.ingest(_kg, [], eingefuegt="\n\n".join(AI_CN))
     ai.reevaluate(_kg, _zg, sp, fir)
@@ -4792,7 +4700,7 @@ def _s_zustand(kandidaten):
 def _s_archiv(name, zeilen):
     """Temp-Datenbank mit den gegebenen Archivzeilen (ueber eine Temp-CSV migriert)."""
     pfad = _tmp_s / (name + ".csv")
-    app.persist_archive(pfad, app.merge_archive(None, zeilen))
+    _archiv_csv_schreiben(pfad, app.merge_archive(None, zeilen))
     return _temp_db(pfad)
 
 
@@ -5127,16 +5035,7 @@ check("event_expired: abgelaufener Review-Fall",
 check("event_expired: laufender Fall nicht",
       not app.event_expired(_ev(5, _jetzt, _jetzt + _td(hours=1)), _jetzt))
 
-_dv = _Pv(_tf.mkdtemp())
-check("Archiv fehlt -> leere Menge", app.archive_keys_or_reason(_dv / "fehlt.csv") == (set(), ""))
-(_dv / "kaputt.csv").write_bytes(b"\x00\x00\x00")
-_k, _grund = app.archive_keys_or_reason(_dv / "kaputt.csv")
-check("Archiv unlesbar -> None mit Grund", _k is None and "kaputt.csv" in _grund, _grund)
-if app.ARCHIVE_CSV.exists():
-    _sh.copy(app.ARCHIVE_CSV, _dv / "echt.csv")
-    _k2, _ = app.archive_keys_or_reason(_dv / "echt.csv")
-    check("echtes Archiv -> ein Schluessel je Zeile",
-          _k2 is not None and len(_k2) == len(app.read_archive_strict(_dv / "echt.csv")))
+# archive_keys_or_reason (Datei) ist entfernt; die Schluessel liefert archiv_schluessel_oder_grund (nola.db).
 
 # Genaue Grenze: Ende + Karenz == jetzt bleibt sichtbar, eine Sekunde mehr ist vorbei
 _grenze = _jetzt - app.PAST_LAUNCH_GRACE
@@ -5319,26 +5218,26 @@ else:
 print("== Lokale Datenbank: Referenzen ==")
 import nola_db as _ndb
 check("DB-Pfad ist Temp", app.DB_PATH != _ndb.PROJEKT_DB)
-_sp_csv = app.load_spaceports(str(app.SPACEPORT_CSV))
+_sp_aus_csv = _sp_csv()
 _sp_db = app.referenz_lesen("startplaetze")
 _sp_db2 = _sp_db.copy(); _sp_db2.attrs = {}
 try:
     import pandas as _pd_r
-    _pd_r.testing.assert_frame_equal(_sp_db2.reset_index(drop=True), _sp_csv.reset_index(drop=True))
+    _pd_r.testing.assert_frame_equal(_sp_db2.reset_index(drop=True), _sp_aus_csv.reset_index(drop=True))
     check("Startplaetze aus DB = aus CSV", True)
 except AssertionError as e:
     check("Startplaetze aus DB = aus CSV", False, str(e)[:200])
 _fir_db = app.referenz_lesen("firs")
 check("FIR mit Nationen", "Nationen" in _fir_db.columns and "nola_stand" in _fir_db.attrs)
-_fir_csv = app.load_firs(str(app.FIR_CSV))
+_fir_aus_csv = _fir_csv()
 _fir_db2 = _fir_db.copy(); _fir_db2.attrs = {}
 try:
-    _pd_r.testing.assert_frame_equal(_fir_db2.reset_index(drop=True), _fir_csv.reset_index(drop=True))
+    _pd_r.testing.assert_frame_equal(_fir_db2.reset_index(drop=True), _fir_aus_csv.reset_index(drop=True))
     check("FIRs aus DB = aus CSV (Koordinaten zahlengleich)", True)
 except AssertionError as e:
     check("FIRs aus DB = aus CSV (Koordinaten zahlengleich)", False, str(e)[:200])
 _veh_db = app.referenz_lesen("traegersysteme"); _veh_db.attrs = {}
-check("Traegersysteme aus DB = aus CSV", _veh_db.equals(app.load_vehicles(str(app.VEHICLE_CSV))))
+check("Traegersysteme aus DB = aus CSV", _veh_db.equals(_veh_csv()))
 _csv_bytes = app.SPACEPORT_CSV.read_bytes()
 
 class _StR:
@@ -5529,8 +5428,8 @@ try:
         app.DB_PATH = _db_echt
     _s0 = app.seestarts_lesen()
     _s0b = _s0.copy(); _s0b.attrs = {}
-    check("Seestarts aus DB = load_sea_launches(CSV)", _s0b.reset_index(drop=True).equals(
-        app.load_sea_launches(app.SEA_LAUNCH_CSV).reset_index(drop=True)))
+    check("Seestarts aus DB = Seestart-CSV (als Text)", _s0b.reset_index(drop=True).equals(
+        _see_csv().reset_index(drop=True)))
     check("Seestarts aus DB, Text-Spalten", all(_s0[c].map(lambda v: isinstance(v, str)).all() for c in _s0.columns))
 finally:
     app.st = _st_orig_a
@@ -6655,7 +6554,7 @@ try:
 
     # --- detection_stamp: nur erwartbare Fehler werden zu "-" ---
     import archiv_import as _ai_f
-    for _fehler_f in (_db_s.DbFehler("io", "x"), OSError("weg"), KeyError("nola_stand")):
+    for _fehler_f in (_db_s.DbFehler("io", "x"), OSError("weg")):
         def _wirf_f(*a, _x=_fehler_f, **k):
             raise _x
         app.referenz_lesen = _wirf_f
@@ -6779,6 +6678,221 @@ try:
           _lk_c == {"db-lokal", "lk1"} and "_cloud_arbeitsstand" not in _l_c.session_state, _lk_c)
 finally:
     (app.st, app.DB_PATH, app.is_public_deployment) = _orig_c
+
+print("== Folgepunkte Aufgabe 5 (nola-ttz) ==")
+import inspect as _ins_5, sqlite3 as _sq_5, time as _time_5, contextlib as _cl_5
+import nola_db as _ndb5
+import archiv_import as _ai5
+_orig_5 = (app.st, app.DB_PATH, app.is_public_deployment, _ndb5.schreibe_unterschiede, _ndb5.lade_arbeitsstand,
+           app.archiv_lesen, app._undo_klick, app._spaceport_editor, app._fir_editor, app._vehicle_editor,
+           app._archive_editor, app._sea_launch_editor, app._export_knopf, app.archive_import_allowed,
+           app.archiv_anzeigen, app._seestarts_anzeigen, app._zeige_dialog_meldungen, app.referenz_lesen)
+
+
+def _versuch_5(f):
+    """ImportStateError-Text oder None."""
+    try:
+        f()
+    except _ai5.ImportStateError as exc:
+        return str(exc)
+    return None
+
+
+try:
+    # --- nola-o25: Referenzdialog bleibt nach X/Escape zu ---
+    _dismiss_5 = _ins_5.getclosurevars(app._reference_dialog).nonlocals.get("on_dismiss")
+    check("nola-o25: st.dialog des Referenzdialogs traegt on_dismiss=_ref_dialog_geschlossen",
+          callable(_dismiss_5) and _dismiss_5 is getattr(app, "_ref_dialog_geschlossen", None), _dismiss_5)
+    app.st = _StR()
+    app.st.session_state["ref_dialog_open"] = True
+    _, _e_5 = _lauf_s(lambda: app._ref_dialog_geschlossen())
+    check("nola-o25: Callback setzt ref_dialog_open = False",
+          _e_5 is None and app.st.session_state.get("ref_dialog_open") is False, (_e_5, app.st.session_state))
+
+    # --- _reference_dialog ruft beim Undo-Knopf _undo_klick auf (Fake-st, Inhalt des Dialogs) ---
+    _aufr_5, _klick_5 = [], []
+
+    class _StD5:
+        def __init__(self, undo):
+            self.session_state = {"ref_undo": [{"label": "x"}]}
+            self._undo = undo
+
+        def __getattr__(self, name):
+            def _f(*a, **k):
+                _aufr_5.append(name)
+                if name == "columns":
+                    return [self for _ in range(a[0] if isinstance(a[0], int) else len(a[0]))]
+                if name == "tabs":
+                    return [_cl_5.nullcontext() for _ in a[0]]
+                if name == "button":
+                    return self._undo and str(a[0]).startswith("Undo last change")
+                return None
+            return _f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    _leer_5 = lambda *a, **k: None  # noqa: E731
+    for _n5 in ("_spaceport_editor", "_fir_editor", "_vehicle_editor", "_archive_editor",
+                "_sea_launch_editor", "_export_knopf", "_zeige_dialog_meldungen"):
+        setattr(app, _n5, _leer_5)
+    app.archive_import_allowed = lambda: False
+    app.archiv_anzeigen = lambda *a, **k: pd.DataFrame(columns=list(app.ARCHIVE_COLUMNS))
+    app._seestarts_anzeigen = lambda *a, **k: pd.DataFrame(columns=list(app.SEA_LAUNCH_COLUMNS))
+    app._undo_klick = lambda: _klick_5.append("klick")
+    for _undo_5, _soll_5 in ((True, ["klick"]), (False, [])):
+        _aufr_5.clear(); _klick_5.clear()
+        app.st = _StD5(_undo_5)
+        _, _e_5 = _lauf_s(lambda: app._reference_dialog.__wrapped__(sp, fir, veh))
+        check("Dialog: Undo-Knopf {} -> _undo_klick {}".format(
+                  "gedrueckt" if _undo_5 else "nicht gedrueckt", "aufgerufen, danach rerun" if _undo_5 else "nicht aufgerufen"),
+              _e_5 is None and _klick_5 == _soll_5 and (not _undo_5 or "rerun" in _aufr_5), (_e_5, _klick_5, _aufr_5))
+    (app._undo_klick, app._spaceport_editor, app._fir_editor, app._vehicle_editor, app._archive_editor,
+     app._sea_launch_editor, app._export_knopf, app.archive_import_allowed, app.archiv_anzeigen,
+     app._seestarts_anzeigen, app._zeige_dialog_meldungen) = _orig_5[6:17]
+
+    # --- _add_manual_notams: Schreiben UND Neuladen scheitern -> keine Eintraege ohne id bleiben ---
+    app.is_public_deployment = lambda *a, **k: False
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app._arbeitsstand_laden()
+    _text_5 = "A5551/26 NOTAMN\nQ) ZJSA/QRTCA/IV/BO/W/000/999\nE) DOPPELT"
+    app.st.session_state["manual_input"] = _text_5
+
+    def _wirf_5(*a, **k):
+        raise _ndb5.DbFehler("io", "Disk full")
+
+    _ndb5.schreibe_unterschiede = _wirf_5
+    _ndb5.lade_arbeitsstand = _wirf_5
+    try:
+        _, _e_5 = _lauf_s(app._add_manual_notams)
+    finally:
+        _ndb5.schreibe_unterschiede, _ndb5.lade_arbeitsstand = _orig_5[3], _orig_5[4]
+    _ohne_id_5 = [n for n in app.st.session_state["manual_notams"] if n.get("id") is None]
+    check("_add_manual_notams: Schreiben und Neuladen scheitern -> keine angehaengten Eintraege ohne id, Text bleibt",
+          _e_5 is None and _ohne_id_5 == [] and app.st.session_state.get("manual_input") == _text_5,
+          (_e_5, _ohne_id_5, app.st.session_state.get("manual_input")))
+    app._add_manual_notams()
+    with app._db() as _c5:
+        _m5 = _ndb5.lade_arbeitsstand(_c5)["manual_notams"]
+    check("  ... zweiter Klick (DB wieder in Ordnung) speichert den Eintrag genau einmal",
+          sum("A5551/26" in n["text"] for n in _m5) == 1, [n["text"][:20] for n in _m5])
+
+    # --- Cloud: Entfernen im Archiv / Seestart-Protokoll ---
+    app.DB_PATH = _temp_db()
+    app.is_public_deployment = lambda *a, **k: True
+    app.st = _StR()
+    _z5 = {s: "" for s in app.ARCHIVE_COLUMNS}
+    _z5.update({"NOTAM": "Z5/26", "Startdatum": "08.10.2026", "Nation": "China"})
+    app.archiv_schreiben(pd.DataFrame([_z5], columns=list(app.ARCHIVE_COLUMNS)), vorher=app.archiv_lesen())
+    _s5 = {s: "" for s in app.SEA_LAUNCH_COLUMNS}
+    _s5.update({"Datum": "08.10.2026", "Nation": "China", "Breite": "10.0", "Länge": "120.0", "NOTAM": "S5/26"})
+    app.seestarts_schreiben(pd.DataFrame([_s5], columns=list(app.SEA_LAUNCH_COLUMNS)), vorher=app.seestarts_lesen())
+    _ws_vorher_5 = _sq_5.connect(str(app.DB_PATH)).execute("SELECT count(*) FROM entscheidungen").fetchone()[0]
+    for _fn5, _schl5, _feld5, _flash5, _lesen5 in (
+        (app._remove_archive_row, app.archive_key(_z5), "archiv_removed", "Archivzeile entfernt", app.archiv_lesen),
+        (app._remove_sea_launch_row, app.sea_launch_key(_s5), "seestarts_removed", "Sea launch row removed",
+         app.seestarts_lesen),
+    ):
+        app._arbeitsstand_laden()
+        app.st.session_state.pop("ref_flash", None)
+        _fn5(_schl5)
+        _ss5 = app.st.session_state
+        check("Cloud: {} -> Flash, keine 'could not be saved'-Warnung, Schluessel bleibt in der Sitzung".format(
+                  _fn5.__name__),
+              _ss5.get("ref_flash") == _flash5 and not _ss5.get("ref_flash_warning")
+              and not _ss5.get("ref_flash_error") and "db_meldung" not in _ss5 and "_w" not in _ss5
+              and _schl5 in _ss5[_feld5] and _schl5 in _ss5[app.CLOUD_ARBEITSSTAND][_feld5]
+              and _lesen5().empty,
+              {k: _ss5.get(k) for k in ("ref_flash", "ref_flash_warning", "ref_flash_error", _feld5)})
+    check("  ... Cloud: Loeschschluessel nicht in der gemeinsamen DB",
+          _sq_5.connect(str(app.DB_PATH)).execute("SELECT count(*) FROM entscheidungen").fetchone()[0] == _ws_vorher_5)
+
+    # --- Klick-Aktion unter fremder Sperre wartet die vollen 5 s (Verhaltenstest) ---
+    app.is_public_deployment = lambda *a, **k: False
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    app.archiv_schreiben(pd.DataFrame([_z5], columns=list(app.ARCHIVE_COLUMNS)), vorher=app.archiv_lesen())
+    app._arbeitsstand_laden()
+    _sperre_5 = _sq_5.connect(str(app.DB_PATH), isolation_level=None)
+    _sperre_5.execute("BEGIN IMMEDIATE")
+    try:
+        _t0_5 = _time_5.monotonic()
+        _, _e_5 = _lauf_s(app._remove_archive_row, app.archive_key(_z5))
+        _dauer_5 = _time_5.monotonic() - _t0_5
+    finally:
+        _sperre_5.execute("ROLLBACK")
+        _sperre_5.close()
+    # Untergrenze 4 s: busy_timeout ist 5 s; WARTEZEIT_AUTOMATISCH (0,5 s) laege weit darunter
+    check("Entscheidung 2: Klick-Aktion (Archivzeile entfernen) wartet unter fremder Sperre >= 4 s",
+          _e_5 is None and _dauer_5 >= 4.0 and _ndb5.GESPERRT_TEXT in str(app.st.session_state.get("ref_flash_error"))
+          and len(app.archiv_lesen()) == 1, (_e_5, round(_dauer_5, 2), app.st.session_state.get("ref_flash_error")))
+
+    # --- confirm_many / remove_orphan: Pruefung NACH dem Speichern scheitert ---
+    _db5 = _temp_db()
+    _row5 = {s: "" for s in app.ARCHIVE_COLUMNS}
+    _row5.update({"NOTAM": "Z7/26", "Startdatum": "07.10.2026", "Nation": "China"})
+    _kand5 = {"key": app.archive_key(_row5), "row": _row5, "notam_ids": ["Z7/26"], "quellen": ["q"]}
+    _zaehler_5 = []
+
+    def _lesen_dann(nachher):
+        def _lesen(db=None, **k):
+            _zaehler_5.append(1)
+            echt = _orig_5[5](db, **k)
+            return echt if len(_zaehler_5) == 1 else nachher(echt)
+        return _lesen
+
+    def _nachher_fehler(_echt):
+        raise app.ArchiveUnreadable("The launch archive could not be read from the database (io). "
+                                    "It was left untouched and not updated.")
+
+    for _name5, _nachher5 in (("Rueckgabe ohne die Zeile", lambda echt: echt.iloc[0:0]),
+                              ("Lesefehler", _nachher_fehler)):
+        _zaehler_5.clear()
+        _za5 = _ai5.zustand_laden(_db5)
+        app.archiv_lesen = _lesen_dann(_nachher5)
+        try:
+            _f5 = _versuch_5(lambda: _ai5.confirm_many(_za5, [(_kand5, "CZ-2D", "P", None)], _db5))
+        finally:
+            app.archiv_lesen = _orig_5[5]
+        check("confirm_many: Pruefung nach dem Speichern scheitert ({}) -> Meldung sagt das, nicht 'Nothing was recorded'"
+              .format(_name5),
+              _f5 is not None and "Nothing was recorded" not in _f5 and "untouched" not in _f5
+              and "after saving" in _f5 and "reload" in _f5, _f5)
+    check("  ... die Bestaetigung ist tatsaechlich gespeichert (Archivzeile vorhanden)",
+          _kand5["key"] in {app.archive_key(dict(r)) for _, r in app.archiv_lesen(_db5).iterrows()})
+    _zaehler_5.clear()
+    _za5 = _ai5.zustand_laden(_db5)
+    # Rueckgelesen: die Zeile steht noch da (als waere das Loeschen nicht angekommen)
+    app.archiv_lesen = _lesen_dann(lambda echt: pd.DataFrame([_row5], columns=list(app.ARCHIVE_COLUMNS)))
+    try:
+        _f5 = _versuch_5(lambda: _ai5.remove_orphan(_za5, _kand5["key"], _db5))
+    finally:
+        app.archiv_lesen = _orig_5[5]
+    check("remove_orphan: Pruefung nach dem Speichern scheitert -> Meldung sagt das, nicht 'Nothing was recorded'",
+          _f5 is not None and "Nothing was recorded" not in _f5 and "after saving" in _f5 and "reload" in _f5, _f5)
+
+    # --- detection_stamp: KeyError ist kein erwartbarer Fehler (nola_stand ist immer gesetzt) ---
+    def _wirf_key_5(*a, **k):
+        raise KeyError("nola_stand")
+
+    app.referenz_lesen = _wirf_key_5
+    try:
+        _, _e_5 = _lauf_s(_ai5.detection_stamp)
+    finally:
+        app.referenz_lesen = _orig_5[17]
+    check("detection_stamp: KeyError wird nicht verschluckt (Programmierfehler)", isinstance(_e_5, KeyError), repr(_e_5))
+    _st5 = app.referenz_lesen("startplaetze", _temp_db()).attrs.get("nola_stand")
+    check("  ... referenz_lesen liefert nola_stand immer (Grund fuer den engen except)",
+          isinstance(_st5, str) and len(_st5) > 0, _st5)
+finally:
+    (app.st, app.DB_PATH, app.is_public_deployment, _ndb5.schreibe_unterschiede, _ndb5.lade_arbeitsstand,
+     app.archiv_lesen, app._undo_klick, app._spaceport_editor, app._fir_editor, app._vehicle_editor,
+     app._archive_editor, app._sea_launch_editor, app._export_knopf, app.archive_import_allowed,
+     app.archiv_anzeigen, app._seestarts_anzeigen, app._zeige_dialog_meldungen, app.referenz_lesen) = _orig_5
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

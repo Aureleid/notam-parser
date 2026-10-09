@@ -333,21 +333,8 @@ def korpus_aus_daten(data: Dict[str, Any], name: str) -> Dict[str, KorpusNotam]:
 
 
 def load_korpus(path: Path = KORPUS_JSON) -> Dict[str, KorpusNotam]:
+    """Nur fuer Umzug/Export: liest die alte Korpus-Datei (nola_umzug.umziehen)."""
     return korpus_aus_daten(read_json(path), path.name)
-
-
-def save_korpus(korpus: Dict[str, KorpusNotam], path: Path = KORPUS_JSON) -> None:
-    write_json_atomic(
-        path,
-        {
-            "version": 1,
-            "notams": [
-                {"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.quellen}
-                for n in sorted(korpus.values(), key=lambda n: n.schluessel)
-            ],
-        },
-    )
-
 
 
 def korpus_laden(db: Optional[Path] = None) -> Dict[str, KorpusNotam]:
@@ -1061,19 +1048,6 @@ def zustand_aus_daten(data: Dict[str, Any], name: str) -> Dict[str, Any]:
     }
 
 
-def load_state(path: Path = IMPORT_JSON) -> Dict[str, Any]:
-    """
-    Liest den Importzustand. Wie load_korpus: eine Datei mit unerwarteter
-    Struktur bricht ab (ImportStateError) und wird nie ueberschrieben.
-    """
-    return zustand_aus_daten(read_json(path), path.name)
-
-
-def save_state(state: Dict[str, Any], path: Path = IMPORT_JSON) -> None:
-    write_json_atomic(path, state)
-
-
-
 def zustand_laden(db: Optional[Path] = None) -> Dict[str, Any]:
     """
     Liest den Importzustand aus der Datenbank; unerwartete Struktur bricht ab.
@@ -1138,9 +1112,10 @@ def detection_stamp(
         h.update(tabelle.encode("utf-8"))
         try:
             h.update(app.referenz_lesen(tabelle, db).attrs["nola_stand"].encode("utf-8"))
-        except (app.nola_db.DbFehler, OSError, KeyError):
-            # Erwartbar: DB nicht lesbar, Datei weg, Tabelle ohne nola_stand.
-            # Programmierfehler sollen nicht als "Referenz fehlt" verschwinden.
+        except (app.nola_db.DbFehler, OSError):
+            # Erwartbar: DB nicht lesbar, Datei weg. nola_stand setzt lese_tabelle immer -
+            # ein KeyError waere ein Programmierfehler und soll nicht als "Referenz fehlt"
+            # verschwinden (wie jeder andere Programmierfehler).
             h.update(b"-")
     return h.hexdigest()[:16]
 
@@ -1274,6 +1249,13 @@ def _mit_entscheidungen(state: Dict[str, Any], neu: Mapping[str, Dict[str, Any]]
     return kuenftig
 
 
+#: Pruefung nach dem Speichern gescheitert - gespeichert wurde schon, ob vollstaendig, ist offen.
+ARCHIV_PRUEFUNG_TEXT = (
+    "The check of the launch archive in nola.db after saving failed ({}). The change may "
+    "or may not be in the launch archive - please reload the tab and check it."
+)
+
+
 def _archiv_pruefen(
     archiv: Optional[Path],
     vorhanden: Set[str],
@@ -1284,8 +1266,15 @@ def _archiv_pruefen(
     Liest das Archiv nach dem Schreiben zurueck; erst dieser Abgleich zeigt,
     ob die Aenderung angekommen ist.
     `werte`: je Schluessel Spalten, die jede Zeile dieses Schluessels tragen muss.
+    Laeuft NACH dem Festschreiben: die Meldung darf nicht "nichts geschrieben"
+    behaupten - auch nicht, wenn schon das Zuruecklesen scheitert.
     """
-    zeilen = [(app.archive_key(dict(r)), r) for _, r in _archiv_lesen(archiv).iterrows()]
+    try:
+        gelesen = _archiv_lesen(archiv)
+    except ImportStateError as exc:
+        # Nicht den Lesetext uebernehmen - er sagt "untouched", gespeichert wurde aber schon
+        raise ImportStateError(ARCHIV_PRUEFUNG_TEXT.format("it could not be read back")) from exc
+    zeilen = [(app.archive_key(dict(r)), r) for _, r in gelesen.iterrows()]
     keys = {key for key, _ in zeilen}
     falsch = any(
         r[spalte] != wert
@@ -1293,10 +1282,7 @@ def _archiv_pruefen(
         for spalte, wert in (werte or {}).get(key, {}).items()
     )
     if not vorhanden <= keys or fehlend & keys or falsch:
-        raise ImportStateError(
-            "The launch archive in nola.db could not be written. Nothing was recorded - "
-            "please check the database and try again."
-        )
+        raise ImportStateError(ARCHIV_PRUEFUNG_TEXT.format("the change is not in the launch archive"))
 
 
 def remove_orphan(state: Dict[str, Any], key: str, archiv: Optional[Path] = None) -> None:

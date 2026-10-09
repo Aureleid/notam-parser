@@ -54,6 +54,23 @@ finally:
 
 print("== 2. Spalten wie in app.py ==")
 import app
+
+
+def _see_csv(pfad):
+    """Seestart-CSV als Text (leer = '') - wie seestarts_lesen; ersetzt das entfernte load_sea_launches."""
+    if not Path(pfad).exists():
+        return pd.DataFrame(columns=list(app.SEA_LAUNCH_COLUMNS))
+    df = app._read_csv_any(str(pfad))
+    for spalte in app.SEA_LAUNCH_COLUMNS:
+        if spalte not in df.columns:
+            df[spalte] = ""
+    return df[list(app.SEA_LAUNCH_COLUMNS)].fillna("").astype(str)
+
+
+def _zustand_datei(pfad):
+    """Importzustand aus einer Datei, wie der Umzug ihn liest (ersetzt das entfernte ai.load_state)."""
+    import archiv_import as _ai_z
+    return _ai_z.zustand_aus_daten(_ai_z.read_json(pfad), Path(pfad).name)
 check("FACHTABELLEN = app-Konstanten", db.FACHTABELLEN == {
     "startplaetze": tuple(app.SPACEPORT_EXPORT_COLUMNS), "firs": tuple(app.FIR_EXPORT_COLUMNS),
     "traegersysteme": tuple(app.VEHICLE_EXPORT_COLUMNS), "startarchiv": tuple(app.ARCHIVE_COLUMNS),
@@ -666,12 +683,12 @@ _gw = db.lade_arbeitsstand(_ce)
 check("Export Arbeitsstand", [n["text"] for n in _ew["manual_notams"]] == [n["text"] for n in _gw["manual_notams"]]
       and set(_ew["hidden_events"]) == _gw["hidden_events"])
 check("Export Korpus lesbar", isinstance(ai.load_korpus(_ex / ai.KORPUS_JSON.name), dict))
-check("Export Importzustand lesbar", isinstance(ai.load_state(_ex / ai.IMPORT_JSON.name), dict))
+check("Export Importzustand lesbar", isinstance(_zustand_datei(_ex / ai.IMPORT_JSON.name), dict))
 try:
     um.exportieren(_db_p, app.APP_DIR / "export" / "test"); check("NOLA_TEST sperrt Export ins Projekt", False)
 except RuntimeError:
     check("NOLA_TEST sperrt Export ins Projekt", True)
-check("Export Seestarts lesbar", len(app.load_sea_launches(_ex / app.SEA_LAUNCH_CSV.name)) == db.zaehle(_ce, "seestarts"))
+check("Export Seestarts lesbar", len(_see_csv(_ex / app.SEA_LAUNCH_CSV.name)) == db.zaehle(_ce, "seestarts"))
 _ce.close()
 
 print("== 16. Fix-Runde 1 ==")
@@ -782,7 +799,7 @@ um.umziehen(_db5, _alt5); _c5 = db.verbinde(_db5)
 _erw_s = _alt5.seestarts and um._csv_streng(_alt5.seestarts, db.FACHTABELLEN["seestarts"])
 _ist_s = db.lese_tabelle(_c5, "seestarts"); _ist_s.attrs = {}
 try:
-    pd.testing.assert_frame_equal(_ist_s, app.load_sea_launches(_alt5.seestarts)[list(db.FACHTABELLEN["seestarts"])]
+    pd.testing.assert_frame_equal(_ist_s, _see_csv(_alt5.seestarts)[list(db.FACHTABELLEN["seestarts"])]
                                   .reset_index(drop=True), check_dtype=True)
     check("F5 Rundlauf seestarts (Altdatei-Leser)", True)
 except AssertionError as e:
@@ -805,10 +822,10 @@ _zdb = db.lade_importzustand(_c5b)
 _zerw = ai.zustand_aus_daten(_zdb, "db") if _zdb else ai.zustand_aus_daten(
     {"version": 1, "tage": {}, "entscheidungen": {}, "review_bestaetigt": [],
      "review_ausgeblendet": [], "erkennungsstand": ""}, "db")
-check("F5 Export Importzustand = Datenbank", ai.load_state(_exp5 / ai.IMPORT_JSON.name) == _zerw)
+check("F5 Export Importzustand = Datenbank", _zustand_datei(_exp5 / ai.IMPORT_JSON.name) == _zerw)
 _sb = db.lese_tabelle(_c5b, "seestarts"); _sb.attrs = {}
 try:
-    pd.testing.assert_frame_equal(app.load_sea_launches(_exp5 / app.SEA_LAUNCH_CSV.name)[list(_sb.columns)]
+    pd.testing.assert_frame_equal(_see_csv(_exp5 / app.SEA_LAUNCH_CSV.name)[list(_sb.columns)]
                                   .reset_index(drop=True), _sb, check_dtype=True)
     check("F5 Export seestarts gleich Datenbank", True)
 except AssertionError as e:
@@ -838,7 +855,7 @@ _gel_liste = [{"notam_id": n.notam_id, "b": n.b, "text": n.text, "quellen": n.qu
 check("F5 R2 Export Korpus: 3 Eintraege", len(_dbk_inhalt) == 3 and len(_gel) == 3)
 check("F5 R2 Export Korpus inhaltlich = Datenbank", _gel_liste == _dbk_inhalt, (_gel_liste, _dbk_inhalt))
 check("F5 Export Importzustand (befuellt)",
-      ai.load_state(_e3 / ai.IMPORT_JSON.name) == ai.zustand_aus_daten(db.lade_importzustand(_c3e), "db"))
+      _zustand_datei(_e3 / ai.IMPORT_JSON.name) == ai.zustand_aus_daten(db.lade_importzustand(_c3e), "db"))
 _c3e.close()
 
 # F5: Schema-Anhebung in stelle_bereit
@@ -1205,9 +1222,12 @@ class _QuelleKaputt:
         raise sqlite3.OperationalError("disk I/O error")
 _ord14a = Path(tempfile.mkdtemp())
 try:
-    db.sichere(_QuelleKaputt(), _ord14a, _dt14(2026, 10, 9, 9, 0)); check("Backup-Fehler -> DbFehler", False)
+    db.sichere(_QuelleKaputt(), _ord14a, _dt14(2026, 10, 9, 9, 0)); check("Backup-Fehler -> DbFehler mit Ursache 'error'", False)
 except db.DbFehler as e:
-    check("Backup-Fehler -> DbFehler", True, e.ursache)
+    # "disk I/O error" ist ein allgemeiner SQLite-Fehler: _uebersetze -> Ursache "error"
+    # (nicht gesperrt, nicht disk full, nicht "backup failed" aus dem OSError-Zweig)
+    check("Backup-Fehler -> DbFehler mit Ursache 'error'",
+          e.ursache == "error" and not isinstance(e, db.Gesperrt), e.ursache)
 check("Backup-Fehler: Ordner leer (keine .tmp/Nebendateien)", list(_ord14a.iterdir()) == [],
       [p.name for p in _ord14a.iterdir()])
 
@@ -1312,6 +1332,29 @@ finally:
     db.ECHTER_SICHERUNGSORDNER = _echt_orig14
 check("echter Sicherungsordner wieder eingesetzt", db.ECHTER_SICHERUNGSORDNER == _echt_orig14)
 check("Testordner unberuehrt", sorted(p.name for p in _echt14.iterdir()) == ["unter"])
+
+print("== 19. Folgepunkte Aufgabe 5 ==")
+# Die Zaehlliste des Umzugs folgt der einen Tabellenliste in nola_db (ohne meta)
+check("Umzug zaehlt genau ALLE_TABELLEN ohne meta (eine Quelle)",
+      um._ZAEHLTABELLEN == tuple(t for t in db.ALLE_TABELLEN if t != "meta"), um._ZAEHLTABELLEN)
+
+# Ersatz fuer die entfernten Datei-Rundlaeufe (save_workspace/load_workspace in test_app.py):
+# jedes Feld des Arbeitsstands kommt ueber nola.db so zurueck, wie es geschrieben wurde
+_p19, _c19 = neue_db()
+_s19 = db.leerer_arbeitsstand()
+for _k19 in db.ENTSCHEIDUNGS_SCHLUESSEL:
+    _s19[_k19] = {"e-" + _k19}
+for _k19 in db.ZUWEISUNGS_SCHLUESSEL:
+    _s19[_k19] = {"z-" + _k19: "Wert " + _k19}
+_s19["manual_notams"] = [{"text": "A1/26 TEST NOTAM", "added": "21.09.2026 20:00Z"}]
+db.schreibe_arbeitsstand_neu(_c19, _s19, "2026-10-09T10:00:00+00:00")
+_g19 = db.lade_arbeitsstand(_c19)
+check("Arbeitsstand-Rundlauf: jede Entscheidungs- und Zuweisungsart",
+      all(_g19[k] == _s19[k] for k in list(db.ENTSCHEIDUNGS_SCHLUESSEL) + list(db.ZUWEISUNGS_SCHLUESSEL)),
+      {k: _g19[k] for k in _g19 if k != "manual_notams"})
+check("Arbeitsstand-Rundlauf: manuelle NOTAMs mit Text und Zeitpunkt",
+      [(n["text"], n["added"]) for n in _g19["manual_notams"]] == [("A1/26 TEST NOTAM", "21.09.2026 20:00Z")])
+_c19.close()
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

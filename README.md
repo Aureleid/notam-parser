@@ -89,8 +89,18 @@ Hält ein anderes Programm die Datei länger als etwa fünf Sekunden zum Schreib
 
 > Not saved: Database is locked – write or revert the changes in DB Browser.
 
+Diese fünf Sekunden gelten für Klick-Aktionen. Das **automatische Fortschreiben** von
+Startarchiv und Seestart-Protokoll bei jeder Auswertung wartet nur etwa eine halbe Sekunde,
+damit die Seite nicht hängt; dann erscheint einmal
+
+> Launch archive: database is busy - not updated now, NOLA tries again on the next run.
+
+(bzw. *Sea launch log: …*), und der nächste Durchlauf schreibt nach.
+
 Ändert man Referenzdaten, Archiv oder Seestart-Protokoll im Optionsdialog, erscheinen diese
-Meldungen im Dialog selbst (er öffnet sich nach dem Klick neu über der Hauptseite).
+Meldungen nur im Dialog selbst (er öffnet sich nach dem Klick neu über der Hauptseite), nicht
+zusätzlich auf der Hauptseite. Mit *Close*, dem X oder Escape geschlossen, bleibt der Dialog
+beim nächsten Klick zu.
 
 Zum Ansehen und Bearbeiten von Hand eignet sich
 [DB Browser for SQLite](https://sqlitebrowser.org). Änderungen dort mit *Write Changes*
@@ -102,8 +112,10 @@ Gesichert wird beim **Start** des Servers, beim **ersten Durchlauf eines neuen T
 **vor jeder Schema-Änderung**, in den iCloud-Ordner
 `iCloud Drive/Claude/Claude Code/NOTAM Parser Backups/`. Die Sicherung entsteht mit der
 SQLite-Sicherungsfunktion zuerst als temporäre Datei, wird mit `integrity_check` geprüft und
-erst dann umbenannt — iCloud sieht nie eine halbe Datei. Namen: `nola-JJJJ-MM-TT-HHMM.db`,
-vor einer Schema-Änderung mit Zusatz (`…-vor-schema-2.db`). Die **30 neuesten** regulären
+erst dann umbenannt — iCloud sieht nie eine halbe Datei. Namen: `nola-JJJJ-MM-TT-HHMMSS.db`
+(mit Sekunden, damit zwei Sicherungen derselben Minute sich nicht überschreiben; ältere Namen
+ohne Sekunden werden weiter erkannt und richtig einsortiert), vor einer Schema-Änderung mit
+Zusatz (`…-vor-schema-2.db`). Die **30 neuesten** regulären
 Sicherungen bleiben, ältere werden gelöscht; Sicherungen mit Zusatz werden nie rotiert.
 Schlägt eine Sicherung fehl (z. B. Ordner fehlt), steht eine Warnung in der Seitenleiste —
 NOLA arbeitet weiter.
@@ -583,7 +595,12 @@ NASASpaceflight-Forum (NSF). Der Ablauf in vier Schritten:
    alle eindeutigen Paarungen auf einmal, die übrigen werden nach Jahr gefiltert einzeln
    bestätigt oder verworfen.
    Erst dann wird ins Archiv geschrieben. Steht ein Start schon aus dem Tagesbetrieb im
-   Archiv, werden nur Trägersystem und Payload ergänzt.
+   Archiv, werden nur Trägersystem und Payload ergänzt. Startarchiv und Importzustand
+   schreibt NOLA dabei (wie bei *Remove from archive*) in **einer Transaktion**; hat ein
+   anderer Tab eines von beiden inzwischen geändert, wird nichts geschrieben und der Reiter
+   bittet, neu zu laden. Scheitert erst die Kontrolle nach dem Speichern, sagt die Meldung
+   genau das (*The check of the launch archive in nola.db after saving failed …*) und bittet,
+   den Reiter neu zu laden und das Archiv zu prüfen.
 4. **Prüfliste abarbeiten** — NOTAMs, die die Erkennung zur Prüfung stellt oder ohne
    Startplatz lässt, werden mit *Space Launch* oder *Hide* entschieden.
 

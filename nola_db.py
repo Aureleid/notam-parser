@@ -428,7 +428,7 @@ def _als_text(wert: Any) -> Optional[str]:
     return text if text != "" else None
 
 
-#: Tabellen, die app.read_archive_strict / load_sea_launches mit "" statt NaN lesen.
+#: Tabellen, die wie die alten CSV-Leser (app.read_archive_strict, frueher load_sea_launches) "" statt NaN liefern.
 _LEER_ALS_TEXT = frozenset({"startarchiv", "seestarts"})
 
 
