@@ -5350,8 +5350,7 @@ try:
         check("Undo nach fremder Aenderung verweigert", str(e) == app.REFERENCE_UNDO_REFUSED)
 finally:
     app.st = _st_orig_r
-import inspect as _ins_r
-check("Editor entschaerft DB-Werte", "_md_plain(" in _ins_r.getsource(app._spaceport_editor))
+# Entschaerfung der Editoren: Verhaltenstest unter "Folgepunkte Referenzen"
 import archiv_import as _ai_r
 _s1 = _ai_r.detection_stamp()
 with app._db() as _c:
@@ -6217,6 +6216,201 @@ finally:
      _db_s.ersetze_tabelle, app.archiv_schreiben, app.seestarts_schreiben) = _orig_a
     _klick_s.clear()
     _sh_s.rmtree(_tmp_a, ignore_errors=True)
+
+print("== Lokale Datenbank: Folgepunkte Referenzen (nola-a6c.3) ==")
+import contextlib as _cl_r
+import sqlite3 as _sq_r
+_orig_f = (app.st, app.DB_PATH, _db_s.ersetze_tabelle, app.referenz_lesen)
+_md_f = []
+
+
+def _fake_st_f(suche=""):
+    """Fake-st fuer die Editoren: zeichnet alle Markdown-Ausgaben auf."""
+    ns = _types_s.SimpleNamespace(session_state={})
+
+    def _md(text, *a, **k):
+        _md_f.append(str(text))
+
+    def _leer(*a, **k):
+        return None
+
+    def _texteingabe(label, *a, **k):
+        return suche if label == "Search" else ""
+
+    def _spalte():
+        return _types_s.SimpleNamespace(
+            markdown=_md, button=lambda *a, **k: False, text_input=_texteingabe,
+            selectbox=lambda label, optionen, *a, **k: optionen[0],
+            number_input=lambda *a, **k: 0.0,
+        )
+
+    ns.markdown = _md
+    ns.text_input = _texteingabe
+    ns.caption = ns.info = ns.divider = ns.error = ns.warning = ns.success = _leer
+    ns.columns = lambda n, **k: [_spalte() for _ in range(n if isinstance(n, int) else len(n))]
+    ns.form = lambda *a, **k: _cl_r.nullcontext()
+    ns.form_submit_button = lambda *a, **k: False
+    ns.multiselect = lambda *a, **k: []
+    ns.selectbox = lambda label, optionen, *a, **k: optionen[0]
+    ns.number_input = lambda *a, **k: 0.0
+    return ns
+
+
+def _sql_f(sql, *werte):
+    _c = _sq_r.connect(str(app.DB_PATH))
+    try:
+        with _c:
+            _c.execute(sql, werte)
+        return _c.execute("SELECT 1").fetchall()
+    finally:
+        _c.close()
+
+
+def _sql_lesen_f(sql, *werte):
+    _c = _sq_r.connect(str(app.DB_PATH))
+    try:
+        return _c.execute(sql, werte).fetchall()
+    finally:
+        _c.close()
+
+
+try:
+    app.DB_PATH = _temp_db()
+    # --- Editoren entschaerfen DB-Werte (Verhaltenstest statt Quelltextsuche) ---
+    _boese_f = "**x** `y` QXQ"
+    _sql_f('INSERT INTO startplaetze ("Kurzel","Latitude","Longitude","Name","Land") VALUES (?,?,?,?,?)',
+           "Q`Z", "1.0", "2.0", _boese_f, _boese_f)
+    _sql_f('INSERT INTO firs ("ICAO Code","Latitude","Longitude","Betroffene Region / FIR Name","Land",'
+           '"Zugehörige Startnation") VALUES (?,?,?,?,?,?)', "Q`ZZ", "1.0", "2.0", _boese_f, _boese_f, _boese_f)
+    _sql_f('INSERT INTO traegersysteme ("Land","Name","Alternativname englisch","Abkürzung") VALUES (?,?,?,?)',
+           _boese_f, _boese_f, _boese_f, "Q`Z")
+    _sicher_f = app._md_plain(_boese_f)
+    for _name_f, _editor_f, _tab_f, _n_felder_f in [
+        ("_spaceport_editor", app._spaceport_editor, "startplaetze", 2),
+        ("_fir_editor", app._fir_editor, "firs", 3),
+        ("_vehicle_editor", app._vehicle_editor, "traegersysteme", 3),
+    ]:
+        app.st = _fake_st_f("QXQ")
+        _md_f.clear()
+        _, _e_f = _lauf_s(_editor_f, app.referenz_lesen(_tab_f))
+        _roh_f = [m for m in _md_f if "**x**" in m or "Q`Z" in m]
+        check("Folge {} zeichnet DB-Werte entschaerft (kein **x**, kein Backtick im Code)".format(_name_f),
+              _e_f is None and _roh_f == [] and _md_f.count(_sicher_f) == _n_felder_f
+              and any(m.startswith("`Q'Z") for m in _md_f), (_e_f, _roh_f, _md_f[-8:]))
+
+    # --- _write_reference: ValueError-Wache ---
+    app.st = _fake_st_f()
+    _ohne_f = app.referenz_lesen("startplaetze")
+    _ohne_f.attrs = {}
+    _vorher_db_f = _sql_lesen_f("SELECT * FROM startplaetze")
+    _, _e_f = _lauf_s(app._write_reference, "startplaetze", _ohne_f, app.SPACEPORT_EXPORT_COLUMNS, "label", _ohne_f)
+    check("Folge _write_reference ohne nola_stand -> ValueError, nichts geschrieben, kein Undo",
+          isinstance(_e_f, ValueError) and "nola_stand" in str(_e_f)
+          and _sql_lesen_f("SELECT * FROM startplaetze") == _vorher_db_f
+          and "ref_undo" not in app.st.session_state, _e_f)
+
+    # --- _write_reference: allgemeiner DbFehler -> Fehler im Dialog, kein Undo, kein Erfolg ---
+    def _wirf_dbfehler_f(*a, **k):
+        raise _db_s.DbFehler("io", "Disk **full** at `x`")
+
+    app.st = _fake_st_f()
+    _gelesen_f = app.referenz_lesen("startplaetze")
+    _db_s.ersetze_tabelle = _wirf_dbfehler_f
+    try:
+        _, _e_f = _lauf_s(app._write_reference, "startplaetze", _gelesen_f,
+                          app.SPACEPORT_EXPORT_COLUMNS, "label", _gelesen_f)
+    finally:
+        _db_s.ersetze_tabelle = _orig_f[2]
+    _ss_f2 = dict(app.st.session_state)
+    _aufr_s.clear()
+    app.st.success = app.st.warning = app.st.error = (
+        lambda t, *a, **k: _aufr_s.append(("dlg", str(t))))
+    app._zeige_dialog_meldungen()
+    check("Folge _write_reference DbFehler -> Dialog zeigt Fehler entschaerft, kein Undo, kein Erfolgs-Flash",
+          _e_f is None and _ss_f2.get("ref_flash_error") == "Disk **full** at `x`"
+          and "ref_undo" not in _ss_f2 and "ref_flash" not in _ss_f2
+          and _aufr_s == [("dlg", app._md_plain("Disk **full** at `x`"))], (_e_f, _ss_f2, _aufr_s))
+
+    # --- _undo_reference / Undo-Knopf: DbFehler -> Meldung im Dialog, Eintrag bleibt ---
+    app.st = _fake_st_f()
+    app._add_reference_row("startplaetze", app.referenz_lesen("startplaetze"), app.SPACEPORT_EXPORT_COLUMNS,
+                           "Kurzel", {"Kurzel": "UNDO1", "Latitude": 1.0, "Longitude": 2.0,
+                                      "Name": "u", "Land": "China"})
+    _stapel_f = list(app.st.session_state.get("ref_undo", []))
+    app.st.session_state.pop("ref_flash", None)  # Erfolg des Hinzufuegens - zeigt der Dialog vorher an
+    _db_s.ersetze_tabelle = _wirf_dbfehler_f
+    try:
+        _, _e_f = _lauf_s(app._undo_reference)
+        _, _e_k = _lauf_s(lambda: app._undo_klick())
+    finally:
+        _db_s.ersetze_tabelle = _orig_f[2]
+    _ss_f3 = dict(app.st.session_state)
+    check("Folge _undo_reference DbFehler -> UndoRefused mit Fehlertext, Eintrag bleibt",
+          len(_stapel_f) == 1 and isinstance(_e_f, app.UndoRefused) and str(_e_f) == "Disk **full** at `x`"
+          and _ss_f3.get("ref_undo") == _stapel_f, (_e_f, len(_ss_f3.get("ref_undo", []))))
+    check("Folge Undo-Knopf DbFehler -> Fehler im Dialog, kein Erfolgs-Flash, Eintrag bleibt",
+          _e_k is None and _ss_f3.get("ref_flash_error") == "Disk **full** at `x`"
+          and "ref_flash" not in _ss_f3 and _ss_f3.get("ref_undo") == _stapel_f
+          and "UNDO1" in set(app.referenz_lesen("startplaetze")["Kurzel"]), (_e_k, sorted(_ss_f3)))
+    _, _e_k = _lauf_s(lambda: app._undo_klick())
+    check("Folge Undo-Knopf ohne Fehler -> Erfolgs-Flash, Eintrag weg, Zeile zurueckgenommen",
+          _e_k is None and app.st.session_state.get("ref_flash", "").startswith("Undone: UNDO1")
+          and app.st.session_state.get("ref_undo") == []
+          and "UNDO1" not in set(app.referenz_lesen("startplaetze")["Kurzel"]), (_e_k, app.st.session_state.get("ref_flash")))
+
+    # --- detection_stamp: nur erwartbare Fehler werden zu "-" ---
+    import archiv_import as _ai_f
+    for _fehler_f in (_db_s.DbFehler("io", "x"), OSError("weg"), KeyError("nola_stand")):
+        def _wirf_f(*a, _x=_fehler_f, **k):
+            raise _x
+        app.referenz_lesen = _wirf_f
+        try:
+            _r_f, _e_f = _lauf_s(_ai_f.detection_stamp)
+        finally:
+            app.referenz_lesen = _orig_f[3]
+        check("Folge detection_stamp {} -> Stand ohne Referenz, keine Ausnahme".format(type(_fehler_f).__name__),
+              _e_f is None and isinstance(_r_f, str) and len(_r_f) == 16, _e_f)
+
+    def _wirf_typ_f(*a, **k):
+        raise TypeError("Programmierfehler")
+
+    app.referenz_lesen = _wirf_typ_f
+    try:
+        _, _e_f = _lauf_s(_ai_f.detection_stamp)
+    finally:
+        app.referenz_lesen = _orig_f[3]
+    check("Folge detection_stamp verschluckt keinen Programmierfehler (TypeError)",
+          isinstance(_e_f, TypeError), repr(_e_f))
+
+    # --- prepare_vehicles: leere Felder bleiben leer, nicht "nan" ---
+    import pandas as _pd_f
+    import numpy as _np_f
+    _roh_v = _pd_f.DataFrame({
+        "Land": ["China", "China", "China", None],
+        "Name": ["Kuaizhou 1A", _np_f.nan, "Ohne Kuerzel", "Ohne Land"],
+        "Alternativname englisch": [_np_f.nan, "x", "y", None],
+        "Abkürzung": ["KZ-1A", "LEER", _np_f.nan, "OL"],
+    }, dtype=object)
+    _pv_f = app.prepare_vehicles(_roh_v)
+    check("Folge prepare_vehicles: leerer Name / leere Abkuerzung fallen weg, leere Felder sind ''",
+          list(_pv_f["Abkürzung"]) == ["KZ-1A", "OL"]
+          and _pv_f.loc[0, "Alternativname englisch"] == "" and _pv_f.loc[1, "Land"] == ""
+          and not (_pv_f == "nan").any().any(), _pv_f.to_dict("records"))
+    app.st = _fake_st_f()
+    _sql_f('INSERT INTO traegersysteme ("Land","Name","Alternativname englisch","Abkürzung") VALUES (?,?,?,?)',
+           "China", "Leer Alt", None, "LEER-ALT")
+    _veh_f = app.referenz_lesen("traegersysteme")
+    _zeile_f = _veh_f[_veh_f["Abkürzung"] == "LEER-ALT"]
+    app._add_reference_row("traegersysteme", _veh_f, app.VEHICLE_EXPORT_COLUMNS, "Abkürzung",
+                           {"Land": "China", "Name": "Neu", "Alternativname englisch": "Neu", "Abkürzung": "NEU-1"})
+    _db_alt_f = _sql_lesen_f('SELECT "Alternativname englisch" FROM traegersysteme WHERE "Abkürzung" = ?', "LEER-ALT")
+    _nan_f = _sql_lesen_f('SELECT count(*) FROM traegersysteme WHERE "Land" = ? OR "Name" = ? '
+                          'OR "Alternativname englisch" = ? OR "Abkürzung" = ?', "nan", "nan", "nan", "nan")
+    check("Folge Traegersystem mit leerem Alternativnamen: gelesen '', nach Hinzufuegen in der DB NULL",
+          list(_zeile_f["Alternativname englisch"]) == [""] and _db_alt_f == [(None,)] and _nan_f == [(0,)]
+          and "NEU-1" in set(app.referenz_lesen("traegersysteme")["Abkürzung"]), (_zeile_f.to_dict("records"), _db_alt_f, _nan_f))
+finally:
+    (app.st, app.DB_PATH, _db_s.ersetze_tabelle, app.referenz_lesen) = _orig_f
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

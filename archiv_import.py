@@ -1063,7 +1063,9 @@ def detection_stamp(
         h.update(tabelle.encode("utf-8"))
         try:
             h.update(app.referenz_lesen(tabelle, db).attrs["nola_stand"].encode("utf-8"))
-        except Exception:
+        except (app.nola_db.DbFehler, OSError, KeyError):
+            # Erwartbar: DB nicht lesbar, Datei weg, Tabelle ohne nola_stand.
+            # Programmierfehler sollen nicht als "Referenz fehlt" verschwinden.
             h.update(b"-")
     return h.hexdigest()[:16]
 

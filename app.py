@@ -1737,7 +1737,9 @@ def prepare_vehicles(df: pd.DataFrame) -> pd.DataFrame:
         )
     out = df[VEHICLE_COLUMNS].copy()
     for spalte in VEHICLE_COLUMNS:
-        out[spalte] = out[spalte].astype(str).str.strip()
+        # Leere Zellen (NaN aus CSV, NULL aus der DB) erst zu "" - sonst stuende
+        # "nan" als Wert in der Tabelle und landete beim Rueckschreiben in der DB.
+        out[spalte] = out[spalte].fillna("").astype(str).str.strip()
     out = out[out["Abkürzung"].astype(bool) & out["Name"].astype(bool)]
     return out.reset_index(drop=True)
 
@@ -5856,6 +5858,18 @@ def _undo_reference() -> Optional[str]:
     return letzter["label"]
 
 
+def _undo_klick() -> None:
+    """Undo-Knopf im Dialog: Ergebnis oder Verweigerung als Dialog-Meldung merken."""
+    try:
+        zurueck = _undo_reference()
+    except UndoRefused as exc:
+        st.session_state["ref_flash_error"] = str(exc)
+    else:
+        st.session_state["ref_flash"] = (
+            "Undone: {}".format(zurueck) if zurueck else "Nothing to undo."
+        )
+
+
 def _melde_db(art: str, text: str) -> None:
     """Meldung fuer den naechsten Durchlauf (Callbacks koennen nicht dauerhaft zeichnen)."""
     st.session_state["db_meldung"] = (art, text)
@@ -6219,14 +6233,7 @@ def _reference_dialog(
         disabled=not stapel,
         use_container_width=True,
     ):
-        try:
-            zurueck = _undo_reference()
-        except UndoRefused as exc:
-            st.session_state["ref_flash_error"] = str(exc)
-        else:
-            st.session_state["ref_flash"] = (
-                "Undone: {}".format(zurueck) if zurueck else "Nothing to undo."
-            )
+        _undo_klick()
         st.rerun(scope="app")
     with a:
         _export_knopf()
