@@ -7286,11 +7286,6 @@ def _reference_status(label: str, tabelle: str) -> Tuple[Optional[pd.DataFrame],
 def _datenbank_bereit() -> Tuple["nola_umzug.Startzustand", str]:
     """Einmal je Serverprozess: pruefen, umziehen oder zur Wahl stellen; dann Startsicherung."""
     import nola_umzug  # erst hier - nola_umzug importiert app
-    if not DB_PATH.exists() and not is_public_deployment() and os.environ.get("NOLA_DB") != "1":
-        # Uebergangssperre bis Aufgabe 9: keine halbfertige Datenbank anlegen.
-        return nola_umzug.Startzustand(
-            "fehlgeschlagen", grund="Database not enabled yet \u2013 set NOLA_DB=1 to move the data."
-        ), ""
     jetzt = datetime.now()
     zustand = nola_umzug.stelle_bereit(DB_PATH, nola_umzug.altdateien_im(APP_DIR), BACKUP_DIR, jetzt)
     warnung = ""

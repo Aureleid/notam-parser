@@ -9,10 +9,12 @@ erkennen, einem Weltraumbahnhof zuzuordnen und die Flugbahn abzuschätzen.
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m streamlit run app.py
+.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1
 ```
 
-Die App läuft dann auf <http://localhost:8501>.
+Die App läuft dann auf <http://localhost:8501>. `--server.address 127.0.0.1` hält sie auf dem
+eigenen Rechner; ohne den Schalter ist sie im lokalen Netz erreichbar, und NOLA weist in der
+Seitenleiste darauf hin (siehe [Persistenz](#persistenz)).
 
 ## Dateien
 
@@ -25,15 +27,121 @@ Die App läuft dann auf <http://localhost:8501>.
 | `archiv_import.py` | Archiv-Import historischer NOTAMs (Logik ohne Streamlit) |
 | `gcat_startplaetze.csv` | GCAT-Startplatzcode → NOLA-Kürzel und Land (nur Archiv-Import) |
 | `gcat_traegersysteme.csv` | GCAT-Schreibweise → Trägerkürzel (nur Archiv-Import) |
+| `nola_db.py` | Lokale Datenbank: Schema, Lesen/Schreiben mit Konfliktschutz, Sicherung, Wiederherstellen |
+| `nola_umzug.py` | Umzug der bisherigen CSV/JSON-Dateien in die Datenbank, Start-Entscheidung, Export |
+| `nola.db` | Lokale SQLite-Datenbank mit allen eingepflegten Daten (beim ersten Start angelegt, in `.gitignore`) |
 | `test_app.py` | Tests über Parser, Orbitmechanik, Pipeline, Freitext-Eingabe und Regressionen |
+| `test_nola_db.py` | Tests der Datenbank-, Sicherungs- und Umzugsmodule |
 | `requirements.txt` | Abhängigkeiten |
-| `notam_workspace.json` | Arbeitsstand: manuelle NOTAMs, Bestätigungen, Ausblendungen (wird automatisch angelegt) |
+| `notam_workspace.json` | Früherer Arbeitsstand (manuelle NOTAMs, Entscheidungen) — nur noch Quelle für den Umzug |
+
+Die drei Referenz-CSVs, `startarchiv_updated.csv`, `seestarts_updated.csv`,
+`archiv_korpus.json` und `archiv_import.json` sind seit der lokalen Datenbank nur noch die
+**Ausgangsdaten des Umzugs** und das Format des Exports; NOLA liest und schreibt sie im
+Betrieb nicht mehr (Ausnahme: die öffentliche Fassung baut ihre Datenbank bei jedem Start
+aus den Repo-CSVs).
 
 Tests ausführen:
 
 ```bash
+.venv/bin/python test_nola_db.py
 .venv/bin/python test_app.py
 ```
+
+Beide Läufe setzen `NOLA_TEST=1` und arbeiten nur in Temp-Ordnern; die echte `nola.db`, der
+iCloud-Sicherungsordner und der Ordner `export/` im Projekt sind unter `NOLA_TEST` gesperrt.
+
+## Persistenz
+
+Alles, was in NOLA eingepflegt wird, liegt in **einer lokalen SQLite-Datei `nola.db`** im
+Projektordner: Referenzen, Startarchiv, Seestart-Protokoll, Arbeitsstand und der Zustand des
+Archiv-Imports. Die Datei läuft im WAL-Modus; jede Aktion öffnet eine eigene kurze
+Verbindung, schreibt in einer Transaktion und schließt sie wieder.
+
+### Tabellen
+
+| Tabelle | Inhalt | früher |
+|---|---|---|
+| `startplaetze`, `firs`, `traegersysteme` | die drei Referenzen, Spalten wie in den CSVs | `*_updated.csv` |
+| `startarchiv` | eine Zeile je Start | `startarchiv_updated.csv` |
+| `seestarts` | Seestart-Protokoll | `seestarts_updated.csv` |
+| `manuelle_notams` | eingefügte NOTAMs mit fester `id` | `notam_workspace.json` |
+| `entscheidungen` | bestätigt, ausgeblendet, abgelehnt, wiederhergestellt, aus Archiv/Protokoll entfernt | `notam_workspace.json` |
+| `zuweisungen` | Trägersystem, Payload, Startplatz je Start | `notam_workspace.json` |
+| `archiv_korpus`, `archiv_import_*` | Korpus und Zustand des Archiv-Imports | `archiv_korpus.json`, `archiv_import.json` |
+| `meta` | Schema-Version | — |
+
+Werte stehen als Text, so wie sie in den CSVs standen — beim Umzug wird nichts umgerechnet.
+Prüfregeln in der Datenbank verhindern leere Schlüssel und Koordinaten außerhalb des
+gültigen Bereichs.
+
+### Mehrere Tabs und fremde Programme
+
+Jeder Durchlauf liest den Stand neu aus der Datenbank, Änderungen aus einem anderen Tab oder
+aus einem anderen Programm sind beim nächsten Klick sichtbar. Geschrieben werden nur die
+eigenen Abweichungen. Hat jemand denselben Eintrag inzwischen geändert, wird nichts
+geschrieben und erscheint:
+
+> Changed by someone else meanwhile – the view has been reloaded, please check again.
+
+Hält ein anderes Programm die Datei länger als etwa fünf Sekunden zum Schreiben gesperrt
+(z. B. ungespeicherte Änderungen in DB Browser), erscheint:
+
+> Not saved: Database is locked – write or revert the changes in DB Browser.
+
+Zum Ansehen und Bearbeiten von Hand eignet sich
+[DB Browser for SQLite](https://sqlitebrowser.org). Änderungen dort mit *Write Changes*
+abschließen — erst dann sieht NOLA sie, und erst dann ist die Datei wieder frei.
+
+### Sicherung
+
+Gesichert wird beim **Start** des Servers, beim **ersten Durchlauf eines neuen Tages** und
+**vor jeder Schema-Änderung**, in den iCloud-Ordner
+`iCloud Drive/Claude/Claude Code/NOTAM Parser Backups/`. Die Sicherung entsteht mit der
+SQLite-Sicherungsfunktion zuerst als temporäre Datei, wird mit `integrity_check` geprüft und
+erst dann umbenannt — iCloud sieht nie eine halbe Datei. Namen: `nola-JJJJ-MM-TT-HHMM.db`,
+vor einer Schema-Änderung mit Zusatz (`…-vor-schema-2.db`). Die **30 neuesten** regulären
+Sicherungen bleiben, ältere werden gelöscht; Sicherungen mit Zusatz werden nie rotiert.
+Schlägt eine Sicherung fehl (z. B. Ordner fehlt), steht eine Warnung in der Seitenleiste —
+NOLA arbeitet weiter.
+
+### Wiederherstellen
+
+Fehlt `nola.db`, gibt es aber Sicherungen, baut NOLA die Datei **nie still neu auf**. Die
+Seite zeigt die Sicherungen mit ihren Zeilenzahlen; defekte sind als *corrupt* markiert,
+von iCloud ausgelagerte als *in iCloud only* (erst im Finder laden). Zur Wahl stehen
+*Restore backup* (kopiert die gewählte, geprüfte Sicherung nach `nola.db` — nur, wenn dort
+keine Datei liegt; es wird nie etwas überschrieben) und *Rebuild from old files* (Umzug aus
+den alten CSV/JSON-Dateien). Verschwindet die Datei im Betrieb, entscheidet der nächste
+Durchlauf neu. Wiederherstellen geht nur am eigenen Rechner.
+
+Eine bestimmte Sicherung von Hand zurückspielen: NOLA beenden, `nola.db` (samt `-wal`/`-shm`)
+beiseitelegen, NOLA starten und die Sicherung in der Auswahl wählen.
+
+### Export in die alten Formate
+
+*Export to files* in der Seitenleiste (nur lokal) schreibt alle Tabellen in die bisherigen
+Formate nach `export/<Datum-Zeit>/` — die drei Referenz-CSVs, `startarchiv_updated.csv`,
+`seestarts_updated.csv`, `notam_workspace.json`, `archiv_korpus.json`, `archiv_import.json`.
+Das ist zugleich der Rückweg: die Dateien sehen aus wie vor der Datenbank.
+
+### Übergang: der erste Start
+
+Liegt noch keine `nola.db` und keine Sicherung vor, **zieht NOLA beim ersten Start um**: es
+liest alle alten Dateien streng ein (eine unlesbare Datei bricht ab, ohne eine Datenbank
+anzulegen), schreibt sie in eine temporäre Datenbank, prüft die Zeilenzahlen und legt sie
+erst dann als `nola.db` an. Die Meldung *Data moved to nola.db (… startplaetze, … firs, …).
+The old files were left untouched.* nennt die Zahlen. Die alten Dateien bleiben unverändert
+liegen; sie vorher zusätzlich zu sichern schadet nicht. Danach liest NOLA nur noch aus der
+Datenbank.
+
+### Nur lokal
+
+Speichernde Verwaltungsaktionen (Wiederherstellen, Export, Archiv-Import) sind nur vom
+eigenen Rechner aus möglich. Läuft der Server nicht auf einer Loopback-Adresse, erscheint
+*NOLA is reachable from the network. Start it with --server.address 127.0.0.1.* In der
+öffentlichen Fassung gibt es weder Sicherung noch Export noch diesen Hinweis; dort baut NOLA
+die Datenbank bei jedem Start aus den Repo-CSVs neu, Änderungen sind nicht dauerhaft.
 
 ## Zwei Eingabewege
 
@@ -59,8 +167,8 @@ Stift-Marker und gestricheltem Polygon auf der Karte, mit `✍️ manuell` im Vo
 sowie im CSV- und JSON-Export. Fehlt eine Kennung, wird `MANUELL-01`, `MANUELL-02` … vergeben.
 Über den Filter **Quelle** lassen sich beide Ströme getrennt betrachten.
 
-Die manuellen Einträge werden in `notam_workspace.json` im Projektordner abgelegt und beim
-Start wieder geladen — sie überleben Seitenneuladen und Serverneustart. *Alle manuellen
+Die manuellen Einträge werden in `nola.db` (Tabelle `manuelle_notams`) abgelegt und bei
+jedem Durchlauf neu gelesen — sie überleben Seitenneuladen und Serverneustart. *Alle manuellen
 Einträge verwerfen* leert sie dauerhaft.
 
 ## Verarbeitungskette
@@ -282,8 +390,8 @@ Ein wieder hinzugefügter Eintrag ersetzt den gleichnamigen aus der Datei, statt
 verdoppeln; die manuelle Angabe ist die jüngere. Die Statuszeile in der Sidebar weist die
 Änderungen aus (`⚙️ 2 entfernt, 1 ergänzt`).
 
-Jede Änderung wird **sofort in die Projektdatei geschrieben** und überlebt damit einen
-Neustart. **↩️ Letzte Änderung rückgängig** stellt den Stand vor der jeweils letzten
+Jede Änderung wird **sofort in die Datenbank `nola.db` geschrieben** und überlebt damit
+einen Neustart. **↩️ Letzte Änderung rückgängig** stellt den Stand vor der jeweils letzten
 Änderung wieder her (bis zu 20 Schritte, über alle drei Referenzen hinweg); die drei
 Sicherungs-Schaltflächen laden je eine Kopie des aktuellen Stands herunter.
 
@@ -349,7 +457,7 @@ Funktion.
 
 Die Zuweisung ist ein Etikett: sie ändert **nichts** an der Erkennung — weder Nation noch
 Startplatz, Azimut oder Orbit. Sie steht in beiden CSV-Exporten und im JSON-Export und wird
-wie die übrigen Entscheidungen in `notam_workspace.json` gespeichert. Wird ein zugewiesenes
+wie die übrigen Entscheidungen in `nola.db` (Tabelle `zuweisungen`) gespeichert. Wird ein zugewiesenes
 Trägersystem später über das Optionsmenü aus der Referenz entfernt, bleibt die Zuweisung
 sichtbar und wird als *„nicht mehr in der Referenz"* gekennzeichnet, statt unbemerkt zu
 verschwinden.
@@ -370,8 +478,8 @@ desselben Starts; widersprechen sich zwei Texte nach einer Umgruppierung, wird d
 ## Startarchiv
 
 Die vierte Referenz unterscheidet sich von den drei anderen: sie wird nicht eingelesen,
-sondern von der Anwendung selbst geschrieben. `startarchiv_updated.csv` hält fest, was zu
-jedem erkannten Start bekannt ist — eine Zeile je Start, nicht je NOTAM:
+sondern von der Anwendung selbst geschrieben. Die Tabelle `startarchiv` in `nola.db`
+(früher `startarchiv_updated.csv`) hält fest, was zu jedem erkannten Start bekannt ist — eine Zeile je Start, nicht je NOTAM:
 
 | Spalte | Beispiel |
 |---|---|
@@ -432,7 +540,7 @@ Entscheidung, keine Nacharbeit.
 Im Optionsmenü hat das Archiv einen eigenen Reiter — mit Suche und **Entfernen** je Zeile,
 aber ohne Formular zum Anlegen: Zeilen entstehen aus der Auswertung, die Nutzlast trägt man
 unter *NOTAM Data* nach. Eine gelöschte Zeile bleibt gelöscht, auch wenn ihr NOTAM noch in
-der Tagesdatei steht — der Schlüssel wandert dafür in `notam_workspace.json`.
+der Tagesdatei steht — der Schlüssel wandert dafür in die Tabelle `entscheidungen`.
 
 Die Datei ist in `.gitignore` aufgeführt: sie leitet sich aus den lokalen NOTAM-Rohdaten ab
 und bleibt wie diese lokal.
@@ -460,8 +568,8 @@ NASASpaceflight-Forum (NSF). Der Ablauf in vier Schritten:
 
 Der Reiter ist **nur lokal** sichtbar: nicht in der veröffentlichten Fassung und nur, wenn
 die Anfrage vom eigenen Rechner kommt. Korpus und Importzustand liegen in
-`archiv_korpus.json` und `archiv_import.json`, die GCAT-Liste im Cache
-`gcat_launch_cache.tsv` — alle drei lokal und in `.gitignore`. Die Begründung steht in
+`nola.db` (früher `archiv_korpus.json` und `archiv_import.json`), die GCAT-Liste im Cache
+`gcat_launch_cache.tsv` — alles lokal und in `.gitignore`. Die Begründung steht in
 `docs/decisions/ADR-0001-archiv-import-nola-erkennt-gcat-schlaegt-vor.md`.
 
 Startliste: GCAT (J. McDowell, CC-BY), `planet4589.org/space/gcat`.
@@ -615,7 +723,8 @@ schmaleres Band hätte denselben Start je nach Tag anders eingeordnet.
 
 ### Das Seestart-Protokoll
 
-`seestarts_updated.csv` wird von der Anwendung geschrieben, wie das Startarchiv. Eine Zeile
+Das Seestart-Protokoll (Tabelle `seestarts`, früher `seestarts_updated.csv`) wird von der
+Anwendung geschrieben, wie das Startarchiv. Eine Zeile
 je abgeleitetem Start, mit Position, Radius, Bahn, Dropzones — und einer Spalte
 **`Nächster bekannter Platz`** (`HYOS, 473 km`). Diese letzte Spalte zeigt über die Zeit, ob
 sich ein neues Startgebiet herausbildet oder ob eine vorhandene Referenz nur ungenau liegt.
@@ -819,7 +928,7 @@ in Black Rock (`AEROPAC`, `EXPERIMENTAL ROCKETRY`), ein indischer Luftraumplan u
 spanische Militärübung mit `MISSILE LAUNCH`. Kein Orbitalstart darunter.
 
 **Deine Entscheidung gewinnt dauerhaft.** Holst du ein automatisch ausgeblendetes NOTAM
-zurück, wandert sein Schlüssel nach `restored_events` in `notam_workspace.json` — der
+zurück, wandert sein Schlüssel als `wiederhergestellt` in die Tabelle `entscheidungen` — der
 nächste Import blendet es nicht erneut aus. Ohne das wäre der Knopf wirkungslos: Solange
 die Meldung in der Tagesdatei steht, fiele sie beim nächsten Durchlauf sofort wieder heraus.
 
@@ -878,8 +987,8 @@ Ein bestätigtes NOTAM kann außerdem als **Anker** einer Gruppe dienen: bestät
 Meldung, können zeitlich und geometrisch passende, für sich genommen mehrdeutige NOTAMs
 darüber mit aufgelöst werden.
 
-Bestätigungen und Ausblendungen werden wie die Freitext-Eingaben in `notam_workspace.json`
-gespeichert und beim Start wieder eingelesen — sie überleben Seitenneuladen und Serverneustart.
+Bestätigungen und Ausblendungen werden wie die Freitext-Eingaben in `nola.db`
+gespeichert und bei jedem Durchlauf neu gelesen — sie überleben Seitenneuladen und Serverneustart.
 
 ## Oberfläche: Gestaltungsregeln
 

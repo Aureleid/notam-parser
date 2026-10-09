@@ -1,14 +1,15 @@
 # Projektstand — NOLA
 
-Stand: 08.10.2026 · `app.py` 8010 Zeilen · `test_app.py` 1309 Tests, alle grün
+Stand: 09.10.2026 · `app.py` 8353 Zeilen · 1608 Tests (`test_app.py` 1419, `test_nola_db.py` 189), alle grün
 
 ## Starten
 
 ```bash
-cd "/Users/marioantic/Documents/Claude Code/NOTAM Parser" && .venv/bin/python -m streamlit run app.py
+cd "/Users/marioantic/Documents/Claude Code/NOTAM Parser" && .venv/bin/python -m streamlit run app.py --server.address 127.0.0.1
 ```
 
-Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert wenige Sekunden.
+Tests: `.venv/bin/python test_nola_db.py` und `.venv/bin/python test_app.py` — laufen ohne
+Streamlit-Server unter `NOLA_TEST=1` nur in Temp-Ordnern.
 
 ## Was fertig ist
 
@@ -28,10 +29,10 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 | Bahnrechnung | Inklination mit Erdrotation (`orbital_azimuth_deg`); Orbitbänder auf die Streuung der Abschätzung geweitet (SSO 93–103°) |
 | Vorfilterung | `LOW` + Ausschlussbegriff → direkt unter *Excluded*; auf der Echtdatei 148 von 275 Review-Fällen, ohne einen Start zu verlieren. Zurückholen gewinnt dauerhaft. |
 | Payload | Freitextfeld unter NOTAM Data, gilt für alle Zonen eines Starts; Spalte in Launch Overview und Export |
-| Startarchiv | `startarchiv_updated.csv`, von der App geschrieben: eine Zeile je erkanntem Start, wird aktualisiert statt verdoppelt; eigener Reiter im Optionsmenü. Erkennungsmerkmal ist Startdatum + NOTAM-Kennungen — der Startplatz gehört seit dem 02.10.2026 nicht dazu, weil er sich mit besserer Erkennung ändert. Gelesen wird streng (`read_archive_strict`): eine vorhandene, aber unlesbare, leere oder in den Spalten abweichende Datei wird nie überschrieben — weder im Tagesbetrieb noch beim Import —, stattdessen erscheint eine Meldung. Geschrieben wird atomar über eine temporäre Datei (`_write_bytes_atomic`), die Dateirechte bleiben erhalten. Trägersystem und Payload bleiben beim Tageslauf stehen, wenn der neue Wert leer ist (`merge_archive`, seit 06.10.2026 auch das Trägersystem). Rückgängig im Startarchiv schreibt atomar und nur, solange das Archiv seit der Änderung unverändert ist — sonst wird es mit Meldung verweigert, damit neuere Zeilen (Import, Tageslauf) nicht still verschwinden. |
+| Startarchiv | `startarchiv_updated.csv`, von der App geschrieben: eine Zeile je erkanntem Start, wird aktualisiert statt verdoppelt; eigener Reiter im Optionsmenü. Erkennungsmerkmal ist Startdatum + NOTAM-Kennungen — der Startplatz gehört seit dem 02.10.2026 nicht dazu, weil er sich mit besserer Erkennung ändert. Seit dem 09.10.2026 liegt es als Tabelle `startarchiv` in `nola.db` (`archiv_lesen`, `archiv_schreiben`): geschrieben wird in einer Transaktion und nur, solange das Archiv dem gelesenen Stand entspricht; bei einem Konflikt liest der Tageslauf neu und versucht es einmal wieder. Ist die Datenbank unlesbar, wird nichts geschrieben und eine Meldung erscheint. Starts ohne Startdatum, NOTAM oder Nation werden mit Hinweis übersprungen. Trägersystem und Payload bleiben beim Tageslauf stehen, wenn der neue Wert leer ist (`merge_archive`, seit 06.10.2026 auch das Trägersystem). Rückgängig im Startarchiv schreibt atomar und nur, solange das Archiv seit der Änderung unverändert ist — sonst wird es mit Meldung verweigert, damit neuere Zeilen (Import, Tageslauf) nicht still verschwinden. |
 | Archiv-Import | Reiter *Archive Import* im Optionsmenü, **nur lokal** sichtbar (nicht unter `/mount/src`, Host lokal, TCP-Gegenstelle Loopback). Gespeicherte NSF-Forenseiten (HTML/TXT) oder eingefügter Text werden stapelweise gelesen, Zitate und Skripte verworfen, NOTAMs im lokalen Korpus `archiv_korpus.json` entdoppelt. Je Tag ein Bündel mit Nachlauf bis 06:00 UTC des Folgetags, ausgewertet mit derselben Erkennung wie im Tagesbetrieb (`MEDIUM`); US-Starts werden nach der Erkennung verworfen und gezählt. GCAT (J. McDowell) schlägt nur Rakete und Payload vor; der Abruf läuft nur auf Knopfdruck. Ins Archiv kommt nur Bestätigtes — einzeln oder als Sammelbestätigung eindeutiger Treffer, mit Prüfung nach dem Schreiben. Steht der Start schon aus dem Tagesbetrieb im Archiv, werden nur Trägersystem und Payload ergänzt; die vorherigen Werte bleiben im Importzustand `archiv_import.json`. „Derselbe Start“ heißt überall: gemeinsame NOTAM-Kennung, Startdatum ±1 Tag und gleiche Nation (`_gleicher_start`) — Kennungen allein sind über Nationen und Monate nicht eindeutig. Ein aktualisierter Kandidat nennt vor dem Bestätigen jede Importzeile, die er ersetzt (löscht), und übernimmt deren Trägersystem und Payload; die ersetzte Entscheidung behält ihre Werte. Eine entfernte Waise wird wieder angeboten, sobald sie wieder erkannt wird. NOTAMs, die die Erkennung zur Prüfung stellt oder ohne Startplatz lässt, gehen in eine Prüfliste (Space Launch / Hide). Die Tageslage bleibt unberührt (Gegenprobe in `test_app.py`). Entscheidung: `docs/decisions/ADR-0001-archiv-import-nola-erkennt-gcat-schlaegt-vor.md`. Browser-Test 06.10.2026: 3 eingefügte NOTAMs ergaben 3 Tage und 2 Kandidaten; ein Forenkommentar „Starship“ blieb ohne Wirkung; der 20.09.2026 wurde eindeutig mit GCAT 2026-220 (Lijian-1, Payload Pengcheng) gepaart; die bestätigte Zeile trug NOLAs eigene Inklination. |
 | Vergangene Starts | Ein Start verschwindet aus der Tageslage, wenn das späteste Ende aller seiner Meldungen (Zonen und Vorankündigungen) plus 24 h (`PAST_LAUNCH_GRACE`) vor jetzt (UTC) liegt **und** er im Startarchiv steht — nur Archiviertes wird ausgeblendet (`past_launch_rows`, `event_expired`). Ein aus dem Archiv entfernter Start bleibt sichtbar und trägt den Hinweis „removed from archive“. Review-Fälle und Gruppen ohne Startplatz bleiben sichtbar; abgelaufene Review-Fälle tragen die Marke „expired“ (Spalte „Expired“). Unlesbares Archiv → nichts wird ausgeblendet, Meldung in der Seitenleiste (`archive_keys_or_reason`). Schalter „Show past launches“ in der Seitenleiste (nicht gespeichert) holt sie zurück; Hinweis „N past launch(es) hidden – in the launch archive“. Gelöscht wird nichts; Archiv, Arbeitsstand und Seestart-Protokoll werden nicht geschrieben. Unter „Pasted entries“ stehen vergangene Einträge mit „(past)“ (`order_pasted_entries`, `_render_pasted_entries`). Eine Zone ohne Endzeit (z. B. PERM) gilt als endend zu ihrem Beginn (`valid_to`, sonst `valid_from`). Der Zähler im Hinweis zählt nur Starts, die sonst sichtbar wären (`count_hidden_past`); die Ersatzkarte ohne folium zeigt nur Zeilen der Maske (`fallback_points`); die Hinweise je Start kommen aus `archive_hints`. Die Spalte „Archiv“ im gruppierten CSV-Export trägt die Hinweise (auf dem Bildschirm „Archive“). Echtbestand: 8 Starts (16 Tabellenzeilen) bei spätem `now` vergangen, bei frühem keiner. |
-| Persistenz | Referenzänderungen direkt in die CSVs, Arbeitsstand (inkl. Trägersystem-Zuweisungen) in `notam_workspace.json` |
+| Persistenz | Seit 09.10.2026 alles Eingepflegte in einer lokalen SQLite-Datei `nola.db` (`nola_db.py`, `nola_umzug.py`): Referenzen, Startarchiv, Seestart-Protokoll, Arbeitsstand (manuelle NOTAMs mit fester `id`, Entscheidungen, Zuweisungen) und Archiv-Import-Zustand. Jeder Durchlauf liest neu (`_arbeitsstand_laden`, `referenz_lesen`), geschrieben werden nur Abweichungen (`_persist_workspace` → `schreibe_unterschiede`) bzw. ganze Tabellen mit Standprüfung (`ersetze_tabelle`); zwei Tabs oder DB Browser überschreiben einander nicht still — Konfliktmeldung „Changed by someone else meanwhile …“, Sperrmeldung nach 5 s. Erster Start zieht die alten CSV/JSON-Dateien um (`umziehen`, Zählprüfung, alte Dateien bleiben liegen). Sicherung beim Start, täglich und vor Schema-Änderungen in den iCloud-Ordner `NOTAM Parser Backups` (`sichere`, geprüft, 30 behalten); fehlt `nola.db`, wählt man eine Sicherung (`stelle_wieder_her`, überschreibt nie) oder den Neuaufbau; Export in die alten Formate nach `export/` (`exportieren`). Speicher-Aktionen nur lokal, Hinweis wenn nicht an `127.0.0.1` gebunden. Browser-Test 09.10.2026 auf einer Kopie: Umzug (32/130/65/3/16/15 …), externe Änderung sichtbar, Konflikt zweier Tabs, Sperre, Konsole fehlerfrei. Tempo je Durchlauf +2 ms gegenüber den ungecachten CSV-Lesern. |
 | Oberfläche | Zweizeilige Wortmarke nach festem Regelwerk, unbunte Bühne mit bunten Signalen, durchgehend deckende Flächen, durchgehend englische Fachsprache, geometrische Symbole statt Piktogramme, Farbschema aus einer Referenzoberfläche gemessen (`.streamlit/config.toml`) |
 | Veröffentlichung | Repository `Aureleid/notam-parser`, Streamlit Community Cloud unter `notam-space-analyzer.streamlit.app` |
 
@@ -92,9 +93,6 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
 - **`AEROSPACE FLIGHT ACTIVITY`** ist in keiner Stichwortliste. Beim Seestart-Fall war das
   folgenlos (die Meldungen erreichten HIGH über SFC/UNL und Q-Code), könnte aber in einem
   schwächeren Fall den Ausschlag geben.
-- **Automatische `.bak`-Kopie** der Referenzdateien beim Start (angeboten, nicht umgesetzt).
-  Eine einmalige, geprüfte Sicherung liegt unter
-  `iCloud/Claude/Claude Code/NOTAM Parser Backups/`.
 - **Das Pad eines Wenchang-Starts** bleibt `nicht bestimmt`, bis es von Hand gesetzt wird.
   NOLA kann es nicht wissen: nicht aus der Geometrie (1,92 km), nicht aus dem NOTAM-Text
   (chinesische Startmeldungen nennen kein Pad), nicht aus dem Trägersystem (CZ-8 fliegt von
@@ -110,9 +108,21 @@ Tests: `.venv/bin/python test_app.py` — läuft ohne Streamlit-Server, dauert w
   nachgebautes SMF-Markup getestet.
 - **Archivspalte Quelle**: Woher eine Importzeile stammt, steht vorerst nur im Nebenbestand
   `archiv_import.json`, nicht im Archiv selbst — das würde den Spaltensatz ändern.
-- **`persist_sea_launches`** schreibt `seestarts_updated.csv` noch nicht atomar.
-- **Zwei gleichzeitig offene Tabs** können sich beim Schreiben des Archivs gegenseitig
-  überschreiben.
+- **Referenzdialog geht wieder auf**: Er schließt nur über „Close“; X oder Escape lassen
+  `ref_dialog_open` stehen, beim nächsten Durchlauf öffnet er sich erneut (schon vor der
+  Datenbank so, beim Browser-Test am 09.10.2026 bemerkt).
+- **Ungenutzte Datei-Helfer**: `archive_keys_or_reason`, `load_archive`, `load_sea_launches`
+  und `persist_sea_launches` werden von der App nicht mehr aufgerufen (nur noch Tests,
+  Umzug und Export nutzen Datei-Leser) — Aufräumen offen.
+- **Fehlender Sicherungsordner**: Fehlt der iCloud-Ordner, steht „Daily backup failed: Backup
+  folder … is missing.“ bei jedem Durchlauf in der Seitenleiste (gewollt laut „keine stillen
+  Fehler“, aber dauerhaft sichtbar).
+- **Wiederherstellen-Auswahl**: Defekte oder ausgelagerte Sicherungen sind in der Liste
+  wählbar, nur der Knopf ist dann gesperrt — Streamlit-Radio kennt keine einzeln gesperrten
+  Optionen.
+- **Kleine Review-Punkte der Datenbank**: Fehlerübersetzung in `_uebersetze` über Textabgleich,
+  keine eigenen Tests für `setze_wal`/`setze_meta`; maskierte Schrägstriche in Rohmeldungen
+  (`Z8002\/26`) sind nur in der Markdown-Anzeige unsichtbar.
 - **Alte Dubletten**: Doppelte Zeilen, die vor dem Archiv-Import entstanden sind, werden nicht
   bereinigt.
 - **Tagesbetrieb neben Importzeile**: Ist die NOTAM-Menge im Tagesbetrieb größer als beim

@@ -5792,7 +5792,6 @@ check("main nutzt _datenbank_bereit", "_datenbank_bereit()" in _src_main)
 check("main behandelt DateiFehlt", "DateiFehlt" in _src_main and "_datenbank_bereit.clear()" in _src_main)
 check("Wiederherstellen nur lokal", "local_admin_allowed()" in _ins_w.getsource(app._wiederherstellen_auswahl))
 check("Export nur lokal", "local_admin_allowed()" in _ins_w.getsource(app._export_knopf))
-check("Uebergangssperre NOLA_DB", "NOLA_DB" in _ins_w.getsource(app._datenbank_bereit))
 check("Netz-Hinweis nicht in der Cloud", "is_public_deployment()" in _src_main and "server_address_is_loopback(" in _src_main)
 _i_bereit = _src_main.find("_datenbank_bereit()")
 _i_laden = _src_main.find("_arbeitsstand_laden()")
@@ -5889,18 +5888,12 @@ _bereit_roh_s = app._datenbank_bereit.__wrapped__
 _tmp_s = Path(_tf_s.mkdtemp())
 try:
     app.st = _fake_st_s()
-    # --- Uebergangssperre ---
+    # --- ohne Sperre: nola.db fehlt, keine Sicherungen, lokal -> Umzug aus Temp-Altdateien ---
     os.environ.pop("NOLA_DB", None)
-    app.DB_PATH = _tmp_s / "sperre" / "nola.db"
+    app.DB_PATH = _tmp_s / "umzug" / "nola.db"
     app.DB_PATH.parent.mkdir()
     app.BACKUP_DIR = _tmp_s / "sich_leer"
     app.BACKUP_DIR.mkdir()
-    _z_s, _e_s = _lauf_s(_bereit_roh_s)
-    check("Verhalten Sperre: ohne NOLA_DB fehlgeschlagen 'not enabled', keine Datei",
-          _e_s is None and _z_s[0].art == "fehlgeschlagen" and "not enabled" in _z_s[0].grund
-          and not app.DB_PATH.exists() and not list(app.DB_PATH.parent.iterdir()), (_z_s, _e_s))
-    # --- mit NOLA_DB=1 und Altdateien aus einem Temp-Ordner: Umzug ---
-    os.environ["NOLA_DB"] = "1"
     _alt_ordner_s = _tmp_s / "alt"
     _alt_ordner_s.mkdir()
     for _p in (app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV):
@@ -5908,7 +5901,7 @@ try:
     _altdateien_orig_s = _orig_s[7]
     _um_s.altdateien_im = lambda d: _altdateien_orig_s(_alt_ordner_s)
     _z_s, _e_s = _lauf_s(_bereit_roh_s)
-    check("Verhalten Sperre: mit NOLA_DB=1 umgezogen, Datei da, Startsicherung im Temp-Ordner",
+    check("Verhalten Start ohne NOLA_DB: nola.db fehlt -> umgezogen, Datei da, Startsicherung im Temp-Ordner",
           _e_s is None and _z_s[0].art == "umgezogen" and _z_s[1] == "" and app.DB_PATH.exists()
           and len(_db_s.liste_sicherungen(app.BACKUP_DIR)) == 1, (_z_s, _e_s))
     _um_s.altdateien_im = _altdateien_orig_s
