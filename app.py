@@ -2040,14 +2040,15 @@ def prepare_firs(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-#: Arbeitsstand der Sitzung: manuelle NOTAMs, Bestaetigungen, Ausblendungen.
+#: Alte Datei des Arbeitsstands (manuelle NOTAMs, Bestaetigungen, Ausblendungen) -
+#: nur noch Quelle des Umzugs und Format des Exports; laufend steht er in nola.db.
 WORKSPACE_FILE = APP_DIR / "notam_workspace.json"
 #: Die lokale Datenbank - Quelle der Wahrheit fuer alles Eingepflegte.
 DB_PATH = APP_DIR / "nola.db"
 #: Sicherungen der Datenbank (iCloud Drive); die Datenbank selbst liegt nie dort.
 BACKUP_DIR = nola_db.ECHTER_SICHERUNGSORDNER
-#: Archiv der erkannten Starts - anders als die drei Referenzen oben wird diese
-#: Datei nicht eingelesen, sondern von der Anwendung selbst fortgeschrieben.
+#: Alte Datei des Startarchivs - nur noch Quelle des Umzugs und Format des Exports;
+#: das Archiv selbst schreibt die Anwendung in nola.db (Tabelle startarchiv) fort.
 ARCHIVE_CSV = APP_DIR / "startarchiv_updated.csv"
 
 
@@ -2126,8 +2127,8 @@ def server_address_is_loopback(adresse: Optional[str]) -> bool:
     return (adresse or "").strip().lower() in ("127.0.0.1", "localhost", "::1")
 
 
-#: Protokoll der Starts von beweglichen Seeplattformen. Wie das Archiv von der
-#: Anwendung geschrieben, nicht eingelesen.
+#: Alte Datei des Seestart-Protokolls - wie beim Archiv nur noch Quelle des Umzugs
+#: und Format des Exports; laufend steht das Protokoll in nola.db (Tabelle seestarts).
 SEA_LAUNCH_CSV = APP_DIR / "seestarts_updated.csv"
 
 #: Wie viele Schritte im Optionsmenue rueckgaengig gemacht werden koennen.
@@ -2136,11 +2137,9 @@ UNDO_LIMIT = 20
 
 def persist_reference(path: Path, df: pd.DataFrame, columns: Sequence[str]) -> None:
     """
-    Schreibt eine Referenztabelle zurueck in ihre Projektdatei.
-
-    Die Datei ist die einzige Quelle der Wahrheit - Aenderungen ueberleben
-    damit einen Neustart. Die abgeleitete Spalte ``Nationen`` wird nicht
-    geschrieben, sie entsteht beim Laden neu.
+    Schreibt eine Referenztabelle als CSV - nur noch fuer den Export
+    (nola_umzug.exportieren); Quelle der Wahrheit ist nola.db. Die abgeleitete
+    Spalte ``Nationen`` wird nicht geschrieben, sie entsteht beim Laden neu.
     """
     path.write_text(df[list(columns)].to_csv(index=False), encoding="utf-8")
 
@@ -5791,7 +5790,7 @@ ARCHIVE_UNDO_REFUSED = (
     "Launch archive changed since this action - undo refused to protect newer entries."
 )
 ARCHIVE_UNDO_UNREADABLE = (
-    "Launch archive could not be read - undo refused, the file was left untouched."
+    "Launch archive could not be read - undo refused, nothing was changed."
 )
 
 
@@ -5856,6 +5855,35 @@ def _melde_db(art: str, text: str) -> None:
     st.session_state["db_meldung"] = (art, text)
 
 
+def _melde_db_dialog(art: str, text: str) -> None:
+    """
+    Wie _melde_db, dazu im Optionsdialog: der oeffnet sich beim naechsten Durchlauf
+    ueber der Hauptseite neu, deren Meldung laege sonst verdeckt dahinter.
+    """
+    _melde_db(art, text)
+    st.session_state["ref_flash_warning" if art == "warning" else "ref_flash_error"] = text
+
+
+def _zeige_db_meldung() -> None:
+    """Gemerkte DB-Meldung auf der Hauptseite zeigen - entschaerft, der Text kann DB-Schluessel enthalten."""
+    meldung = st.session_state.pop("db_meldung", None)
+    if meldung:
+        (st.warning if meldung[0] == "warning" else st.error)(_md_plain(meldung[1]))
+
+
+def _zeige_dialog_meldungen() -> None:
+    """Erfolg, Warnung und Fehler der letzten Dialog-Aktion - entschaerft (Labels enthalten DB-Schluessel)."""
+    flash = st.session_state.pop("ref_flash", None)
+    if flash:
+        st.success(_md_plain(flash))
+    warnung = st.session_state.pop("ref_flash_warning", None)
+    if warnung:
+        st.warning(_md_plain(warnung))
+    fehler = st.session_state.pop("ref_flash_error", None)
+    if fehler:
+        st.error(_md_plain(fehler))
+
+
 def _write_reference(
     tabelle: str, df: pd.DataFrame, columns: Sequence[str], label: str, vorher: pd.DataFrame
 ) -> None:
@@ -5866,10 +5894,10 @@ def _write_reference(
         with _db() as conn:
             neu = nola_db.ersetze_tabelle(conn, tabelle, df[list(columns)], vorher.attrs.get("nola_stand"))
     except nola_db.Konflikt:
-        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
         return
     except nola_db.DbFehler as exc:
-        _melde_db("error", str(exc))
+        _melde_db_dialog("error", str(exc))
         return
     _push_undo(tabelle, vorher, neu, label)
     st.session_state["ref_flash"] = label
@@ -6147,12 +6175,7 @@ def _reference_dialog(
         "immediately. Every change is written straight to the database `nola.db` - "
         "use Undo below to take one back."
     )
-    flash = st.session_state.pop("ref_flash", None)
-    if flash:
-        st.success(flash)
-    flash_fehler = st.session_state.pop("ref_flash_error", None)
-    if flash_fehler:
-        st.error(flash_fehler)
+    _zeige_dialog_meldungen()
     titel = [
         "Launch Sites ({})".format(len(spaceports)),
         "ICAO FIR / ACC ({})".format(len(firs)),
@@ -6651,16 +6674,16 @@ def _remove_sea_launch_row(schluessel: str) -> None:
     try:
         bestand = seestarts_lesen()
     except nola_db.DbFehler as exc:
-        _melde_db("error", "Sea launch log: {} Nothing was removed.".format(exc))
+        _melde_db_dialog("error", "Sea launch log: {} Nothing was removed.".format(exc))
         return
     behalten = bestand[[sea_launch_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
     try:
         neu_stand = seestarts_schreiben(behalten, vorher=bestand)
     except nola_db.Konflikt:
-        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
         return
     except nola_db.DbFehler as exc:
-        _melde_db("error", "Sea launch log: {} Nothing was removed.".format(exc))
+        _melde_db_dialog("error", "Sea launch log: {} Nothing was removed.".format(exc))
         return
     _push_undo("seestarts", bestand, neu_stand, "Sea launch row removed")
     st.session_state.setdefault("seestarts_removed", set()).add(schluessel)
@@ -6728,16 +6751,16 @@ def _remove_archive_row(schluessel: str) -> None:
         bestand = archiv_lesen()
     except ArchiveUnreadable as exc:
         # Meldung fuer den naechsten Durchlauf - der Aufrufer zeichnet sofort neu
-        _melde_db("error", "Launch archive: {} Nothing was removed.".format(exc))
+        _melde_db_dialog("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     behalten = bestand[[archive_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
     try:
         neu_stand = archiv_schreiben(behalten, vorher=bestand)
     except nola_db.Konflikt:
-        _melde_db("warning", nola_db.KONFLIKT_TEXT)
+        _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
         return
     except nola_db.DbFehler as exc:
-        _melde_db("error", "Launch archive: {} Nothing was removed.".format(exc))
+        _melde_db_dialog("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
     _push_undo("startarchiv", bestand, neu_stand, "Archivzeile entfernt")
@@ -7287,7 +7310,11 @@ def _datenbank_bereit() -> Tuple["nola_umzug.Startzustand", str]:
     """Einmal je Serverprozess: pruefen, umziehen oder zur Wahl stellen; dann Startsicherung."""
     import nola_umzug  # erst hier - nola_umzug importiert app
     jetzt = datetime.now()
-    zustand = nola_umzug.stelle_bereit(DB_PATH, nola_umzug.altdateien_im(APP_DIR), BACKUP_DIR, jetzt)
+    # Cloud: neu committete Referenz-CSVs uebernehmen (nur die drei Referenztabellen)
+    zustand = nola_umzug.stelle_bereit(
+        DB_PATH, nola_umzug.altdateien_im(APP_DIR), BACKUP_DIR, jetzt,
+        referenzen_aus_dateien=is_public_deployment(),
+    )
     warnung = ""
     if zustand.art in ("bereit", "umgezogen") and not is_public_deployment():
         try:
@@ -7366,10 +7393,12 @@ def _wiederherstellen_auswahl() -> None:
         st.rerun()
     if b.button("Rebuild from old files"):
         try:
-            nola_umzug.umziehen(DB_PATH, nola_umzug.altdateien_im(APP_DIR))
+            zaehlung = nola_umzug.umziehen(DB_PATH, nola_umzug.altdateien_im(APP_DIR))
         except nola_umzug.UmzugFehler as exc:
             st.error(str(exc))
             st.stop()
+        # der naechste Lauf findet die Datei vor ("bereit") - die Zahlen meldet main
+        st.session_state["umzug_neu_aufgebaut"] = zaehlung
         _datenbank_bereit.clear()
         st.rerun()
     st.stop()
@@ -7417,10 +7446,18 @@ def main() -> None:
     except nola_db.DbFehler as exc:
         st.error(str(exc))
         st.stop()
-    if zustand.art == "umgezogen" and not st.session_state.get("umzug_gemeldet"):
-        st.session_state["umzug_gemeldet"] = True
+    # Einmal je Umzug melden: ein neuer Umzug (nola.db im Betrieb verschwunden) ist ein neues
+    # Startzustand-Objekt; "Rebuild from old files" hinterlegt seine Zahlen in der Sitzung.
+    zaehlungen = []
+    if zustand.art == "umgezogen" and st.session_state.get("umzug_gemeldet") is not zustand:
+        st.session_state["umzug_gemeldet"] = zustand
+        zaehlungen.append(zustand.zaehlung)
+    neu_aufgebaut = st.session_state.pop("umzug_neu_aufgebaut", None)
+    if neu_aufgebaut:
+        zaehlungen.append(neu_aufgebaut)
+    for zaehlung in zaehlungen:
         st.success("Data moved to nola.db ({}). The old files were left untouched.".format(
-            ", ".join("{} {}".format(v, k) for k, v in zustand.zaehlung.items())))
+            ", ".join("{} {}".format(v, k) for k, v in zaehlung.items())))
     tages_warnung = _taegliche_sicherung()
 
     try:
@@ -7440,9 +7477,7 @@ def main() -> None:
     st.session_state.setdefault("ref_flash", None)
 
     _render_header()
-    meldung = st.session_state.pop("db_meldung", None)
-    if meldung:
-        (st.warning if meldung[0] == "warning" else st.error)(meldung[1])
+    _zeige_db_meldung()
 
     # ----------------------------- Sidebar ------------------------------- #
     with st.sidebar:

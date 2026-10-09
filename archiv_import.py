@@ -7,7 +7,7 @@ Reine Logik ohne Streamlit. Erkannt wird mit genau der Pipeline des
 Tagesbetriebs (app.analyze_notams); dieses Modul liefert nur, was der
 Tagesbetrieb nicht braucht: NOTAMs aus Forenseiten loesen, nach Tagen
 buendeln, mit der GCAT-Startliste abgleichen und den Stand der Bestaetigung
-fuehren. Die Tageslage (manuelle NOTAMs, notam_workspace.json) wird nie
+fuehren. Die Tageslage (manuelle NOTAMs, Arbeitsstand in nola.db) wird nie
 beruehrt.
 
 Unter Streamlit laeuft app.py als __main__; `import app` laedt dann eine

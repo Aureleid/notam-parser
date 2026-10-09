@@ -38,8 +38,8 @@ Seitenleiste darauf hin (siehe [Persistenz](#persistenz)).
 Die drei Referenz-CSVs, `startarchiv_updated.csv`, `seestarts_updated.csv`,
 `archiv_korpus.json` und `archiv_import.json` sind seit der lokalen Datenbank nur noch die
 **Ausgangsdaten des Umzugs** und das Format des Exports; NOLA liest und schreibt sie im
-Betrieb nicht mehr (Ausnahme: die öffentliche Fassung baut ihre Datenbank bei jedem Start
-aus den Repo-CSVs).
+Betrieb nicht mehr (Ausnahme: die öffentliche Fassung liest die drei Referenz-CSVs aus dem
+Repository beim Serverstart neu ein, sobald sie sich geändert haben — siehe [Nur lokal](#nur-lokal)).
 
 Tests ausführen:
 
@@ -69,7 +69,7 @@ Verbindung, schreibt in einer Transaktion und schließt sie wieder.
 | `entscheidungen` | bestätigt, ausgeblendet, abgelehnt, wiederhergestellt, aus Archiv/Protokoll entfernt | `notam_workspace.json` |
 | `zuweisungen` | Trägersystem, Payload, Startplatz je Start | `notam_workspace.json` |
 | `archiv_korpus`, `archiv_import_*` | Korpus und Zustand des Archiv-Imports | `archiv_korpus.json`, `archiv_import.json` |
-| `meta` | Schema-Version | — |
+| `meta` | Schema-Version, Umzugszeitpunkt, Prüfsummen der Referenz-CSVs (`referenz_quellen_sha`) | — |
 
 Werte stehen als Text, so wie sie in den CSVs standen — beim Umzug wird nichts umgerechnet.
 Prüfregeln in der Datenbank verhindern leere Schlüssel und Koordinaten außerhalb des
@@ -88,6 +88,9 @@ Hält ein anderes Programm die Datei länger als etwa fünf Sekunden zum Schreib
 (z. B. ungespeicherte Änderungen in DB Browser), erscheint:
 
 > Not saved: Database is locked – write or revert the changes in DB Browser.
+
+Ändert man Referenzdaten, Archiv oder Seestart-Protokoll im Optionsdialog, erscheinen diese
+Meldungen im Dialog selbst (er öffnet sich nach dem Klick neu über der Hauptseite).
 
 Zum Ansehen und Bearbeiten von Hand eignet sich
 [DB Browser for SQLite](https://sqlitebrowser.org). Änderungen dort mit *Write Changes*
@@ -115,6 +118,13 @@ keine Datei liegt; es wird nie etwas überschrieben) und *Rebuild from old files
 den alten CSV/JSON-Dateien). Verschwindet die Datei im Betrieb, entscheidet der nächste
 Durchlauf neu. Wiederherstellen geht nur am eigenen Rechner.
 
+Liegen neben der fehlenden `nola.db` noch `nola.db-wal` oder `nola.db-shm` einer früheren
+Datei, legen weder *Restore backup* noch *Rebuild from old files* noch der Umzug beim Start
+eine neue Datei an — SQLite spielte sonst deren alte Seiten still in die neue `nola.db` ein.
+Es erscheint *nola.db-wal / nola.db-shm from an earlier database are still next to nola.db.
+Move them away together with any old nola.db, then try again.* NOLA verschiebt und löscht
+dabei nichts; die Nebendateien räumt man selbst beiseite.
+
 Eine bestimmte Sicherung von Hand zurückspielen: NOLA beenden, `nola.db` (samt `-wal`/`-shm`)
 beiseitelegen, NOLA starten und die Sicherung in der Auswahl wählen.
 
@@ -131,7 +141,9 @@ Liegt noch keine `nola.db` und keine Sicherung vor, **zieht NOLA beim ersten Sta
 liest alle alten Dateien streng ein (eine unlesbare Datei bricht ab, ohne eine Datenbank
 anzulegen), schreibt sie in eine temporäre Datenbank, prüft die Zeilenzahlen und legt sie
 erst dann als `nola.db` an. Die Meldung *Data moved to nola.db (… startplaetze, … firs, …).
-The old files were left untouched.* nennt die Zahlen. Die alten Dateien bleiben unverändert
+The old files were left untouched.* nennt die Zahlen — nach jedem Umzug, also auch, wenn die
+Datei im Betrieb verschwindet und neu aufgebaut wird, und nach *Rebuild from old files*.
+Die alten Dateien bleiben unverändert
 liegen; sie vorher zusätzlich zu sichern schadet nicht. Danach liest NOLA nur noch aus der
 Datenbank.
 
@@ -140,8 +152,13 @@ Datenbank.
 Speichernde Verwaltungsaktionen (Wiederherstellen, Export, Archiv-Import) sind nur vom
 eigenen Rechner aus möglich. Läuft der Server nicht auf einer Loopback-Adresse, erscheint
 *NOLA is reachable from the network. Start it with --server.address 127.0.0.1.* In der
-öffentlichen Fassung gibt es weder Sicherung noch Export noch diesen Hinweis; dort baut NOLA
-die Datenbank bei jedem Start aus den Repo-CSVs neu, Änderungen sind nicht dauerhaft.
+öffentlichen Fassung gibt es weder Sicherung noch Export noch diesen Hinweis. Dort entsteht
+die Datenbank beim ersten Start per Umzug aus den Repo-CSVs; bei jedem weiteren Serverstart
+vergleicht NOLA die SHA-256-Prüfsummen der drei Referenz-CSVs mit dem Stand beim letzten
+Einlesen und ersetzt bei einer Abweichung **nur die drei Referenztabellen** (in einer
+Transaktion) — Arbeitsstand, Archiv und Seestarts bleiben. Ist eine geänderte CSV unlesbar,
+bleibt die Datenbank unverändert und die Seite nennt den Grund. Änderungen in der Cloud sind
+nicht dauerhaft gesichert.
 
 ## Zwei Eingabewege
 

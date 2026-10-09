@@ -409,21 +409,51 @@ def ersetze_tabelle(
     `erwartet` ist. `erwartet=None` nur fuer Umzug und Wiederherstellen.
     Rueckgabe: der neue Stand.
     """
+    try:
+        with _transaktion(conn):
+            if erwartet is not None and _stand(_zeilen(conn, tabelle)) != erwartet:
+                raise Konflikt("changed", KONFLIKT_TEXT)
+            neu = _ersetze_in_transaktion(conn, tabelle, df)
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    return neu
+
+
+def _ersetze_in_transaktion(conn: sqlite3.Connection, tabelle: str, df: pd.DataFrame) -> str:
+    """Leeren und neu fuellen ohne eigenes BEGIN; Rueckgabe: der neue Stand."""
     spalten = FACHTABELLEN[tabelle]
     werte = [tuple(_als_text(r.get(s)) for s in spalten) for r in df.to_dict("records")]
     einfuegen = "INSERT INTO {} ({}) VALUES ({})".format(
         _q(tabelle), ", ".join(_q(s) for s in spalten), ", ".join("?" for _ in spalten)
     )
+    conn.execute("DELETE FROM {}".format(_q(tabelle)))
+    conn.executemany(einfuegen, werte)
+    return _stand(_zeilen(conn, tabelle))
+
+
+def ersetze_tabellen(
+    conn: sqlite3.Connection, tabellen: Dict[str, pd.DataFrame], meta: Dict[str, str]
+) -> None:
+    """
+    Ersetzt mehrere Fachtabellen und setzt Meta-Werte in EINER Schreibtransaktion,
+    ohne Vergleich mit dem Stand - nur fuer Uebernahmen aus Quelldateien
+    (Cloud: Referenz-CSVs aus dem Repository). Scheitert eine, bleibt alles beim Alten.
+    """
+    for tabelle in tabellen:
+        if tabelle not in FACHTABELLEN:
+            raise ValueError("unknown table {}".format(tabelle))
     try:
         with _transaktion(conn):
-            if erwartet is not None and _stand(_zeilen(conn, tabelle)) != erwartet:
-                raise Konflikt("changed", KONFLIKT_TEXT)
-            conn.execute("DELETE FROM {}".format(_q(tabelle)))
-            conn.executemany(einfuegen, werte)
-            neu = _stand(_zeilen(conn, tabelle))
+            for tabelle, df in tabellen.items():
+                _ersetze_in_transaktion(conn, tabelle, df)
+            for schluessel, wert in meta.items():
+                conn.execute(
+                    "INSERT INTO meta (schluessel, wert) VALUES (?, ?) "
+                    "ON CONFLICT(schluessel) DO UPDATE SET wert = excluded.wert",
+                    (schluessel, wert),
+                )
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
-    return neu
 
 
 def zaehle(conn: sqlite3.Connection, tabelle: str) -> int:
@@ -796,12 +826,34 @@ def pruefe_sicherung(pfad: Path) -> Tuple[str, Optional[Dict[str, int]]]:
         return "corrupt", None
 
 
+def alte_nebendateien(pfad: Path) -> List[Path]:
+    """
+    -wal/-shm neben `pfad`. Fehlt die Datenbank selbst, stammen sie von einer
+    frueheren Datei - die naechste Verbindung spielte deren Seiten still in eine
+    neu angelegte nola.db ein. Darum legt dann niemand eine neue an.
+    """
+    return [n for n in (Path(str(pfad) + "-wal"), Path(str(pfad) + "-shm")) if n.exists()]
+
+
+def nebendateien_text(pfad: Path) -> str:
+    name = Path(pfad).name
+    return (
+        "{0}-wal / {0}-shm from an earlier database are still next to {0}. "
+        "Move them away together with any old {0}, then try again.".format(name)
+    )
+
+
 def stelle_wieder_her(sicherung: Path, pfad: Path) -> None:
-    """Kopiert eine Sicherung nach `pfad` - nur, wenn dort keine Datei liegt (os.link)."""
+    """
+    Kopiert eine Sicherung nach `pfad` - nur, wenn dort keine Datei liegt (os.link)
+    und keine alten -wal/-shm daneben liegen (nichts wird verschoben oder geloescht).
+    """
     pfad = Path(pfad)
     schuetze_echte_orte(pfad)
     if pfad.exists():
         raise DbFehler("exists", "{} exists - restore refused, nothing was overwritten.".format(pfad.name))
+    if alte_nebendateien(pfad):
+        raise DbFehler("stale side files", nebendateien_text(pfad))
     tmp = pfad.parent / "{}.{}.tmp".format(pfad.name, os.urandom(4).hex())
     try:
         quelle = sqlite3.connect(

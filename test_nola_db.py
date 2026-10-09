@@ -813,6 +813,166 @@ finally:
 check("G2 Ordner nach Fehler leer", list(_ow2.iterdir()) == [], [x.name for x in _ow2.iterdir()])
 _cw.close()
 
+print("== 17. Abschlussreview (nola-a6c) ==")
+def _lauf(f, *a, **k):
+    """Ruft f auf; liefert (Ergebnis, Ausnahme) - ein Fehlschlag wird ein FAIL, kein Absturz."""
+    try:
+        return f(*a, **k), None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+# --- I1: liegengebliebene -wal/-shm neben einer fehlenden nola.db ---
+for _endung in ("-wal", "-shm"):
+    _d_i1 = Path(tempfile.mkdtemp()); _z_i1 = _d_i1 / "nola.db"
+    _neben = Path(str(_z_i1) + _endung); _inhalt_i1 = b"alte Seiten " + _endung.encode()
+    _neben.write_bytes(_inhalt_i1)
+    _, _e = _lauf(db.stelle_wieder_her, _reg[0], _z_i1)
+    check("I1 Wiederherstellen neben {} -> DbFehler stale side files".format(_endung),
+          isinstance(_e, db.DbFehler) and _e.ursache == "stale side files" and "Move them away" in str(_e), repr(_e))
+    check("I1   keine nola.db, Nebendatei unveraendert, keine tmp",
+          not _z_i1.exists() and _neben.read_bytes() == _inhalt_i1
+          and sorted(p.name for p in _d_i1.iterdir()) == [_neben.name], [p.name for p in _d_i1.iterdir()])
+    _d_i1b = Path(tempfile.mkdtemp()); _z_i1b = _d_i1b / "nola.db"
+    _neben_b = Path(str(_z_i1b) + _endung); _neben_b.write_bytes(_inhalt_i1)
+    _, _e = _lauf(um.umziehen, _z_i1b, um.altdateien_im(_altordner(mit_echten=False)))
+    check("I1 Umzug neben {} -> UmzugFehler".format(_endung),
+          isinstance(_e, um.UmzugFehler) and "nola.db-wal / nola.db-shm" in str(_e)
+          and "Move them away" in str(_e), repr(_e))
+    check("I1   keine nola.db, Nebendatei unveraendert, keine tmp",
+          not _z_i1b.exists() and _neben_b.read_bytes() == _inhalt_i1
+          and sorted(p.name for p in _d_i1b.iterdir()) == [_neben_b.name], [p.name for p in _d_i1b.iterdir()])
+_d_i1c = Path(tempfile.mkdtemp())
+_, _e = _lauf(db.stelle_wieder_her, _reg[0], _d_i1c / "nola.db")
+check("I1 ohne Nebendatei: Wiederherstellen weiter erfolgreich", _e is None and (_d_i1c / "nola.db").exists(), repr(_e))
+_d_i1d = Path(tempfile.mkdtemp())
+_, _e = _lauf(um.umziehen, _d_i1d / "nola.db", um.altdateien_im(_altordner(mit_echten=False)))
+check("I1 ohne Nebendatei: Umzug weiter erfolgreich", _e is None and (_d_i1d / "nola.db").exists(), repr(_e))
+
+# --- I4: Testschutz greift am Anfang von umziehen und stelle_bereit ---
+class _Erreicht(Exception):
+    """Der Ablauf kam hinter die Schutzpruefung - ohne Schutz wuerde hier gelesen/angelegt."""
+def _erreicht(*a, **k):
+    raise _Erreicht()
+def _proj_fingerabdruck():
+    return hashlib.sha256(db.PROJEKT_DB.read_bytes()).hexdigest() if db.PROJEKT_DB.exists() else None
+_proj_vor = _proj_fingerabdruck()
+_proj_reste_vor = sorted(p.name for p in db.PROJEKT_DB.parent.iterdir() if p.name.startswith("nola.db"))
+_orig_i4 = (um._csv_streng, db.liste_sicherungen, um.umziehen, os.link)
+um._csv_streng = _erreicht; db.liste_sicherungen = _erreicht; os.link = _erreicht
+try:
+    _, _e = _lauf(_orig_i4[2], db.PROJEKT_DB, um.altdateien_im(_altordner(mit_echten=False)))
+    check("I4 umziehen(PROJEKT_DB) unter NOLA_TEST -> RuntimeError vor jedem Lesen",
+          isinstance(_e, RuntimeError), repr(_e))
+    um.umziehen = _erreicht
+    _, _e = _lauf(um.stelle_bereit, db.PROJEKT_DB, um.altdateien_im(_altordner(mit_echten=False)),
+                  Path(tempfile.mkdtemp()), _dt2(2026, 10, 9, 9, 0))
+    check("I4 stelle_bereit(PROJEKT_DB) unter NOLA_TEST -> RuntimeError", isinstance(_e, RuntimeError), repr(_e))
+finally:
+    um._csv_streng, db.liste_sicherungen, um.umziehen, os.link = _orig_i4
+check("I4 Projektdatenbank unveraendert (bzw. weiter nicht vorhanden)", _proj_fingerabdruck() == _proj_vor)
+check("I4 keine neuen nola.db*-Dateien im Projekt",
+      sorted(p.name for p in db.PROJEKT_DB.parent.iterdir() if p.name.startswith("nola.db")) == _proj_reste_vor)
+
+# --- I3: Cloud uebernimmt neu committete Referenz-CSVs ---
+def _sha_datei(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+_d_i3 = _altordner(); _alt_i3 = um.altdateien_im(_d_i3)
+_db_i3 = Path(tempfile.mkdtemp()) / "nola.db"; _sord_i3 = Path(tempfile.mkdtemp())
+_z, _e = _lauf(um.stelle_bereit, _db_i3, _alt_i3, _sord_i3, _dt2(2026, 10, 9, 9, 0))
+check("I3 Umzug", _e is None and _z.art == "umgezogen", (_z, _e))
+_c_i3 = db.verbinde(_db_i3)
+_roh_i3 = db.lese_meta(_c_i3, "referenz_quellen_sha")
+check("I3 Umzug legt referenz_quellen_sha ab",
+      _roh_i3 is not None and _json.loads(_roh_i3) == {
+          "startplaetze": _sha_datei(_alt_i3.startplaetze), "firs": _sha_datei(_alt_i3.firs),
+          "traegersysteme": _sha_datei(_alt_i3.traegersysteme)}, _roh_i3)
+db.schreibe_unterschiede(_c_i3, db.leerer_arbeitsstand(),
+                         dict(db.leerer_arbeitsstand(), confirmed_launches={"k-i3"}), "2026-10-09T09:00:00+00:00")
+_c_i3.close()
+_ersetze_aufrufe = []
+_orig_et = getattr(db, "ersetze_tabellen", None)
+def _et_spion(*a, **k):
+    _ersetze_aufrufe.append(1); return _orig_et(*a, **k)
+db.ersetze_tabellen = _et_spion
+try:
+    _z, _e = _lauf(um.stelle_bereit, _db_i3, _alt_i3, _sord_i3, _dt2(2026, 10, 9, 9, 1), referenzen_aus_dateien=True)
+    check("I3 unveraenderte CSVs -> bereit, keine Schreibvorgaenge",
+          _e is None and _z.art == "bereit" and _ersetze_aufrufe == [], (_z, _e, _ersetze_aufrufe))
+    _sp_df = app._read_csv_any(str(_alt_i3.startplaetze))
+    _sp_df.loc[len(_sp_df)] = {"Kurzel": "ZZI3", "Latitude": "1.5", "Longitude": "2.5", "Name": "Test I3", "Land": "China"}
+    _sp_df.to_csv(_alt_i3.startplaetze, index=False)
+    _z, _e = _lauf(um.stelle_bereit, _db_i3, _alt_i3, _sord_i3, _dt2(2026, 10, 9, 9, 2))
+    _c_i3 = db.verbinde(_db_i3)
+    check("I3 lokal (False): geaenderte CSV wird nicht eingelesen",
+          _e is None and _z.art == "bereit" and "ZZI3" not in set(db.lese_tabelle(_c_i3, "startplaetze")["Kurzel"])
+          and _ersetze_aufrufe == [], (_z, _e))
+    _stand_ar = db.lese_tabelle(_c_i3, "startarchiv").attrs["nola_stand"]
+    _c_i3.close()
+    _z, _e = _lauf(um.stelle_bereit, _db_i3, _alt_i3, _sord_i3, _dt2(2026, 10, 9, 9, 3), referenzen_aus_dateien=True)
+    _c_i3 = db.verbinde(_db_i3)
+    check("I3 Cloud (True): geaenderte CSV -> Referenztabellen ersetzt, eine Transaktion",
+          _e is None and _z.art == "bereit" and "ZZI3" in set(db.lese_tabelle(_c_i3, "startplaetze")["Kurzel"])
+          and len(_ersetze_aufrufe) == 1, (_z, _e, _ersetze_aufrufe))
+    check("I3   Arbeitsstand und Archiv bleiben",
+          db.lade_arbeitsstand(_c_i3)["confirmed_launches"] == {"k-i3"}
+          and db.lese_tabelle(_c_i3, "startarchiv").attrs["nola_stand"] == _stand_ar)
+    check("I3   Meta aktualisiert",
+          _json.loads(db.lese_meta(_c_i3, "referenz_quellen_sha") or "{}").get("startplaetze")
+          == _sha_datei(_alt_i3.startplaetze))
+    _c_i3.close()
+    _z, _e = _lauf(um.stelle_bereit, _db_i3, _alt_i3, _sord_i3, _dt2(2026, 10, 9, 9, 4), referenzen_aus_dateien=True)
+    check("I3 zweiter Start mit denselben CSVs -> keine weiteren Schreibvorgaenge",
+          _e is None and _z.art == "bereit" and len(_ersetze_aufrufe) == 1, (_z, _e, _ersetze_aufrufe))
+    _vor_bytes_i3 = {t: None for t in ("startplaetze", "firs", "traegersysteme")}
+    _c_i3 = db.verbinde(_db_i3)
+    _vor_stand_i3 = {t: db.lese_tabelle(_c_i3, t).attrs["nola_stand"] for t in _vor_bytes_i3}
+    _vor_meta_i3 = db.lese_meta(_c_i3, "referenz_quellen_sha")
+    _c_i3.close()
+    _alt_i3.firs.write_text("falsch,kopf\n1,2\n", encoding="utf-8")
+    _z, _e = _lauf(um.stelle_bereit, _db_i3, _alt_i3, _sord_i3, _dt2(2026, 10, 9, 9, 5), referenzen_aus_dateien=True)
+    _c_i3 = db.verbinde(_db_i3)
+    check("I3 unlesbare CSV -> fehlgeschlagen mit Grund, DB unveraendert",
+          _e is None and _z.art == "fehlgeschlagen" and _alt_i3.firs.name in _z.grund
+          and {t: db.lese_tabelle(_c_i3, t).attrs["nola_stand"] for t in _vor_bytes_i3} == _vor_stand_i3
+          and db.lese_meta(_c_i3, "referenz_quellen_sha") == _vor_meta_i3, (_z, _e))
+    _c_i3.close()
+finally:
+    if _orig_et is None:
+        try:
+            del db.ersetze_tabellen
+        except AttributeError:
+            pass
+    else:
+        db.ersetze_tabellen = _orig_et
+
+# --- M1: Export als eine Momentaufnahme ---
+_db_m1 = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_db_m1, um.altdateien_im(_altordner()))
+_c_m1 = db.verbinde(_db_m1); db.setze_wal(_c_m1); _c_m1.close()
+_pr_orig = app.persist_reference
+_pr_n = [0]
+def _pr_spion(pfad, df, spalten):
+    _pr_n[0] += 1
+    if _pr_n[0] == 1:  # nach dem Lesen der Startplaetze, vor dem Lesen der Traegersysteme
+        c2 = db.verbinde(_db_m1)
+        try:
+            c2.execute('INSERT INTO traegersysteme ("Land", "Name", "Alternativname englisch", "Abkürzung") '
+                       "VALUES ('China', 'Test M1', '', 'ZZM1')")
+        finally:
+            c2.close()
+    return _pr_orig(pfad, df, spalten)
+app.persist_reference = _pr_spion
+try:
+    _ex_m1, _e = _lauf(um.exportieren, _db_m1, Path(tempfile.mkdtemp()) / "export")
+finally:
+    app.persist_reference = _pr_orig
+_c_m1 = db.verbinde(_db_m1)
+check("M1 fremder Schreibvorgang waehrend des Exports kam an",
+      "ZZM1" in set(db.lese_tabelle(_c_m1, "traegersysteme")["Abkürzung"]))
+_c_m1.close()
+check("M1 Export zeigt den Stand vor dem Schreibvorgang",
+      _e is None and "ZZM1" not in set(app._read_csv_any(str(_ex_m1 / app.VEHICLE_CSV.name))["Abkürzung"]), repr(_e))
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

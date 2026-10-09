@@ -6038,6 +6038,159 @@ finally:
      _db_s.sichere, app._tages_sicherung_fehler) = _orig_s
     _sh_s.rmtree(_tmp_s, ignore_errors=True)
 
+print("== Lokale Datenbank: Abschlussreview (nola-a6c) ==")
+_orig_a = (app.st, app.DB_PATH, app.BACKUP_DIR, app.local_admin_allowed, app._datenbank_bereit,
+           _um_s.stelle_bereit, _um_s.altdateien_im, app.is_public_deployment, app._taegliche_sicherung,
+           _db_s.ersetze_tabelle, app.archiv_schreiben, app.seestarts_schreiben)
+_tmp_a = Path(_tf_s.mkdtemp())
+try:
+    app.st = _fake_st_s()
+    app.local_admin_allowed = lambda: True
+    _alt_a = _tmp_a / "alt"
+    _alt_a.mkdir()
+    for _p in (app.SPACEPORT_CSV, app.FIR_CSV, app.VEHICLE_CSV):
+        _sh_s.copy(_p, _alt_a / _p.name)
+    _um_s.altdateien_im = lambda d: _orig_a[6](_alt_a)
+
+    # --- I1: Wiederherstellen neben alter nola.db-wal -> Meldung wie andere Fehler ---
+    app.DB_PATH = _tmp_a / "i1" / "nola.db"
+    app.DB_PATH.parent.mkdir()
+    _wal_a = Path(str(app.DB_PATH) + "-wal")
+    _wal_a.write_bytes(b"alte Seiten")
+    app.BACKUP_DIR = _tmp_a / "sich_i1"
+    app.BACKUP_DIR.mkdir()
+    with app._db(_temp_db()) as _c_a:
+        _db_s.sichere(_c_a, app.BACKUP_DIR, datetime(2026, 10, 1, 12, 0))
+    app._datenbank_bereit = _Cache_s(lambda: (_um_s.Startzustand("fehlt_mit_sicherungen"), ""))
+    _klick_s.add("Restore backup")
+    _aufr_s.clear()
+    _, _e_a = _lauf_s(app._wiederherstellen_auswahl)
+    _klick_s.clear()
+    check("I1 Wiederherstellen neben nola.db-wal -> error mit Hinweis, stop, keine nola.db",
+          isinstance(_e_a, _Halt_s) and _arten_s()[-1] == "stop"
+          and any(a == "error" and "Move them away" in w for a, w in _aufr_s)
+          and not app.DB_PATH.exists() and _wal_a.read_bytes() == b"alte Seiten", (_aufr_s, _e_a))
+
+    # --- I2/M3: Meldungen der Dialog-Schreiber erscheinen im Dialog ---
+    app.DB_PATH = _temp_db()
+
+    def _dialog_meldungen_a():
+        _aufr_s.clear()
+        _, _e = _lauf_s(lambda: app._zeige_dialog_meldungen())
+        return _e, [(a, w) for a, w in _aufr_s if a in ("error", "warning", "success")]
+
+    app.st = _fake_st_s()
+    _vorher_a = app.referenz_lesen("startplaetze")
+    with app._db() as _c_a:
+        _c_a.execute("UPDATE startplaetze SET Name = 'fremd' WHERE Kurzel = 'JSLC'")
+    app._write_reference("startplaetze", _vorher_a, app.SPACEPORT_EXPORT_COLUMNS, "label", _vorher_a)
+    _e_a, _m_a = _dialog_meldungen_a()
+    check("I2 _write_reference Konflikt -> Dialog zeigt Warnung mit KONFLIKT_TEXT",
+          _e_a is None and _m_a == [("warning", app._md_plain(_db_s.KONFLIKT_TEXT))], (_m_a, _e_a))
+
+    def _wirf_gesperrt_a(*a, **k):
+        raise _db_s.Gesperrt("locked", _db_s.GESPERRT_TEXT)
+
+    def _wirf_konflikt_a(*a, **k):
+        raise _db_s.Konflikt("changed", _db_s.KONFLIKT_TEXT)
+
+    app.st = _fake_st_s()
+    _db_s.ersetze_tabelle = _wirf_gesperrt_a
+    try:
+        app._write_reference("startplaetze", app.referenz_lesen("startplaetze"),
+                             app.SPACEPORT_EXPORT_COLUMNS, "label", app.referenz_lesen("startplaetze"))
+    finally:
+        _db_s.ersetze_tabelle = _orig_a[9]
+    _e_a, _m_a = _dialog_meldungen_a()
+    check("I2 _write_reference Sperre -> Dialog zeigt Fehler mit GESPERRT_TEXT",
+          _e_a is None and _m_a == [("error", app._md_plain(_db_s.GESPERRT_TEXT))], (_m_a, _e_a))
+    for _name_a, _attr_a, _f_a in [("_remove_archive_row", "archiv_schreiben", app._remove_archive_row),
+                                   ("_remove_sea_launch_row", "seestarts_schreiben", app._remove_sea_launch_row)]:
+        for _art_a, _werfer_a, _text_a in [("warning", _wirf_konflikt_a, _db_s.KONFLIKT_TEXT),
+                                            ("error", _wirf_gesperrt_a, _db_s.GESPERRT_TEXT)]:
+            app.st = _fake_st_s()
+            _orig_w_a = getattr(app, _attr_a)
+            setattr(app, _attr_a, _werfer_a)
+            try:
+                _f_a("irgendein|schluessel")
+            finally:
+                setattr(app, _attr_a, _orig_w_a)
+            _e_a, _m_a = _dialog_meldungen_a()
+            check("I2 {} {} -> Dialog zeigt {}".format(_name_a, _werfer_a.__name__, _art_a),
+                  _e_a is None and len(_m_a) == 1 and _m_a[0][0] == _art_a
+                  and app._md_plain(_text_a) in _m_a[0][1], (_m_a, _e_a))
+    app.st = _fake_st_s()
+    app.st.session_state["ref_flash"] = "Removed **x**"
+    _e_a, _m_a = _dialog_meldungen_a()
+    check("M3 ref_flash-Label entschaerft", _e_a is None and _m_a == [("success", "Removed \\*\\*x\\*\\*")], (_m_a, _e_a))
+    app.st = _fake_st_s()
+    app.st.session_state["db_meldung"] = ("error", "Key **x** failed")
+    _aufr_s.clear()
+    _, _e_a = _lauf_s(lambda: app._zeige_db_meldung())
+    check("M3 db_meldung entschaerft", _e_a is None and _aufr_s == [("error", "Key \\*\\*x\\*\\* failed")]
+          and "db_meldung" not in app.st.session_state, (_aufr_s, _e_a))
+    _src_dlg_a = _ins_w.getsource(app._reference_dialog)
+    check("M3 main und Dialog nutzen die Anzeige-Helfer",
+          "_zeige_db_meldung()" in _ins_w.getsource(app.main) and "_zeige_dialog_meldungen()" in _src_dlg_a
+          and 'pop("ref_flash"' not in _src_dlg_a)
+
+    # --- I3: oeffentliche Fassung gibt referenzen_aus_dateien=True an stelle_bereit ---
+    _kw_a = []
+
+    def _stelle_bereit_spion_a(*a, **k):
+        _kw_a.append(k.get("referenzen_aus_dateien", "fehlt"))
+        return _um_s.Startzustand("fehlgeschlagen", grund="Test")
+
+    _um_s.stelle_bereit = _stelle_bereit_spion_a
+    for _oeff_a in (True, False):
+        app.is_public_deployment = lambda *a, _o=_oeff_a, **k: _o
+        _lauf_s(_bereit_roh_s)
+    app.is_public_deployment = _orig_a[7]
+    _um_s.stelle_bereit = _orig_a[5]
+    check("I3 _datenbank_bereit: referenzen_aus_dateien = is_public_deployment()", _kw_a == [True, False], _kw_a)
+
+    # --- M2: nach jedem Umzug/Neuaufbau die Meldung erneut ---
+    def _halt_a():
+        raise _Halt_s("halt")
+
+    app._taegliche_sicherung = _halt_a
+    app.DB_PATH = _temp_db()
+    app._datenbank_bereit = _Cache_s(lambda: (_um_s.Startzustand("umgezogen", zaehlung={"startarchiv": 3}), ""))
+    app.st = _fake_st_s()
+
+    def _main_meldungen_a():
+        _aufr_s.clear()
+        _lauf_s(app.main)
+        return [w for a, w in _aufr_s if a == "success" and w.startswith("Data moved to nola.db")]
+
+    _m1_a = _main_meldungen_a()
+    _m2_a = _main_meldungen_a()
+    app._datenbank_bereit.clear()   # nola.db verschwand im Betrieb, neuer Umzug
+    _m3_a = _main_meldungen_a()
+    check("M2 erneuter Umzug in derselben Sitzung -> Meldung erneut (einmal je Umzug)",
+          len(_m1_a) == 1 and _m2_a == [] and len(_m3_a) == 1 and "3 startarchiv" in _m3_a[0], (_m1_a, _m2_a, _m3_a))
+    app.DB_PATH = _tmp_a / "m2" / "nola.db"
+    app.DB_PATH.parent.mkdir()
+    app.BACKUP_DIR = _tmp_a / "sich_m2"
+    app.BACKUP_DIR.mkdir()
+    app._datenbank_bereit = _Cache_s(lambda: (_um_s.Startzustand("fehlt_mit_sicherungen"), ""))
+    _klick_s.add("Rebuild from old files")
+    _aufr_s.clear()
+    _, _e_a = _lauf_s(app._wiederherstellen_auswahl)
+    _klick_s.clear()
+    app._datenbank_bereit = _Cache_s(lambda: (_um_s.Startzustand("bereit"), ""))
+    _m4_a = _main_meldungen_a()
+    _m5_a = _main_meldungen_a()
+    check("M2 'Rebuild from old files' -> naechster Lauf meldet den Umzug mit Zahlen, nur einmal",
+          isinstance(_e_a, _Halt_s) and app.DB_PATH.exists() and len(_m4_a) == 1
+          and "startplaetze" in _m4_a[0] and _m5_a == [], (_e_a, _m4_a, _m5_a))
+finally:
+    (app.st, app.DB_PATH, app.BACKUP_DIR, app.local_admin_allowed, app._datenbank_bereit,
+     _um_s.stelle_bereit, _um_s.altdateien_im, app.is_public_deployment, app._taegliche_sicherung,
+     _db_s.ersetze_tabelle, app.archiv_schreiben, app.seestarts_schreiben) = _orig_a
+    _klick_s.clear()
+    _sh_s.rmtree(_tmp_a, ignore_errors=True)
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)

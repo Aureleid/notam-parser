@@ -7,13 +7,14 @@ Meldung waere genau der Weg, auf dem Daten verloren gehen.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -55,20 +56,34 @@ class Startzustand:
     zaehlung: Dict[str, int] = field(default_factory=dict)
 
 
-def _csv_streng(pfad: Path, spalten) -> pd.DataFrame:
+def _csv_streng(pfad: Path, spalten, nachsatz: str = "No database was created.") -> pd.DataFrame:
     leer = pd.DataFrame(columns=list(spalten), dtype=object)
     if not pfad.exists():
         return leer
     try:
         df = app._read_csv_any(str(pfad))
     except Exception as exc:
-        raise UmzugFehler("{} could not be read ({}). No database was created.".format(pfad.name, exc)) from exc
+        raise UmzugFehler("{} could not be read ({}). {}".format(pfad.name, exc, nachsatz)) from exc
     # Nur die Spalten pruefen - Werte bleiben unangetastet (kein _require_columns: das wandelt
     # Koordinaten in Zahlen und setzt Latitude/Longitude voraus).
     fehlend = [s for s in spalten if s not in df.columns]
     if fehlend:
-        raise UmzugFehler("{} lacks columns {}. No database was created.".format(pfad.name, ", ".join(fehlend)))
+        raise UmzugFehler("{} lacks columns {}. {}".format(pfad.name, ", ".join(fehlend), nachsatz))
     return df[list(spalten)].reset_index(drop=True)
+
+
+#: Referenztabellen, deren Quell-CSVs im Repository liegen (Cloud liest sie bei Aenderung neu ein).
+REFERENZ_TABELLEN = ("startplaetze", "firs", "traegersysteme")
+
+
+def _referenz_shas(alt: Altdateien) -> Dict[str, str]:
+    """SHA-256 der vorhandenen Referenz-CSVs; eine fehlende Datei hat keinen Eintrag."""
+    shas: Dict[str, str] = {}
+    for tabelle in REFERENZ_TABELLEN:
+        pfad = Path(getattr(alt, tabelle))
+        if pfad.exists():
+            shas[tabelle] = hashlib.sha256(pfad.read_bytes()).hexdigest()
+    return shas
 
 
 def _arbeitsstand_streng(pfad: Path) -> Dict[str, Any]:
@@ -111,9 +126,15 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
     Liest alle Altdateien und schreibt sie in eine temporaere Datenbank; erst
     wenn alles stimmt, wird sie per os.link zu `datenbank` - das schlaegt fehl,
     wenn dort schon eine Datei liegt (ein zweiter Prozess war schneller), und
-    ueberschreibt so nie eine Datenbank.
+    ueberschreibt so nie eine Datenbank. Liegen alte -wal/-shm neben einer
+    fehlenden `datenbank`, wird nichts angelegt (sonst spielte SQLite deren Seiten ein).
     """
+    datenbank = Path(datenbank)
+    db.schuetze_echte_orte(datenbank)
+    if not datenbank.exists() and db.alte_nebendateien(datenbank):
+        raise UmzugFehler(db.nebendateien_text(datenbank) + " No database was created.")
     try:
+        quellen_sha = _referenz_shas(alt)
         tabellen = {
             "startplaetze": _csv_streng(alt.startplaetze, db.FACHTABELLEN["startplaetze"]),
             "firs": _csv_streng(alt.firs, db.FACHTABELLEN["firs"]),
@@ -132,6 +153,8 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
             ai.zustand_aus_daten(zustand, alt.importzustand.name)
     except ai.ImportStateError as exc:
         raise UmzugFehler(str(exc) + " No database was created.") from exc
+    except OSError as exc:
+        raise UmzugFehler("Old files could not be read ({}). No database was created.".format(exc)) from exc
 
     tmp = datenbank.parent / "{}.{}.tmp".format(datenbank.name, os.urandom(4).hex())
     jetzt = datetime.now(timezone.utc).isoformat()
@@ -172,6 +195,7 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
             db.setze_meta(conn, "umgezogen_utc", jetzt)
             db.setze_meta(conn, "umzug_quellen", json.dumps(
                 {k: str(v) for k, v in alt.__dict__.items()}, ensure_ascii=False))
+            db.setze_meta(conn, "referenz_quellen_sha", json.dumps(quellen_sha, sort_keys=True))
         finally:
             conn.close()
         try:
@@ -204,8 +228,19 @@ def _zaehle_alle(datenbank: Path) -> Dict[str, int]:
         conn.close()
 
 
-def stelle_bereit(datenbank: Path, alt: Altdateien, sicherungsordner: Path, jetzt: datetime) -> Startzustand:
-    """Einmal je Serverprozess: pruefen, umziehen oder zur Wahl stellen."""
+def stelle_bereit(
+    datenbank: Path, alt: Altdateien, sicherungsordner: Path, jetzt: datetime,
+    referenzen_aus_dateien: bool = False,
+) -> Startzustand:
+    """
+    Einmal je Serverprozess: pruefen, umziehen oder zur Wahl stellen.
+
+    `referenzen_aus_dateien` (nur oeffentliche Fassung): weichen die Referenz-CSVs
+    vom Stand beim letzten Einlesen ab (SHA-256 in meta), werden nur die drei
+    Referenztabellen daraus ersetzt - Arbeitsstand, Archiv usw. bleiben.
+    """
+    datenbank = Path(datenbank)
+    db.schuetze_echte_orte(datenbank, Path(sicherungsordner))
     if datenbank.exists():
         try:
             conn = db.verbinde(datenbank)
@@ -213,9 +248,11 @@ def stelle_bereit(datenbank: Path, alt: Altdateien, sicherungsordner: Path, jetz
                 db.setze_wal(conn)
                 db.pruefe_schema(conn, lambda: _sichern_oder_none(
                     conn, sicherungsordner, jetzt, "vor-schema-{}".format(db.SCHEMA_VERSION)))
+                if referenzen_aus_dateien:
+                    _referenzen_auffrischen(conn, alt)
             finally:
                 conn.close()
-        except db.DbFehler as exc:
+        except (db.DbFehler, UmzugFehler) as exc:
             return Startzustand("fehlgeschlagen", grund=str(exc))
         return Startzustand("bereit")
     if db.liste_sicherungen(sicherungsordner):
@@ -230,6 +267,31 @@ def stelle_bereit(datenbank: Path, alt: Altdateien, sicherungsordner: Path, jetz
     except (UmzugFehler, db.DbFehler) as exc:
         return Startzustand("fehlgeschlagen", grund=str(exc))
     return Startzustand("umgezogen", zaehlung=zaehlung)
+
+
+def _referenzen_auffrischen(conn, alt: Altdateien) -> None:
+    """Geaenderte Referenz-CSVs in einer Transaktion uebernehmen; unveraendert -> kein Schreiben."""
+    try:
+        aktuell = _referenz_shas(alt)
+    except OSError as exc:
+        raise UmzugFehler("Reference files could not be read ({}). The database was not changed.".format(exc)) from exc
+    roh = db.lese_meta(conn, "referenz_quellen_sha")
+    try:
+        bekannt: Optional[Dict[str, str]] = json.loads(roh) if roh else {}
+    except ValueError:
+        bekannt = {}
+    if not isinstance(bekannt, dict):
+        bekannt = {}
+    geaendert = [t for t in REFERENZ_TABELLEN if t in aktuell and bekannt.get(t) != aktuell[t]]
+    if not geaendert:
+        return
+    nachsatz = "The database was not changed."
+    tabellen = {
+        t: _csv_streng(Path(getattr(alt, t)), db.FACHTABELLEN[t], nachsatz) for t in geaendert
+    }
+    neu = dict(bekannt)
+    neu.update(aktuell)
+    db.ersetze_tabellen(conn, tabellen, {"referenz_quellen_sha": json.dumps(neu, sort_keys=True)})
 
 
 def _sichern_oder_none(conn, ordner: Path, jetzt: datetime, zusatz: str):
@@ -259,6 +321,9 @@ def exportieren(datenbank: Path, ziel: Path) -> Path:
 def _schreibe_export(datenbank: Path, ziel: Path) -> None:
     conn = db.verbinde(datenbank)
     try:
+        # Eine Lesetransaktion: alle Tabellen stammen aus derselben Momentaufnahme,
+        # auch wenn waehrenddessen jemand schreibt (WAL: der Schreiber wartet nicht).
+        conn.execute("BEGIN")
         for name, pfad, spalten in [
             ("startplaetze", app.SPACEPORT_CSV, app.SPACEPORT_EXPORT_COLUMNS),
             ("firs", app.FIR_CSV, app.FIR_EXPORT_COLUMNS),
@@ -290,4 +355,6 @@ def _schreibe_export(datenbank: Path, ziel: Path) -> None:
             "version": 1, "tage": {}, "entscheidungen": {}, "review_bestaetigt": [],
             "review_ausgeblendet": [], "erkennungsstand": ""})
     finally:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")  # nur gelesen - nichts festzuschreiben
         conn.close()
