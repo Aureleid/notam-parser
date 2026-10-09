@@ -3769,9 +3769,9 @@ try:
 finally:
     app.merge_archive = _merge_orig
 check("Bestaetigen uebergibt merge_archive kein archiv_removed", _entfernt_args == [set()], _entfernt_args)
-_schreiben_orig = app.archiv_schreiben
+_gemeinsam_orig = app.archiv_und_importzustand_schreiben  # Archiv + Zustand in einer Transaktion
 _vorher = _copy.deepcopy(zf["entscheidungen"])
-app.archiv_schreiben = lambda neu, vorher, db=None, **_k: "x"
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: ("x", "x")  # schreibt nichts
 try:
     ai.remove_orphan(zf, kf["key"], archiv_f)
     _fehler = None
@@ -3780,7 +3780,7 @@ except ai.ImportStateError as exc:
 except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
 finally:
-    app.archiv_schreiben = _schreiben_orig
+    app.archiv_und_importzustand_schreiben = _gemeinsam_orig
 check("Remove: Archiv nicht geschrieben -> ImportStateError, nennt die Datenbank",
       _fehler is not None and "nola.db" in _fehler and not _fehler.startswith("wrong type"), _fehler)
 check("  ... Zustand unveraendert, Zeile noch da",
@@ -4286,12 +4286,12 @@ _neu_row = dict(_kg["row"], NOTAM="C0001/26", Startdatum="21.09.2026")
 _kg_neu = dict(_kg, key=app.archive_key(_neu_row), row=_neu_row, notam_ids=["C0001/26"],
                im_archiv=[], ersetzt=[])
 _schreib = []
-_schreiben_orig = app.archiv_schreiben
-app.archiv_schreiben = lambda neu, vorher, db=None, **_k: (_schreib.append(db), _schreiben_orig(neu, vorher, db=db))[1]
+_gemeinsam_orig = app.archiv_und_importzustand_schreiben
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: (_schreib.append(db), _gemeinsam_orig(neu, vorher, z, ze, db=db))[1]
 try:
     _zahl = ai.confirm_many(zg, [(_kg, "CZ-2D", "Pengcheng", None), (_kg_neu, "CZ-4C", "Yaogan 50", None)], archiv_g)
 finally:
-    app.archiv_schreiben = _schreiben_orig
+    app.archiv_und_importzustand_schreiben = _gemeinsam_orig
 _ag = app.archiv_anzeigen(archiv_g)
 check("gemischt: ein Schreibvorgang", _schreib == [archiv_g], _schreib)
 check("  ... zwei Zeilen: ergaenzte und neue",
@@ -4318,7 +4318,7 @@ zv, archiv_v = _dub_zustand("fehl", [_TAG_ROW])
 _kv = ai.candidates(zv, archiv_v)[0]
 _vorher_v = _copy.deepcopy(zv["entscheidungen"])
 _inhalt_v = app.archiv_lesen(archiv_v).attrs["nola_stand"]
-app.archiv_schreiben = lambda neu, vorher, db=None, **_k: "x"
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: ("x", "x")  # schreibt nichts
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -4327,7 +4327,7 @@ except ai.ImportStateError as exc:
 except Exception as exc:
     _fehler = "wrong type: {!r}".format(exc)
 finally:
-    app.archiv_schreiben = _schreiben_orig
+    app.archiv_und_importzustand_schreiben = _gemeinsam_orig
 check("Ergaenzen nicht geschrieben -> ImportStateError, nennt die Datenbank",
       _fehler is not None and "nola.db" in _fehler and not _fehler.startswith("wrong type"), _fehler)
 check("  ... Zustand und Archiv unveraendert",
@@ -4726,10 +4726,12 @@ for _p_k, _soll_ok in ((_kaputt_db_u, False), (_fremd_db, False), (_temp_db(), T
     finally:
         app.st = _orig_k
     if _soll_ok:
-        check("Einzelkandidat: Confirm schreibt ueber confirm_many, speichert, laedt neu",
-              _e is None and _gesp == [1] and any(n == "rerun" for n, _ in _auf)
+        # Fix-Runde 1: confirm_many schreibt Archiv und Zustand gemeinsam - kein eigenes zustand_speichern
+        check("Einzelkandidat: Confirm schreibt ueber confirm_many (Archiv und Zustand gemeinsam), laedt neu",
+              _e is None and _gesp == [] and any(n == "rerun" for n, _ in _auf)
               and len(app.archiv_anzeigen(_p_k)) == 1
-              and _zst_e["entscheidungen"].get("einzel", {}).get("status") == "confirmed",
+              and _zst_e["entscheidungen"].get("einzel", {}).get("status") == "confirmed"
+              and ai.zustand_laden(_p_k)["entscheidungen"].get("einzel", {}).get("status") == "confirmed",
               (repr(_e), _auf))
     else:
         check("Einzelkandidat ({}): st.error, nichts gespeichert, Datei byte-gleich".format(_p_k.name),
@@ -5723,6 +5725,99 @@ try:
     check("Import-Reiter speichert Korpus und Zustand zusammen",
           "ai.import_speichern(korpus, zustand)" in _inspect.getsource(app._archive_import_tab)
           and "ai.korpus_speichern(" not in _inspect.getsource(app._archive_import_tab))
+
+    # Fix-Runde 1 (nola-7ld): Bestaetigen und "Remove from archive" schreiben Startarchiv und
+    # Importzustand in EINER Transaktion - ein fremder Reiter darf sie nicht auseinanderlaufen lassen
+    _MELDUNG_AR = "The launch archive changed meanwhile - nothing was written, please reload the tab."
+    _db_j = _temp_db()
+    _zeile_j = {s: "" for s in app.ARCHIVE_COLUMNS}
+    _zeile_j.update({"NOTAM": "Z1/26", "Startdatum": "06.10.2026", "Nation": "China"})
+    _orig_n[4](_pd_a.DataFrame([_zeile_j], columns=list(app.ARCHIVE_COLUMNS)),
+               vorher=app.archiv_lesen(_db_j), db=_db_j)
+    _key_j = app.archive_key(_zeile_j)
+    _z0_j = ai.zustand_laden(_db_j)
+    _z0_j["entscheidungen"][_key_j] = {"status": "confirmed"}
+    ai.zustand_speichern(_z0_j, _db_j)
+
+    def _fremd_ausblenden_j(name):
+        _zf_j = ai.zustand_laden(_db_j)
+        _zf_j["review_ausgeblendet"].append(name)
+        ai.zustand_speichern(_zf_j, _db_j)
+
+    def _versuch_j(f):
+        try:
+            f()
+        except ai.ImportStateError as exc:
+            return str(exc)
+        return None
+
+    # Remove: fremder Zustand
+    _za_j = ai.zustand_laden(_db_j)
+    _stand_j = app.archiv_lesen(_db_j).attrs["nola_stand"]
+    _fremd_ausblenden_j("fremd-r")
+    _f_j = _versuch_j(lambda: ai.remove_orphan(_za_j, _key_j, _db_j))
+    _zl_j = ai.zustand_laden(_db_j)
+    check("Fix-Runde 1: Remove bei fremdem Zustand -> ImportStateError mit Konflikttext", _f_j == _MELDUNG_SV, _f_j)
+    check("  ... Archiv unveraendert (Pruefsumme gleich)", app.archiv_lesen(_db_j).attrs["nola_stand"] == _stand_j)
+    check("  ... Zustand = Stand des anderen Reiters",
+          _zl_j["review_ausgeblendet"] == ["fremd-r"] and _zl_j["entscheidungen"][_key_j]["status"] == "confirmed",
+          _zl_j)
+    check("  ... eigener Zustand im Speicher unveraendert", _za_j["entscheidungen"][_key_j] == {"status": "confirmed"})
+    # Bestaetigen: fremder Zustand
+    _row_j = dict(_zeile_j, NOTAM="Z2/26", Startdatum="07.10.2026")
+    _kand_j = {"key": app.archive_key(_row_j), "row": _row_j, "notam_ids": ["Z2/26"], "quellen": ["q"]}
+    _za_j = ai.zustand_laden(_db_j)
+    _fremd_ausblenden_j("fremd-c")
+    _f_j = _versuch_j(lambda: ai.confirm_many(_za_j, [(_kand_j, "CZ-2D", "P", None)], _db_j))
+    _zl_j = ai.zustand_laden(_db_j)
+    check("Fix-Runde 1: Bestaetigen bei fremdem Zustand -> ImportStateError mit Konflikttext",
+          _f_j == _MELDUNG_SV, _f_j)
+    check("  ... Archiv unveraendert (Pruefsumme gleich)", app.archiv_lesen(_db_j).attrs["nola_stand"] == _stand_j)
+    check("  ... Zustand = Stand des anderen Reiters",
+          _zl_j["review_ausgeblendet"] == ["fremd-r", "fremd-c"] and _kand_j["key"] not in _zl_j["entscheidungen"],
+          _zl_j)
+    check("  ... eigener Zustand im Speicher unveraendert", _kand_j["key"] not in _za_j["entscheidungen"])
+    # Fremde Aenderung am Archiv statt am Zustand
+    _za_j = ai.zustand_laden(_db_j)
+    _zs_vor_j = _za_j.nola_stand
+    _a_j = app.archiv_lesen(_db_j)
+    _orig_n[4](_pd_a.concat([_a_j, _pd_a.DataFrame([dict(_zeile_j, NOTAM="Z9/26")])], ignore_index=True),
+               vorher=_a_j, db=_db_j)
+    _stand_j = app.archiv_lesen(_db_j).attrs["nola_stand"]
+    _orig_lesen_j = app.archiv_lesen
+    app.archiv_lesen = lambda db=None, **_k: _a_j  # Reiter A hat das Archiv vor der fremden Aenderung gelesen
+    try:
+        _f_c_j = _versuch_j(lambda: ai.confirm_many(_za_j, [(_kand_j, "CZ-2D", "P", None)], _db_j))
+        _f_r_j = _versuch_j(lambda: ai.remove_orphan(_za_j, _key_j, _db_j))
+    finally:
+        app.archiv_lesen = _orig_lesen_j
+    check("Fix-Runde 1: fremdes Archiv -> Bestaetigen und Remove melden Konflikt",
+          _f_c_j == _MELDUNG_AR and _f_r_j == _MELDUNG_AR, (_f_c_j, _f_r_j))
+    check("  ... nichts geschrieben: Archiv und Zustand unveraendert",
+          app.archiv_lesen(_db_j).attrs["nola_stand"] == _stand_j
+          and ai.zustand_laden(_db_j).nola_stand == _zs_vor_j)
+    # Ohne fremde Aenderung: beides gemeinsam geschrieben, ohne eigenen zustand_speichern-Aufruf
+    _za_j = ai.zustand_laden(_db_j)
+    _zs_b_j = _za_j.nola_stand
+    _zahl_j = ai.confirm_many(_za_j, [(_kand_j, "CZ-2D", "P", None)], _db_j)
+    _zl_j = ai.zustand_laden(_db_j)
+    check("Fix-Runde 1: Bestaetigen schreibt Archiv und Zustand gemeinsam",
+          _zahl_j == 1 and _kand_j["key"] in {app.archive_key(dict(r)) for _, r in app.archiv_lesen(_db_j).iterrows()}
+          and _zl_j["entscheidungen"].get(_kand_j["key"], {}).get("status") == "confirmed"
+          and _za_j["entscheidungen"].get(_kand_j["key"], {}).get("status") == "confirmed", _zl_j["entscheidungen"])
+    check("  ... merkt den neuen Stand (weiteres Speichern derselben Sitzung geht durch)",
+          _za_j.nola_stand == _zl_j.nola_stand != _zs_b_j)
+    ai.remove_orphan(_za_j, _key_j, _db_j)
+    _zl_j = ai.zustand_laden(_db_j)
+    check("Fix-Runde 1: Remove schreibt Archiv und Zustand gemeinsam",
+          _key_j not in {app.archive_key(dict(r)) for _, r in app.archiv_lesen(_db_j).iterrows()}
+          and _zl_j["entscheidungen"].get(_key_j) == {"status": "removed"} and _za_j.nola_stand == _zl_j.nola_stand,
+          _zl_j["entscheidungen"])
+    import re as _re_j
+    _q_j = _inspect.getsource(app._archive_import_tab) + _inspect.getsource(app._archive_import_candidate)
+    check("Fix-Runde 1: Import-Reiter speichert nach confirm_many/remove_orphan nicht separat",
+          _q_j.count("ai.confirm_many(") == 2 and "ai.remove_orphan(" in _q_j
+          and not _re_j.search(r"ai\.(confirm_many|remove_orphan)\([^\n]*\n\s*ai\.zustand_speichern", _q_j))
 finally:
     app.st, app.DB_PATH, app.archive_row, app.sea_launch_row, app.archiv_schreiben, app.merge_archive = _orig_n
 import inspect as _ins_n

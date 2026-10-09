@@ -5276,6 +5276,22 @@ def archiv_schreiben(
         return nola_db.ersetze_tabelle(conn, "startarchiv", neu[list(ARCHIVE_COLUMNS)], stand)
 
 
+def archiv_und_importzustand_schreiben(
+    neu: pd.DataFrame, vorher: pd.DataFrame, zustand: Dict[str, Any],
+    zustand_erwartet: Optional[str], db: Optional[Path] = None,
+) -> Tuple[str, str]:
+    """
+    Wie archiv_schreiben, dazu der Importzustand in derselben Transaktion
+    (Bestaetigen/Entfernen im Archiv-Import). Rueckgabe: neue Staende (Archiv, Zustand).
+    """
+    stand = vorher.attrs.get("nola_stand")
+    if not stand:
+        raise ValueError("archiv_und_importzustand_schreiben needs `vorher` as read by archiv_lesen")
+    with _db(db) as conn:
+        return nola_db.ersetze_archiv_und_importzustand(
+            conn, neu[list(ARCHIVE_COLUMNS)], stand, zustand, zustand_erwartet)
+
+
 def seestarts_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
     """Seestart-Protokoll aus der Datenbank, Form wie load_sea_launches (Text, leer = '')."""
     with _db(db, wartezeit) as conn:
@@ -7042,8 +7058,8 @@ def _archive_import_tab(
                         st.rerun(scope="app")
                 if c.button("Remove from archive", key="ai_rm_" + key):
                     try:
+                        # schreibt Archiv und Zustand gemeinsam
                         ai.remove_orphan(zustand, key)
-                        ai.zustand_speichern(zustand)
                     except (ai.ImportStateError, OSError) as exc:
                         st.error(_md_plain(exc))
                     else:
@@ -7068,8 +7084,8 @@ def _archive_import_tab(
             "Confirm all unique matches ({})".format(len(sammel)), disabled=not sammel
         ):
             try:
+                # schreibt Archiv und Zustand gemeinsam
                 ai.confirm_many(zustand, sammel)
-                ai.zustand_speichern(zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:
@@ -7221,8 +7237,8 @@ def _archive_import_candidate(
         if a.button("Confirm", key="ai_ok_" + k["key"], type="primary"):
             wert = "" if rakete == VEHICLE_SEPARATOR else rakete
             try:
+                # schreibt Archiv und Zustand gemeinsam
                 ai.confirm_many(zustand, [(k, wert, payload.strip(), treffer)])
-                ai.zustand_speichern(zustand)
             except (ai.ImportStateError, OSError) as exc:
                 st.error(_md_plain(exc))
             else:

@@ -855,6 +855,37 @@ def speichere_import(
         raise _uebersetze(exc) from exc
 
 
+#: Ursache eines Konflikts am Startarchiv in ersetze_archiv_und_importzustand -
+#: der Importzustand meldet weiter "changed" (wie speichere_importzustand).
+ARCHIV_GEAENDERT = "archive changed"
+
+
+def ersetze_archiv_und_importzustand(
+    conn: sqlite3.Connection,
+    archiv_df: pd.DataFrame,
+    archiv_erwartet: str,
+    state: Dict[str, Any],
+    state_erwartet: Optional[str],
+) -> Tuple[str, str]:
+    """
+    Bestaetigen/Entfernen im Archiv-Import: Startarchiv und Importzustand in EINER
+    Schreibtransaktion. Weicht einer der beiden Staende ab (Archiv wie
+    ersetze_tabelle, Zustand wie speichere_importzustand), wird keiner geschrieben
+    (Konflikt; Ursache ARCHIV_GEAENDERT bzw. "changed").
+    `state_erwartet=None` schreibt den Zustand ohne Vergleich (Zustand ohne Stand).
+    Rueckgabe: die neuen Staende (Archiv, Zustand).
+    """
+    try:
+        with _transaktion(conn):
+            if _stand(_zeilen(conn, "startarchiv")) != archiv_erwartet:
+                raise Konflikt(ARCHIV_GEAENDERT, KONFLIKT_TEXT)
+            neu_archiv = _ersetze_in_transaktion(conn, "startarchiv", archiv_df)
+            neu_zustand = _speichere_importzustand_in_transaktion(conn, state, state_erwartet)
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+    return neu_archiv, neu_zustand
+
+
 #: Uhrzeit HHMMSS (seit 10/2026) oder HHMM (aeltere Sicherungen, z. B. nola-2026-10-09-0837.db).
 #: Beide beginnen mit HHMM, darum sortiert der Name auch gemischt richtig: gleiche Minute ->
 #: die Fassung mit Sekunden gilt als neuer (".db" und "-" sortieren vor jeder Ziffer).

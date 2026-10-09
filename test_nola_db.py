@@ -381,6 +381,47 @@ try:
     check("speichere_import: passende Staende -> beides geschrieben, neue Staende zurueck",
           db.lade_korpus(_c2) == [_eintraege[0][1]] and db.lade_importzustand(_c2)["erkennungsstand"] == "mein"
           and _neu_ks == db.lade_korpus_mit_stand(_c2)[1] and _neu_zs == db.lade_importzustand_mit_stand(_c2)[1])
+
+    # Bestaetigen/Entfernen im Archiv-Import: Startarchiv und Importzustand in EINER Transaktion
+    # (Aufgabe 4, Fix-Runde 1) - weicht einer der beiden Staende ab, wird keiner geschrieben
+    _sa_sp = list(db.FACHTABELLEN["startarchiv"])
+    _sa_basis = dict({s: "" for s in _sa_sp}, Startdatum="06.10.2026", Nation="China")
+    _sa_neu = pd.DataFrame([dict(_sa_basis, NOTAM="neu")], columns=_sa_sp)
+    _sa_fremd = pd.DataFrame([dict(_sa_basis, NOTAM="fremd")], columns=_sa_sp)
+    _sa_st = db.lese_tabelle(_c2, "startarchiv").attrs["nola_stand"]
+    _zj, _zj_st = db.lade_importzustand_mit_stand(_c2)
+    _c2b.execute("UPDATE meta SET wert = 'fremd3' WHERE schluessel = 'erkennungsstand'")
+    try:
+        db.ersetze_archiv_und_importzustand(_c2, _sa_neu, _sa_st, dict(_zst, erkennungsstand="mein"), _zj_st)
+        _kj = None
+    except db.Konflikt as exc:
+        _kj = exc
+    check("Archiv+Zustand: fremder Zustand -> Konflikt", isinstance(_kj, db.Konflikt), repr(_kj))
+    check("  ... Archiv und Zustand unberuehrt",
+          db.lese_tabelle(_c2, "startarchiv").attrs["nola_stand"] == _sa_st
+          and db.lade_importzustand(_c2)["erkennungsstand"] == "fremd3")
+    check("  ... keine offene Transaktion", not _c2.in_transaction)
+    _zj, _zj_st = db.lade_importzustand_mit_stand(_c2)
+    db.ersetze_tabelle(_c2b, "startarchiv", _sa_fremd, None)
+    try:
+        db.ersetze_archiv_und_importzustand(_c2, _sa_neu, _sa_st, dict(_zst, erkennungsstand="mein"), _zj_st)
+        _kj = None
+    except db.Konflikt as exc:
+        _kj = exc
+    check("Archiv+Zustand: fremdes Archiv -> Konflikt", isinstance(_kj, db.Konflikt), repr(_kj))
+    check("  ... Archiv und Zustand unberuehrt",
+          list(db.lese_tabelle(_c2, "startarchiv")["NOTAM"]) == ["fremd"]
+          and db.lade_importzustand(_c2)["erkennungsstand"] == "fremd3")
+    check("  ... Konfliktursache unterscheidet Archiv und Zustand",
+          getattr(_kj, "ursache", None) == "archive changed", getattr(_kj, "ursache", None))
+    _sa_st = db.lese_tabelle(_c2, "startarchiv").attrs["nola_stand"]
+    _neu_as, _neu_zs = db.ersetze_archiv_und_importzustand(
+        _c2, _sa_neu, _sa_st, dict(_zst, erkennungsstand="mein"), _zj_st)
+    check("Archiv+Zustand: passende Staende -> beides geschrieben, neue Staende zurueck",
+          list(db.lese_tabelle(_c2, "startarchiv")["NOTAM"]) == ["neu"]
+          and db.lade_importzustand(_c2)["erkennungsstand"] == "mein"
+          and _neu_as == db.lese_tabelle(_c2, "startarchiv").attrs["nola_stand"]
+          and _neu_zs == db.lade_importzustand_mit_stand(_c2)[1])
 finally:
     _c2b.close()
 _c2.close()

@@ -1243,16 +1243,35 @@ def _archiv_lesen(archiv: Optional[Path] = None) -> pd.DataFrame:
         raise ImportStateError(str(exc)) from exc
 
 
-def _archiv_schreiben(archiv: Optional[Path], neu: pd.DataFrame, vorher: pd.DataFrame) -> None:
-    """Schreibt das Archiv nur, wenn es seit dem Lesen von `vorher` unveraendert ist."""
+def _archiv_und_zustand_schreiben(
+    archiv: Optional[Path], neu: pd.DataFrame, vorher: pd.DataFrame,
+    kuenftig: Dict[str, Any], state: Dict[str, Any],
+) -> str:
+    """
+    Schreibt Archiv und den kuenftigen Importzustand in EINER Transaktion - nur,
+    wenn das Archiv seit dem Lesen von `vorher` und der Zustand seit dem Laden
+    von `state` unveraendert sind; sonst ImportStateError, nichts geschrieben.
+    `state` selbst bleibt unberuehrt. Rueckgabe: der neue Stand des Zustands.
+    """
     try:
-        app.archiv_schreiben(neu, vorher=vorher, db=archiv)
+        _, stand = app.archiv_und_importzustand_schreiben(
+            neu, vorher, kuenftig, getattr(state, "nola_stand", None), db=archiv)
     except app.nola_db.Konflikt as exc:
-        raise ImportStateError(
-            "The launch archive changed meanwhile - nothing was written, please reload the tab."
-        ) from exc
+        if exc.ursache == app.nola_db.ARCHIV_GEAENDERT:
+            raise ImportStateError(
+                "The launch archive changed meanwhile - nothing was written, please reload the tab."
+            ) from exc
+        raise ImportStateError(IMPORT_KONFLIKT_TEXT) from exc
     except app.nola_db.DbFehler as exc:
         raise ImportStateError("The launch archive was not written ({}).".format(exc)) from exc
+    return stand
+
+
+def _mit_entscheidungen(state: Dict[str, Any], neu: Mapping[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Kopie des Zustands mit den neuen Entscheidungen - fuer das gemeinsame Schreiben."""
+    kuenftig = dict(state)
+    kuenftig["entscheidungen"] = {**state["entscheidungen"], **neu}
+    return kuenftig
 
 
 def _archiv_pruefen(
@@ -1281,15 +1300,20 @@ def _archiv_pruefen(
 
 
 def remove_orphan(state: Dict[str, Any], key: str, archiv: Optional[Path] = None) -> None:
-    """Die einzige Stelle, an der der Import eine Archivzeile loescht - nur auf Anweisung."""
+    """
+    Die einzige Stelle, an der der Import eine Archivzeile loescht - nur auf Anweisung.
+    Archiv und Vermerk 'removed' in EINER Transaktion (wie confirm_many).
+    """
     bestand = _archiv_lesen(archiv)
-    if not bestand.empty:
-        gefiltert = bestand[
-            [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
-        ].reset_index(drop=True)
-        _archiv_schreiben(archiv, gefiltert, vorher=bestand)
+    gefiltert = bestand[
+        [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
+    ].reset_index(drop=True)
+    neu = {key: {"status": "removed"}}
+    # Archiv und Vermerk zusammen: kein fremder Reiter kann sie auseinanderlaufen lassen
+    stand = _archiv_und_zustand_schreiben(archiv, gefiltert, bestand, _mit_entscheidungen(state, neu), state)
     _archiv_pruefen(archiv, set(), {key})
-    state["entscheidungen"][key] = {"status": "removed"}
+    state["entscheidungen"].update(neu)
+    _stand_merken(state, stand)
 
 
 def _ist_importzeile(e: Dict[str, Any]) -> bool:
@@ -1449,8 +1473,11 @@ def confirm_many(
     und Payload in die vorhandene(n) Zeile(n) ein (leere Werte ueberschreiben
     nichts). Seinen Ersatzvermerk wendet er nicht an - keine neue Zeile heisst
     auch keine geloeschte, die Importzeile des Vorgaengers bleibt stehen.
-    Der Zustand aendert sich erst, wenn das zurueckgelesene Archiv die
-    Aenderung enthaelt; sonst ImportStateError und nichts ist vermerkt.
+    Archiv und Importzustand werden in EINER Transaktion geschrieben (hat ein
+    anderer Reiter eines von beiden geaendert: ImportStateError, nichts
+    geschrieben) - ein eigenes zustand_speichern danach entfaellt. Der Zustand
+    im Speicher aendert sich erst, wenn das zurueckgelesene Archiv die
+    Aenderung enthaelt; sonst ImportStateError.
     Die vorherigen Werte jeder ergaenzten Zeile stehen in der Entscheidung
     unter vorher ({Schluessel: {Traegersystem, Payload}}), damit die Aenderung
     nachvollziehbar und rueckgaengig zu machen bleibt.
@@ -1520,10 +1547,14 @@ def confirm_many(
         if kand.get("im_archiv"):
             neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])
             neu[kand["key"]]["vorher"] = {z: dict(vorher_werte[z]) for z in kand["im_archiv"]}
-    _archiv_schreiben(archiv, app.merge_archive(bestand, zeilen, entfernt=set()), vorher=gelesen)
+    # Archiv und Entscheidungen zusammen: kein fremder Reiter kann sie auseinanderlaufen lassen
+    stand = _archiv_und_zustand_schreiben(
+        archiv, app.merge_archive(bestand, zeilen, entfernt=set()), gelesen,
+        _mit_entscheidungen(state, neu), state)
     geschrieben = {app.archive_key(r) for r in zeilen}
     _archiv_pruefen(archiv, geschrieben | set(werte), ersetzt - geschrieben, werte)
     state["entscheidungen"].update(neu)
+    _stand_merken(state, stand)
     return len(auswahl)
 
 
