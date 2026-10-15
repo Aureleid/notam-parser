@@ -2026,6 +2026,8 @@ BACKUP_DIR = nola_db.ECHTER_SICHERUNGSORDNER
 #: Alte Datei des Startarchivs - nur noch Quelle des Umzugs und Format des Exports;
 #: das Archiv selbst schreibt die Anwendung in nola.db (Tabelle startarchiv) fort.
 ARCHIVE_CSV = APP_DIR / "startarchiv_updated.csv"
+#: Handwerte des Startarchivs - nur Format des Exports und Quelle des Umzugs.
+ARCHIVE_HANDWERTE_CSV = APP_DIR / "archiv_handwerte.csv"
 
 
 def is_public_deployment(app_dir: Path = APP_DIR) -> bool:

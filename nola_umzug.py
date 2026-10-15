@@ -30,6 +30,7 @@ class Altdateien:
     traegersysteme: Path
     startarchiv: Path
     seestarts: Path
+    handwerte: Path
     arbeitsstand: Path
     korpus: Path
     importzustand: Path
@@ -40,7 +41,8 @@ def altdateien_im(app_dir: Path) -> Altdateien:
     return Altdateien(
         startplaetze=d / app.SPACEPORT_CSV.name, firs=d / app.FIR_CSV.name,
         traegersysteme=d / app.VEHICLE_CSV.name, startarchiv=d / app.ARCHIVE_CSV.name,
-        seestarts=d / app.SEA_LAUNCH_CSV.name, arbeitsstand=d / app.WORKSPACE_FILE.name,
+        seestarts=d / app.SEA_LAUNCH_CSV.name, handwerte=d / app.ARCHIVE_HANDWERTE_CSV.name,
+        arbeitsstand=d / app.WORKSPACE_FILE.name,
         korpus=d / ai.KORPUS_JSON.name, importzustand=d / ai.IMPORT_JSON.name,
     )
 
@@ -140,6 +142,7 @@ def umziehen(datenbank: Path, alt: Altdateien) -> Dict[str, int]:
             "firs": _csv_streng(alt.firs, db.FACHTABELLEN["firs"]),
             "traegersysteme": _csv_streng(alt.traegersysteme, db.FACHTABELLEN["traegersysteme"]),
             "seestarts": _csv_streng(alt.seestarts, db.FACHTABELLEN["seestarts"]),
+            "archiv_handwerte": _csv_streng(alt.handwerte, db.FACHTABELLEN["archiv_handwerte"]),
         }
         try:
             tabellen["startarchiv"] = app.read_archive_strict(alt.startarchiv)[
@@ -334,6 +337,11 @@ def _schreibe_export(datenbank: Path, ziel: Path) -> None:
         app._write_bytes_atomic(
             ziel / app.SEA_LAUNCH_CSV.name,
             db.lese_tabelle(conn, "seestarts")[list(app.SEA_LAUNCH_COLUMNS)].to_csv(index=False).encode("utf-8-sig"),
+        )
+        app._write_bytes_atomic(
+            ziel / app.ARCHIVE_HANDWERTE_CSV.name,
+            db.lese_tabelle(conn, "archiv_handwerte")[list(db.FACHTABELLEN["archiv_handwerte"])]
+            .to_csv(index=False).encode("utf-8-sig"),
         )
         stand = db.lade_arbeitsstand(conn)
         roh_ws = {

@@ -30,7 +30,7 @@ try:
 except RuntimeError:
     check("NOLA_TEST sperrt die Projektdatei", True)
 _p, _c = neue_db()
-check("Schema-Version 1", db.schema_version(_c) == 1)
+check("Schema-Version aktuell", db.schema_version(_c) == db.SCHEMA_VERSION)
 # Entscheidung 2: Klick-Aktionen warten 5 s auf eine fremde Sperre, das automatische
 # Fortschreiben nur kurz (Parameter wartezeit)
 check("verbinde: Standard-Wartezeit 5 s", _c.execute("PRAGMA busy_timeout").fetchone()[0] == 5000)
@@ -74,7 +74,8 @@ def _zustand_datei(pfad):
 check("FACHTABELLEN = app-Konstanten", db.FACHTABELLEN == {
     "startplaetze": tuple(app.SPACEPORT_EXPORT_COLUMNS), "firs": tuple(app.FIR_EXPORT_COLUMNS),
     "traegersysteme": tuple(app.VEHICLE_EXPORT_COLUMNS), "startarchiv": tuple(app.ARCHIVE_COLUMNS),
-    "seestarts": tuple(app.SEA_LAUNCH_COLUMNS)})
+    "seestarts": tuple(app.SEA_LAUNCH_COLUMNS),
+    "archiv_handwerte": ("schluessel", "spalte", "nola_wert", "herkunft", "geaendert_utc")})
 
 print("== 3. Pruefregeln ==")
 def _sp(**w):
@@ -180,6 +181,94 @@ finally:
 check("Version unveraendert", db.schema_version(_c) == 0)
 _c.close()
 
+print("== 6b. Handwerte (Schema 2) ==")
+from datetime import datetime
+_ph, _ch = neue_db()
+check("Schema-Version 2 nach Anlegen", db.schema_version(_ch) == 2 == db.SCHEMA_VERSION)
+check("archiv_handwerte ist Fachtabelle", db.FACHTABELLEN["archiv_handwerte"] ==
+      ("schluessel", "spalte", "nola_wert", "herkunft", "geaendert_utc"))
+check("archiv_handwerte nicht im Arbeitsstand", "archiv_handwerte" not in db.ARBEITSTABELLEN)
+check("archiv_handwerte in ALLE_TABELLEN", "archiv_handwerte" in db.ALLE_TABELLEN)
+_hw = pd.DataFrame([{"schluessel": "01.01.2026|A0001/26", "spalte": "Nation", "nola_wert": "China",
+                     "herkunft": "hand", "geaendert_utc": "2026-10-15T00:00:00+00:00"}])
+_st0 = db.lese_tabelle(_ch, "archiv_handwerte").attrs["nola_stand"]
+db.ersetze_tabelle(_ch, "archiv_handwerte", _hw, _st0)
+check("Handwert geschrieben", db.zaehle(_ch, "archiv_handwerte") == 1)
+for _label, _aend in [("fremde Spalte", {"spalte": "Startdatum"}), ("fremde Herkunft", {"herkunft": "x"}),
+                      ("leerer Schluessel", {"schluessel": " "})]:
+    _bad = _hw.copy()
+    for _k, _v in _aend.items():
+        _bad.loc[0, _k] = _v
+    try:
+        db.ersetze_tabelle(_ch, "archiv_handwerte", _bad, None); check("CHECK: " + _label, False)
+    except db.DbFehler:
+        check("CHECK: " + _label, db.zaehle(_ch, "archiv_handwerte") == 1)
+try:
+    db.ersetze_tabelle(_ch, "archiv_handwerte", pd.concat([_hw, _hw]), None); check("PK doppelt abgelehnt", False)
+except db.DbFehler:
+    check("PK doppelt abgelehnt", True)
+_hw_leer = db.lese_tabelle(_ch, "archiv_handwerte")
+db.ersetze_tabelle(_ch, "archiv_handwerte", _hw.assign(nola_wert=""), _hw_leer.attrs["nola_stand"])
+check("nola_wert '' <-> NULL", db.lese_tabelle(_ch, "archiv_handwerte").loc[0, "nola_wert"] == ""
+      and _ch.execute("SELECT nola_wert FROM archiv_handwerte").fetchone()[0] is None)
+
+# lese_tabellen: eine Momentaufnahme
+_beide = db.lese_tabellen(_ch, ("startarchiv", "archiv_handwerte"))
+check("lese_tabellen liefert beide mit Stand",
+      set(_beide) == {"startarchiv", "archiv_handwerte"} and all("nola_stand" in d.attrs for d in _beide.values()))
+check("lese_tabellen laesst keine Transaktion offen", not _ch.in_transaction)
+
+# ersetze_tabellen_geprueft: alles oder nichts
+_ar = pd.DataFrame([{**{s: "" for s in db.FACHTABELLEN["startarchiv"]},
+                     "NOTAM": "A0001/26", "Startdatum": "01.01.2026", "Nation": "China"}])
+_neu = db.ersetze_tabellen_geprueft(_ch, {
+    "startarchiv": (_ar, _beide["startarchiv"].attrs["nola_stand"]),
+    "archiv_handwerte": (_hw, _beide["archiv_handwerte"].attrs["nola_stand"])})
+check("geprueft: beide geschrieben, neue Staende",
+      db.zaehle(_ch, "startarchiv") == 1 and set(_neu) == {"startarchiv", "archiv_handwerte"})
+_vor = db.lese_tabellen(_ch, ("startarchiv", "archiv_handwerte"))
+try:
+    db.ersetze_tabellen_geprueft(_ch, {
+        "startarchiv": (_ar.iloc[0:0], _vor["startarchiv"].attrs["nola_stand"]),
+        "archiv_handwerte": (_hw.iloc[0:0], "veraltet")})
+    check("geprueft: veralteter Stand -> Konflikt", False)
+except db.Konflikt as exc:
+    check("geprueft: veralteter Stand -> Konflikt", exc.ursache == "changed")
+check("geprueft: nichts geschrieben", db.zaehle(_ch, "startarchiv") == 1 and db.zaehle(_ch, "archiv_handwerte") == 1)
+try:
+    db.ersetze_tabellen_geprueft(_ch, {"startarchiv": (_ar, "veraltet")})
+    check("geprueft: Archiv-Konflikt traegt ARCHIV_GEAENDERT", False)
+except db.Konflikt as exc:
+    check("geprueft: Archiv-Konflikt traegt ARCHIV_GEAENDERT", exc.ursache == db.ARCHIV_GEAENDERT)
+
+# ersetze_archiv_und_importzustand mit Handwerten
+_vor = db.lese_tabellen(_ch, ("startarchiv", "archiv_handwerte"))
+try:
+    db.ersetze_archiv_und_importzustand(
+        _ch, _ar, _vor["startarchiv"].attrs["nola_stand"], {"version": 1, "tage": {}, "entscheidungen": {},
+        "review_bestaetigt": [], "review_ausgeblendet": [], "erkennungsstand": ""}, None,
+        handwerte=(_hw.iloc[0:0], "veraltet"))
+    check("Import: veraltete Handwerte -> Konflikt", False)
+except db.Konflikt:
+    check("Import: veraltete Handwerte -> Konflikt", db.zaehle(_ch, "archiv_handwerte") == 1)
+_ch.close()
+
+# Schema 1 -> 2: Sicherung vorher, Daten unveraendert
+_p1, _c1 = neue_db()
+db.ersetze_tabelle(_c1, "startarchiv", _ar, None)
+_c1.execute("DROP TABLE archiv_handwerte")
+db.setze_meta(_c1, "schema_version", "1")
+_ord1 = Path(tempfile.mkdtemp())
+_gesichert = []
+db.pruefe_schema(_c1, lambda: (_gesichert.append(1), db.sichere(_c1, _ord1, datetime(2026, 10, 15, 9, 0), zusatz="vor-schema-2"))[1])
+check("1->2: gesichert", _gesichert == [1] and any("vor-schema-2" in p.name for p in _ord1.iterdir()))
+check("1->2: Version 2, Tabelle leer, Archiv unveraendert",
+      db.schema_version(_c1) == 2 and db.zaehle(_c1, "archiv_handwerte") == 0 and db.zaehle(_c1, "startarchiv") == 1)
+_alt_sich = sorted(_ord1.iterdir())[0]
+_art, _zahl = db.pruefe_sicherung(_alt_sich)
+check("Sicherung mit Schema 1 ist ok, Handwerte 0", _art == "ok" and _zahl.get("archiv_handwerte") == 0, (_art, _zahl))
+_c1.close()
+
 print("== 7. Platte voll: Originalursache bleibt ==")
 _pv, _cv = neue_db()
 _vorher = db.ersetze_tabelle(_cv, "startplaetze", _sp(), None)
@@ -217,7 +306,7 @@ _cs.close()
 _pn = Path(tempfile.mkdtemp()) / "n.db"
 _cn = db.verbinde(_pn, anlegen=True)
 db.lege_schema_an(_cn)
-check("Version 1 nach Anlegen", db.schema_version(_cn) == 1)
+check("Version aktuell nach Anlegen", db.schema_version(_cn) == db.SCHEMA_VERSION)
 _cn.close()
 
 print("== 9. Arbeitsstand ==")
@@ -860,6 +949,21 @@ check("F5 R2 Export Korpus: 3 Eintraege", len(_dbk_inhalt) == 3 and len(_gel) ==
 check("F5 R2 Export Korpus inhaltlich = Datenbank", _gel_liste == _dbk_inhalt, (_gel_liste, _dbk_inhalt))
 check("F5 Export Importzustand (befuellt)",
       _zustand_datei(_e3 / ai.IMPORT_JSON.name) == ai.zustand_aus_daten(db.lade_importzustand(_c3e), "db"))
+check("Export enthaelt archiv_handwerte.csv", (_e3 / "archiv_handwerte.csv").exists())
+_dh = _altordner()
+(_dh / "archiv_handwerte.csv").write_text(
+    "schluessel,spalte,nola_wert,herkunft,geaendert_utc\n01.01.2026|A0001/26,Nation,China,hand,2026-10-15T00:00:00+00:00\n",
+    encoding="utf-8")
+_dbh = Path(tempfile.mkdtemp()) / "nola.db"
+_zh = um.umziehen(_dbh, um.altdateien_im(_dh))
+_ch2 = db.verbinde(_dbh)
+check("Umzug liest archiv_handwerte.csv", db.zaehle(_ch2, "archiv_handwerte") == 1, _zh)
+_ch2.close()
+_dbh2 = Path(tempfile.mkdtemp()) / "nola.db"
+um.umziehen(_dbh2, um.altdateien_im(_altordner()))
+_ch3 = db.verbinde(_dbh2)
+check("Umzug ohne archiv_handwerte.csv: leer", db.zaehle(_ch3, "archiv_handwerte") == 0)
+_ch3.close()
 _c3e.close()
 
 # F5: Schema-Anhebung in stelle_bereit
@@ -870,9 +974,9 @@ db.SCHRITTE[0] = "SELECT 1"
 try:
     _zs5 = um.stelle_bereit(_sdb5, _alt5, _sord5, _dt2(2026, 10, 8, 9, 0))
     check("F5 Schema-Anhebung -> bereit", _zs5.art == "bereit", _zs5)
-    check("F5  Sicherung vor-schema-1", [p.name for p in _sord5.iterdir() if not p.name.startswith(".")] == ["nola-2026-10-08-090000-vor-schema-1.db"],
+    check("F5  Sicherung vor-schema-aktuell", [p.name for p in _sord5.iterdir() if not p.name.startswith(".")] == ["nola-2026-10-08-090000-vor-schema-{}.db".format(db.SCHEMA_VERSION)],
           [p.name for p in _sord5.iterdir()])
-    _cc = db.verbinde(_sdb5); check("F5  Version danach 1", db.schema_version(_cc) == 1); _cc.close()
+    _cc = db.verbinde(_sdb5); check("F5  Version danach aktuell", db.schema_version(_cc) == db.SCHEMA_VERSION); _cc.close()
     # Sicherungsordner fehlt -> fehlgeschlagen, Version bleibt 0
     _cc = db.verbinde(_sdb5); db.setze_meta(_cc, "schema_version", "0"); _cc.close()
     _zs6 = um.stelle_bereit(_sdb5, _alt5, _sord5 / "gibts-nicht", _dt2(2026, 10, 8, 9, 5))
@@ -880,7 +984,7 @@ try:
           _zs6.art == "fehlgeschlagen" and "Backup" in _zs6.grund, _zs6)
     _cc = db.verbinde(_sdb5); check("F5  Version bleibt 0", db.schema_version(_cc) == 0); _cc.close()
 finally:
-    db.SCHRITTE.clear()
+    db.SCHRITTE.pop(0, None)
 
 # F5: kaputter Korpus / Importzustand
 for _name, _inhalt in [("archiv_korpus.json", '{"notams": [{"notam_id": 1}]}'),
