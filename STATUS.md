@@ -53,7 +53,7 @@ Streamlit-Server unter `NOLA_TEST=1` nur in Temp-Ordnern.
 
 ## Offene Punkte
 
-- **Archiv-Handwerte, Folgepunkte** (Bead `nola-ev1`): `nola-8m4` Zusammenführung über Kennungs-Überschneidung (Handwerte wandern mit, wenn sich der Schlüssel ändert); `nola-fqz` Remove und Referenz-Editoren in der öffentlichen Fassung absichern (Edit/Reset dort schon gesperrt); `nola-ev1.6`, `nola-ev1.7`, `nola-cna` weitere Folgepunkte des Epics.
+- **Archiv-Handwerte, Folgepunkte** (Bead `nola-ev1`): `nola-8m4` Zusammenführung über Kennungs-Überschneidung (Handwerte wandern mit, wenn sich der Schlüssel ändert); `nola-fqz` Remove und Referenz-Editoren in der öffentlichen Fassung absichern (Edit/Reset dort schon gesperrt); `nola-ev1.6` Archiv-Import vermerkt Payload/Rakete in der Entscheidung, auch wenn eine Handmarkierung sie im Archiv verhindert hat; `nola-ev1.7` ein Kandidat legt einen Schlüssel neu an, den ein anderer Kandidat derselben Auswahl ersetzt – Markierungen bleiben über Importwerten; `nola-cna` KeyError beim Entfernen aus einem leeren Archiv (latent, über die Oberfläche nicht erreichbar).
 - **Knopf „Discard pasted entries of past launches“**: Eingefügte Einträge vergangener Starts bleiben im Arbeitsstand, bis sie einzeln entfernt werden; nur markiert mit „(past)“, kein Sammelknopf.
 - **Demo-Modus** (schreibgeschützt) für die öffentliche Fassung — derzeit kann jeder Besucher
   der veröffentlichten App Referenzdaten über das Optionsmenü ändern.
