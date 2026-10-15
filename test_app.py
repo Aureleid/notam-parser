@@ -1855,7 +1855,7 @@ check("wird bei jeder Auswertung fortgeschrieben",
       "_update_archive(events, stats.get(\"groups\", []), table)" in quelle_a)
 check("Filter der Seitenleiste wirken nicht aufs Archiv",
       quelle_a.index("_update_archive(events") < quelle_a.index("nation_filter = st.multiselect"))
-check("eigener Reiter im Optionsmenue", "_archive_editor()" in quelle_a)
+check("eigener Reiter im Optionsmenue", "_archive_editor(spaceports, vehicles)" in quelle_a)
 check("Statuszeile in der Seitenleiste", "Launch archive: {} launch(es)" in quelle_a)
 check("Statuszeile zeigt den Stand nach der Auswertung",
       quelle_a.count("_show_archive_status(") == 3, quelle_a.count("_show_archive_status("))
@@ -4602,7 +4602,7 @@ try:
     for _p_e in (_kaputt_db_u, _fremd_db):
         app.st = _StubSt()
         app.DB_PATH = _p_e
-        _r, _e = _versuch(app._archive_editor)
+        _r, _e = _versuch(app._archive_editor, pd.DataFrame(), pd.DataFrame())
         _namen_e = [n for n, _ in app.st.aufrufe]
         check("Archiv-Editor ({}): st.error nennt die Datenbank, keine Remove-Knoepfe".format(_p_e.name),
               _e is None and any(n == "error" and "database" in t for n, t in app.st.aufrufe)
@@ -7351,6 +7351,224 @@ _ao_i, _ho_i = app.archiv_mit_handwerten_lesen(_db_i)
 check("remove_orphan: Zeile und Markierungen weg, fremde bleiben",
       _k_i not in {app.archive_key(dict(r)) for _, r in _ao_i.iterrows()}
       and _k_i not in set(_ho_i["schluessel"]) and set(_ho_i["schluessel"]) == {_k_i3}, _ho_i.to_dict("records"))
+
+
+print("== Archiv von Hand bearbeiten: Oberflaeche ==")
+_st_orig_u = app.st; app.st = _StR()
+_db_orig_u = app.DB_PATH
+_lab_orig_u = app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    _sp_u, _ve_u = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_HAIN), dict(_JSLC)], set()), _h, _a, _h)
+    _k_u = app.archive_key(_HAIN)
+    _k_j = app.archive_key(_JSLC)
+    app.local_admin_allowed = lambda: True
+    check("Speichern JSLC->TSLC: Bahn als berechnet markiert",
+          app._archiv_edit_speichern(_k_j, {"Weltraumbahnhof": "TSLC"}, _sp_u, _ve_u) is True
+          and app.handwerte_index(app.archiv_mit_handwerten_lesen()[1])[_k_j]["Inklination"][1] == "berechnet")
+    app.local_admin_allowed = lambda: True
+    check("Speichern ok", app._archiv_edit_speichern(_k_u, {"Weltraumbahnhof": "WSLC"}, _sp_u, _ve_u) is True)
+    _a1, _h1 = app.archiv_mit_handwerten_lesen()
+    _z_u = _a1[_a1["NOTAM"] == _HAIN["NOTAM"]].iloc[0]
+    check("Speichern: Platz geschrieben und markiert",
+          _z_u["Weltraumbahnhof"] == "WSLC" and app.handwerte_index(_h1)[_k_u]["Weltraumbahnhof"] == ("HAIN", "hand"))
+    check("Speichern: ein Undo-Eintrag mit zwei Tabellen",
+          app.st.session_state["ref_undo"][-1].get("weitere", [{}])[0].get("tabelle") == "archiv_handwerte")
+    check("Reset ok", app._archiv_reset_klick(_k_u, "Weltraumbahnhof") is True)
+    _a2, _h2 = app.archiv_mit_handwerten_lesen()
+    check("Reset: Platz zurueck, keine Markierung",
+          _a2[_a2["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Weltraumbahnhof"] == "HAIN" and _k_u not in app.handwerte_index(_h2))
+    app._undo_reference()
+    _a3, _h3 = app.archiv_mit_handwerten_lesen()
+    check("Undo nach Reset: WSLC und Markierung wieder da",
+          _a3[_a3["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Weltraumbahnhof"] == "WSLC" and _k_u in app.handwerte_index(_h3))
+    app.st.session_state.pop("ref_flash_error", None)
+    check("ungueltiger Wert: verweigert",
+          app._archiv_edit_speichern(_k_u, {"Orbit": "MARS"}, _sp_u, _ve_u) is False
+          and "allowed" in app.st.session_state.get("ref_flash_error", ""))
+    check("Zeile fehlt: verweigert mit Warnung",
+          app._archiv_edit_speichern("gibt-es-nicht", {"Payload": "x"}, _sp_u, _ve_u) is False
+          and app.st.session_state.get("ref_flash_warning") == app.ARCHIV_ZEILE_FEHLT)
+    # Konflikt: Archiv zwischen Lesen und Schreiben fremd geaendert
+    _orig_lesen_u = app.archiv_mit_handwerten_lesen
+    def _lesen_und_stoeren(*a, **k):
+        _ar, _hw = _orig_lesen_u(*a, **k)
+        _x, _y = _orig_lesen_u()
+        app.archiv_und_handwerte_schreiben(app.merge_archive(_x, [dict(_TSLC)], set()), _y, _x, _y)
+        return _ar, _hw
+    app.archiv_mit_handwerten_lesen = _lesen_und_stoeren
+    try:
+        _vor_u = app.archiv_lesen()[lambda d: d["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Payload"]
+        check("Konflikt: verweigert", app._archiv_edit_speichern(_k_u, {"Payload": "Konflikt"}, _sp_u, _ve_u) is False
+              and app.st.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT)
+    finally:
+        app.archiv_mit_handwerten_lesen = _orig_lesen_u
+    check("Konflikt: nichts geschrieben",
+          app.archiv_lesen()[lambda d: d["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Payload"] == _vor_u)
+    app.local_admin_allowed = lambda: False
+    _stand_u = app.archiv_mit_handwerten_lesen()
+    check("nicht lokal: Speichern verweigert",
+          app._archiv_edit_speichern(_k_u, {"Payload": "x"}, _sp_u, _ve_u) is False
+          and app.st.session_state.get("ref_flash_error") == app.ARCHIV_EDIT_NUR_LOKAL)
+    app.st.session_state.pop("ref_flash_error", None)
+    check("nicht lokal: Reset verweigert", app._archiv_reset_klick(_k_u, "Weltraumbahnhof") is False
+          and app.st.session_state.get("ref_flash_error") == app.ARCHIV_EDIT_NUR_LOKAL)
+    _stand_u2 = app.archiv_mit_handwerten_lesen()
+    check("nicht lokal: nichts geschrieben",
+          _stand_u2[0].attrs["nola_stand"] == _stand_u[0].attrs["nola_stand"]
+          and _stand_u2[1].attrs["nola_stand"] == _stand_u[1].attrs["nola_stand"])
+    # Sortierung und Seiten
+    _df_s = _pd_h.DataFrame([dict(_HAIN, Startdatum="02.01.2026"), dict(_HAIN, Startdatum="10.12.2025"),
+                             dict(_HAIN, Startdatum="15.03.2026")])
+    check("sortiert: neuestes Datum zuerst (nicht als Text)",
+          list(app._archiv_sortiert(_df_s)["Startdatum"]) == ["15.03.2026", "02.01.2026", "10.12.2025"])
+    _df_s2 = _pd_h.DataFrame([dict(_HAIN, Startdatum="kaputt"), dict(_HAIN, Startdatum="02.01.2026")])
+    check("sortiert: unlesbares Datum ans Ende",
+          list(app._archiv_sortiert(_df_s2)["Startdatum"]) == ["02.01.2026", "kaputt"])
+finally:
+    app.st = _st_orig_u
+    app.DB_PATH = _db_orig_u
+    app.local_admin_allowed = _lab_orig_u
+import inspect as _ins_u
+_src_u = _ins_u.getsource(app._archive_editor)
+check("Editor: kein st.form, kein head(60), Blaettern, Freigabe",
+      "st.form" not in _src_u and "head(60)" not in _src_u and "ARCHIV_SEITE" in _src_u
+      and "local_admin_allowed()" in _src_u and "_md_plain(" in _src_u)
+check("Editor: Formular ohne st.form", "st.form" not in _ins_u.getsource(app._archiv_formular))
+
+# Darstellung mit einem Fake-st: Seiten, Marken, Tooltips, Formular, Freigabe
+class _StU:
+    def __init__(self, klick=(), suche=""):
+        self.session_state, self.aufrufe, self._klick, self._suche = {}, [], set(klick), suche
+
+    def __getattr__(self, name):
+        def _f(*a, **k):
+            self.aufrufe.append((name, a, k))
+            if name == "columns":
+                n = a[0] if isinstance(a[0], int) else len(a[0])
+                return [self for _ in range(n)]
+            if name == "container":
+                return self
+            if name == "button":
+                return k.get("key") in self._klick
+            if name == "selectbox":
+                return a[1][k.get("index", 0)]
+            if name == "text_input":
+                return self._suche if k.get("key") == "archiv_suche" else k.get("value", "")
+            if name == "rerun":
+                raise _RerunU(k.get("scope", "app"))
+            return None
+        return _f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _RerunU(Exception):
+    pass
+
+
+def _zeichne_u(st_u):
+    app.st = st_u
+    try:
+        app._archive_editor(_sp_u, _ve_u)
+    except _RerunU as exc:
+        return str(exc)
+    return None
+
+
+_st_orig_u2, _db_orig_u2, _lab_orig_u2 = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    _viele_u = [dict(_HAIN, NOTAM="Z{:04d}/26".format(i), Startdatum="{:02d}.01.2025".format(1 + i % 28))
+                for i in range(120)]
+    app.archiv_und_handwerte_schreiben(
+        app.merge_archive(_a, [dict(_HAIN), dict(_JSLC)] + _viele_u, set()), _h, _a, _h)
+    _k_u = app.archive_key(_HAIN)
+    app.local_admin_allowed = lambda: True
+    app.st = _StR()
+    app._archiv_edit_speichern(_k_u, {"Weltraumbahnhof": "WSLC"}, _sp_u, _ve_u)
+    _n_u = len(app.archiv_lesen())
+    _s_u = _StU()
+    check("Darstellung: zeichnet ohne Fehler", _zeichne_u(_s_u) is None)
+    _md_u = [(a[0], k.get("help")) for n, a, k in _s_u.aufrufe if n == "markdown"]
+    _knoepfe_u = [k.get("key", "") for n, a, k in _s_u.aufrufe if n == "button"]
+    check("Darstellung: 50 Zeilen auf Seite 1, Edit und Remove je Zeile",
+          sum(1 for x in _knoepfe_u if x.startswith("rm_arc_")) == app.ARCHIV_SEITE
+          and sum(1 for x in _knoepfe_u if x.startswith("ed_arc_")) == app.ARCHIV_SEITE, len(_knoepfe_u))
+    check("Darstellung: Seitenzahl", any(n == "caption" and "Page 1 of {}".format(-(-_n_u // 50)) in str(a[0])
+                                         for n, a, k in _s_u.aufrufe))
+    check("Darstellung: Handwert-Marke mit Tooltip NOLA: HAIN",
+          any(t == "WSLC " + app.ARCHIV_MARKE_HAND and h == "NOLA: HAIN" for t, h in _md_u), _md_u[:20])
+    app._archiv_edit_speichern(app.archive_key(_JSLC), {"Weltraumbahnhof": "TSLC"}, _sp_u, _ve_u)
+    _s_ub = _StU(suche="alsat")
+    _zeichne_u(_s_ub)
+    _md_ub = [(a[0], k.get("help")) for n, a, k in _s_ub.aufrufe if n == "markdown"]
+    check("Darstellung: berechnete Bahn an der Orbit-Zelle (Tooltip mit NOLA-Inklination)",
+          any(str(t).endswith(app.ARCHIV_MARKE_BERECHNET) and str(h).startswith("NOLA: SSO, inclination 98\\.0, azimuth 193\\.2")
+              for t, h in _md_ub), [x for x in _md_ub if x[1]])
+    check("Darstellung: neuestes Datum zuerst",
+          [a[0] for n, a, k in _s_u.aufrufe if n == "markdown"].index("15\\.01\\.2026")
+          < [a[0] for n, a, k in _s_u.aufrufe if n == "markdown"].index("13\\.01\\.2026"))
+    # Seite 2
+    _s_u2 = _StU(); _s_u2.session_state["archiv_seite"] = 1
+    _zeichne_u(_s_u2)
+    check("Darstellung: Seite 2 erreichbar",
+          any(n == "caption" and str(a[0]).startswith("Page 2 of") for n, a, k in _s_u2.aufrufe))
+    _s_u3 = _StU(klick={"archiv_next"})
+    check("Darstellung: Next blaettert (Fragment-Rerun)",
+          _zeichne_u(_s_u3) == "fragment" and _s_u3.session_state.get("archiv_seite") == 1)
+    _s_u4 = _StU(); _s_u4.session_state["archiv_seite"] = 99
+    _zeichne_u(_s_u4)
+    check("Darstellung: zu grosse Seite -> letzte Seite",
+          any(n == "caption" and "Page {0} of {0}".format(-(-_n_u // 50)) in str(a[0]) for n, a, k in _s_u4.aufrufe))
+    # Suche vor dem Blaettern
+    _s_u5 = _StU(suche="alsat")
+    _s_u5.session_state["archiv_seite"] = 2
+    _zeichne_u(_s_u5)
+    check("Darstellung: Suche filtert vor dem Blaettern (Treffer trotz Seite 3)",
+          sum(1 for n, a, k in _s_u5.aufrufe if n == "button" and k.get("key", "").startswith("rm_arc_")) == 1)
+    # Formular: Edit oeffnet, Felder vorbelegt, Reset nur fuer Handwerte
+    _kurz_u = __import__("hashlib").sha1(_k_u.encode()).hexdigest()[:10]
+    _s_u6 = _StU(klick={"ed_arc_" + _kurz_u})
+    check("Formular: Edit merkt die Zeile und zeichnet neu",
+          _zeichne_u(_s_u6) == "fragment" and _s_u6.session_state.get("archiv_edit") == _k_u)
+    _s_u7 = _StU(); _s_u7.session_state["archiv_edit"] = _k_u
+    _zeichne_u(_s_u7)
+    _sel_u = {a[0]: a[1][k["index"]] for n, a, k in _s_u7.aufrufe if n == "selectbox"}
+    check("Formular: aktuelle Werte vorgewaehlt",
+          _sel_u.get("Launch site") == "WSLC" and _sel_u.get("Nation") == "China" and _sel_u.get("Orbit"), _sel_u)
+    _reset_u = [a[0] for n, a, k in _s_u7.aufrufe if n == "button" and str(a[0]).startswith("Reset ")]
+    check("Formular: Reset nur fuer den Handwert (Platz), nicht fuer berechnete",
+          len(_reset_u) == 1 and "Weltraumbahnhof" in _reset_u[0] and "HAIN" in _reset_u[0], _reset_u)
+    check("Formular: kein st.form", not any(n == "form" for n, a, k in _s_u7.aufrufe))
+    _s_u8 = _StU(klick={"aed_c_" + _kurz_u}); _s_u8.session_state["archiv_edit"] = _k_u
+    check("Formular: Cancel schliesst ohne Schreiben",
+          _zeichne_u(_s_u8) == "fragment" and "archiv_edit" not in _s_u8.session_state
+          and len(app.archiv_lesen()) == _n_u)
+    _s_u9 = _StU(klick={"aed_s_" + _kurz_u}); _s_u9.session_state["archiv_edit"] = _k_u
+    _stand_u9 = app.archiv_lesen().attrs["nola_stand"]
+    check("Formular: Save ohne Aenderung schliesst (App-Rerun), schreibt nichts, kein Undo-Eintrag",
+          _zeichne_u(_s_u9) == "app" and "archiv_edit" not in _s_u9.session_state
+          and app.archiv_lesen().attrs["nola_stand"] == _stand_u9 and not _s_u9.session_state.get("ref_undo"))
+    # nicht lokal: keine Edit-/Reset-Knoepfe, Formular bleibt zu, Marken bleiben sichtbar
+    app.local_admin_allowed = lambda: False
+    _s_u10 = _StU(); _s_u10.session_state["archiv_edit"] = _k_u
+    _zeichne_u(_s_u10)
+    check("nicht lokal: keine Edit-/Reset-Knoepfe, kein Formular",
+          not any(n == "button" and (k.get("key", "").startswith(("ed_arc_", "aed_")))
+                  for n, a, k in _s_u10.aufrufe)
+          and not any(n == "selectbox" for n, a, k in _s_u10.aufrufe))
+    check("nicht lokal: Marken bleiben sichtbar",
+          any(n == "markdown" and a[0] == "WSLC " + app.ARCHIV_MARKE_HAND for n, a, k in _s_u10.aufrufe))
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_u2, _db_orig_u2, _lab_orig_u2
 
 
 print()
