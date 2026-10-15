@@ -4866,6 +4866,238 @@ def merge_archive(
     return pd.DataFrame(zeilen, columns=list(ARCHIVE_COLUMNS))
 
 
+#: Felder, die der Benutzer im Reiter Launch Archive von Hand aendern kann.
+ARCHIV_EDIT_FELDER = ("Nation", "Weltraumbahnhof", "Trägersystem", "Payload", "Orbit")
+#: Bahnwerte, die ein Platzwechsel neu berechnet.
+BAHN_SPALTEN = ("Inklination", "Azimuth", "Orbit")
+#: Auswahl fuer das Orbit-Feld - die Kurzformen des Archivs.
+ORBIT_AUSWAHL = ("SSO", "HIGH-INC", "LEO/MEO", "GTO", "RETRO", "-")
+PAYLOAD_MAX = 200
+#: Anfaenge, die Excel beim Oeffnen der Export-CSV als Formel liest.
+_PAYLOAD_FORMEL = ("=", "+", "@", "\t", "\r")
+#: Unterhalb dieser Entfernung liegt eine Zone auf dem Platz - keine Richtung ableitbar.
+_ZONE_AUF_PLATZ_KM = 1.0
+
+Marken = Dict[str, Tuple[str, str]]
+
+
+class ArchivEingabeFehler(ValueError):
+    """Ein Wert im Bearbeiten-Formular ist nicht erlaubt - nichts wurde geschrieben."""
+
+
+def handwerte_index(handwerte: pd.DataFrame) -> Dict[str, Marken]:
+    """{Schluessel: {Spalte: (nola_wert, herkunft)}} aus der Tabelle archiv_handwerte."""
+    index: Dict[str, Marken] = {}
+    if handwerte is None or handwerte.empty:
+        return index
+    for _, r in handwerte.iterrows():
+        index.setdefault(str(r["schluessel"]), {})[str(r["spalte"])] = (
+            str(r["nola_wert"] or ""), str(r["herkunft"]))
+    return index
+
+
+def handwerte_mit(handwerte: pd.DataFrame, schluessel: str, marken: Marken, jetzt: str) -> pd.DataFrame:
+    """
+    Tabelle mit den Marken einer Zeile ersetzt. Unveraenderte Marken behalten
+    ihren Zeitpunkt, neue oder geaenderte bekommen `jetzt`.
+    """
+    spalten = list(nola_db.FACHTABELLEN["archiv_handwerte"])
+    alt = handwerte_index(handwerte).get(schluessel, {})
+    zeit = {}
+    if handwerte is not None and not handwerte.empty:
+        for _, r in handwerte[handwerte["schluessel"] == schluessel].iterrows():
+            zeit[str(r["spalte"])] = str(r["geaendert_utc"])
+    andere = [] if handwerte is None or handwerte.empty else [
+        {s: r[s] for s in spalten} for _, r in handwerte.iterrows() if str(r["schluessel"]) != schluessel]
+    eigene = [
+        {"schluessel": schluessel, "spalte": sp, "nola_wert": nola, "herkunft": herkunft,
+         "geaendert_utc": zeit[sp] if alt.get(sp) == (nola, herkunft) and sp in zeit else jetzt}
+        for sp, (nola, herkunft) in sorted(marken.items())
+    ]
+    return pd.DataFrame(andere + eigene, columns=spalten)
+
+
+def handwerte_bereinigen(handwerte: pd.DataFrame, archiv: pd.DataFrame) -> pd.DataFrame:
+    """Nur Marken, deren Zeile noch im Archiv steht - Markierungen folgen der Zeile."""
+    if handwerte is None or handwerte.empty:
+        return handwerte
+    schluessel = {archive_key(dict(r)) for _, r in archiv.iterrows()}
+    return handwerte[handwerte["schluessel"].isin(schluessel)].reset_index(drop=True)
+
+
+def payload_bereinigen(text: str) -> str:
+    """Zeilenumbrueche zu Leerzeichen; zu lang oder formelartig -> ArchivEingabeFehler."""
+    wert = " ".join(str(text or "").replace("\r", "\n").split("\n")).strip()
+    roh = str(text or "").lstrip(" ")
+    if roh.startswith(_PAYLOAD_FORMEL) or wert.startswith(_PAYLOAD_FORMEL[:3]):
+        raise ArchivEingabeFehler(
+            "Payload must not start with =, +, @, a tab or a line break.")
+    if len(wert) > PAYLOAD_MAX:
+        raise ArchivEingabeFehler("Payload is longer than {} characters.".format(PAYLOAD_MAX))
+    return wert
+
+
+def _zonen(dropzones: str) -> List[Tuple[float, float]]:
+    """'lat lon; lat lon' -> Punkte; unlesbare Teile fallen weg."""
+    punkte = []
+    for teil in str(dropzones or "").split(";"):
+        zahlen = teil.split()
+        if len(zahlen) != 2:
+            continue
+        try:
+            lat, lon = float(zahlen[0]), float(zahlen[1])
+        except ValueError:
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            punkte.append((lat, lon))
+    return punkte
+
+
+def bahn_aus_platz(lat: float, lon: float, dropzones: str) -> Tuple[str, str, str, str]:
+    """
+    Inklination, Azimuth und Orbit eines Archivstarts von einem anderen Platz aus -
+    dasselbe Verfahren wie die Pipeline (Kreismittel der Zonen-Azimute).
+    Rueckgabe: (Inklination, Azimuth, Orbit, Hinweis); ohne Rechnung ("", "", "-", Grund).
+    """
+    zonen = _zonen(dropzones)
+    if not zonen:
+        return "", "", "-", "no drop zones to compute the orbit from"
+    if any(surface_distance_km(lat, lon, a, b) < _ZONE_AUF_PLATZ_KM for a, b in zonen):
+        return "", "", "-", "zone on the launch site"
+    azimut = _circular_mean([initial_bearing_deg(lat, lon, a, b) for a, b in zonen])
+    inklination = estimate_inclination_deg(lat, azimut)
+    return ("{:.1f}".format(inklination), "{:.1f}".format(azimut),
+            orbit_short(classify_orbit(inklination)), "")
+
+
+def archiv_erlaubt(spaceports: pd.DataFrame, vehicles: pd.DataFrame, nation: str) -> Dict[str, List[str]]:
+    """Auswahllisten des Formulars; Plaetze und Traeger der Nation zuerst."""
+    codes = [str(c) for c in spaceports["Kurzel"]]
+    laender = [str(l) for l in spaceports["Land"]]
+    plaetze = [c for c, l in zip(codes, laender) if l == nation] + [
+        c for c, l in zip(codes, laender) if l != nation]
+    return {
+        "Nation": list(TARGET_NATIONS),
+        "Weltraumbahnhof": plaetze,
+        "Trägersystem": [v for v in vehicle_options(vehicles, nation) if v != VEHICLE_SEPARATOR],
+        "Orbit": list(ORBIT_AUSWAHL),
+    }
+
+
+def _platz_der_referenz(spaceports: pd.DataFrame, code: str) -> Optional[pd.Series]:
+    treffer = spaceports[spaceports["Kurzel"].astype(str) == str(code)]
+    if treffer.empty:
+        return None
+    r = treffer.iloc[0]
+    try:
+        float(r["Latitude"]); float(r["Longitude"])
+    except (TypeError, ValueError):
+        return None
+    return r
+
+
+def archiv_zeile_bearbeiten(
+    zeile: Dict[str, str],
+    neu: Dict[str, str],
+    marken: Marken,
+    erlaubt: Dict[str, Sequence[str]],
+    spaceports: pd.DataFrame,
+) -> Tuple[Dict[str, str], Marken, List[str]]:
+    """
+    Wendet die Formularwerte auf eine Archivzeile an. Nur geaenderte Felder
+    werden markiert; der NOLA-Wert ist der vor der ersten Handaenderung. Ein
+    Feld zurueck auf seinen NOLA-Wert verliert die Markierung. Ein Platzwechsel
+    berechnet Inklination, Azimuth und (ohne Hand-Orbit) Orbit neu.
+    Unerlaubte Werte: ArchivEingabeFehler, nichts geaendert.
+    Rueckgabe: (neue Zeile, neue Marken, Hinweise).
+    """
+    zeile = {s: str(zeile.get(s, "") or "") for s in ARCHIVE_COLUMNS}
+    werte: Dict[str, str] = {}
+    for feld, wert in neu.items():
+        if feld not in ARCHIV_EDIT_FELDER:
+            raise ArchivEingabeFehler("{} cannot be edited.".format(feld))
+        wert = str(wert if wert is not None else "")
+        if feld == "Payload":
+            if wert != zeile["Payload"]:
+                wert = payload_bereinigen(wert)
+        elif wert != zeile[feld] and wert not in erlaubt.get(feld, ()):
+            raise ArchivEingabeFehler("{} is not an allowed value for {}.".format(wert, feld))
+        werte[feld] = wert
+    geaendert = {f: w for f, w in werte.items() if w != zeile[f]}
+    marken = dict(marken)
+    hinweise: List[str] = []
+    if not geaendert:
+        return zeile, marken, hinweise
+
+    def setze(spalte: str, wert: str, herkunft: str) -> None:
+        nola = marken[spalte][0] if spalte in marken else zeile[spalte]
+        if wert == nola:
+            marken.pop(spalte, None)
+        else:
+            marken[spalte] = (nola, herkunft)
+        zeile[spalte] = wert
+
+    for feld, wert in geaendert.items():
+        if feld != "Orbit":
+            setze(feld, wert, "hand")
+    if "Weltraumbahnhof" in geaendert:
+        if "Weltraumbahnhof" not in marken:
+            # zurueck auf den urspruenglichen Platz: berechnete Werte zurueck
+            for spalte, (nola, herkunft) in list(marken.items()):
+                if herkunft == "berechnet":
+                    zeile[spalte] = nola
+                    marken.pop(spalte)
+        else:
+            port = _platz_der_referenz(spaceports, zeile["Weltraumbahnhof"])
+            if port is None:
+                hinweise.append("launch site has no coordinates in the reference - orbit not recomputed")
+            else:
+                ink, azi, orbit, hinweis = bahn_aus_platz(
+                    float(port["Latitude"]), float(port["Longitude"]), zeile["Dropzones"])
+                if hinweis:
+                    hinweise.append(hinweis)
+                setze("Inklination", ink, "berechnet")
+                setze("Azimuth", azi, "berechnet")
+                if "Orbit" not in geaendert and marken.get("Orbit", ("", ""))[1] != "hand":
+                    setze("Orbit", orbit, "berechnet")
+                if str(port["Land"]) != zeile["Nation"]:
+                    hinweise.append("launch site {} belongs to {}, the nation is {}".format(
+                        zeile["Weltraumbahnhof"], nation_label(str(port["Land"])), nation_label(zeile["Nation"])))
+    if "Orbit" in geaendert:
+        setze("Orbit", geaendert["Orbit"], "hand")
+    return zeile, marken, hinweise
+
+
+def archiv_feld_zuruecksetzen(zeile: Dict[str, str], marken: Marken, spalte: str) -> Tuple[Dict[str, str], Marken]:
+    """Ein Feld auf seinen NOLA-Wert; der Platz nimmt alle berechneten Werte mit."""
+    zeile = dict(zeile)
+    marken = dict(marken)
+    if spalte not in marken:
+        return zeile, marken
+    zeile[spalte] = marken.pop(spalte)[0]
+    if spalte == "Weltraumbahnhof":
+        for sp, (nola, herkunft) in list(marken.items()):
+            if herkunft == "berechnet":
+                zeile[sp] = nola
+                marken.pop(sp)
+    return zeile, marken
+
+
+def ueberschneidende_schluessel(archiv: pd.DataFrame) -> Set[str]:
+    """Zeilen, die mit einer anderen Zeile desselben Startdatums eine NOTAM-Kennung teilen."""
+    nach_datum: Dict[str, List[Tuple[str, Set[str]]]] = {}
+    for _, r in archiv.iterrows():
+        kennungen = {t.strip().upper() for t in str(r["NOTAM"]).split(",") if t.strip()}
+        nach_datum.setdefault(str(r["Startdatum"]).strip(), []).append((archive_key(dict(r)), kennungen))
+    treffer: Set[str] = set()
+    for zeilen in nach_datum.values():
+        for i, (ka, ia) in enumerate(zeilen):
+            for kb, ib in zeilen[i + 1:]:
+                if ia & ib:
+                    treffer.update((ka, kb))
+    return treffer
+
+
 #: Spalten des Seestart-Protokolls.
 SEA_LAUNCH_COLUMNS = (
     "Datum",
