@@ -64,6 +64,7 @@ Verbindung, schreibt in einer Transaktion und schließt sie wieder.
 |---|---|---|
 | `startplaetze`, `firs`, `traegersysteme` | die drei Referenzen, Spalten wie in den CSVs | `*_updated.csv` |
 | `startarchiv` | eine Zeile je Start | `startarchiv_updated.csv` |
+| `archiv_handwerte` | Markierungen für von Hand gesetzte oder neu berechnete Felder einer Archivzeile | — |
 | `seestarts` | Seestart-Protokoll | `seestarts_updated.csv` |
 | `manuelle_notams` | eingefügte NOTAMs mit fester `id` | `notam_workspace.json` |
 | `entscheidungen` | bestätigt, ausgeblendet, abgelehnt, wiederhergestellt, aus Archiv/Protokoll entfernt | `notam_workspace.json` |
@@ -117,6 +118,8 @@ erst dann umbenannt — iCloud sieht nie eine halbe Datei. Namen: `nola-JJJJ-MM-
 ohne Sekunden werden weiter erkannt und richtig einsortiert), vor einer Schema-Änderung mit
 Zusatz (`…-vor-schema-2.db`). Die **30 neuesten** regulären
 Sicherungen bleiben, ältere werden gelöscht; Sicherungen mit Zusatz werden nie rotiert.
+Eine ältere NOLA-Fassung verweigert eine Datenbank mit Schema-Version 2; zurück zu einer älteren
+Fassung geht es nur über die Sicherung `…-vor-schema-2.db`.
 Schlägt eine Sicherung fehl (z. B. Ordner fehlt), steht eine Warnung in der Seitenleiste —
 NOLA arbeitet weiter.
 
@@ -144,7 +147,7 @@ beiseitelegen, NOLA starten und die Sicherung in der Auswahl wählen.
 
 *Export to files* in der Seitenleiste (nur lokal) schreibt alle Tabellen in die bisherigen
 Formate nach `export/<Datum-Zeit>/` — die drei Referenz-CSVs, `startarchiv_updated.csv`,
-`seestarts_updated.csv`, `notam_workspace.json`, `archiv_korpus.json`, `archiv_import.json`.
+`archiv_handwerte.csv`, `seestarts_updated.csv`, `notam_workspace.json`, `archiv_korpus.json`, `archiv_import.json`.
 Das ist zugleich der Rückweg: die Dateien sehen aus wie vor der Datenbank.
 
 ### Übergang: der erste Start
@@ -577,6 +580,55 @@ der Tagesdatei steht — der Schlüssel wandert dafür in die Tabelle `entscheid
 
 Die Datenbank `nola.db` samt `nola.db-wal` und `nola.db-shm` ist in `.gitignore` aufgeführt (ebenso die alte `startarchiv_updated.csv`): sie leitet sich aus den lokalen NOTAM-Rohdaten ab
 und bleibt wie diese lokal.
+
+## Archiv von Hand bearbeiten
+
+Im Optionsmenü, Reiter *Launch Archive*, lässt sich eine Archivzeile über **Edit** korrigieren.
+Das Formular öffnet sich unter der Zeile; veränderbar sind **Nation**, **Launch site**
+(Startplatz), **Vehicle** (Trägersystem), **Payload** und **Orbit**. Die Listen für Startplatz
+und Vehicle folgen der gewählten Nation; der bisherige Wert der Zeile bleibt immer wählbar,
+auch wenn er nicht zur Nation passt (dann steht ein Hinweis, dass Platz und Nation nicht
+zusammenpassen). Mit **Save** wird geschrieben, mit **Cancel** verworfen. Danach öffnet sich
+der Optionsdialog wieder im Reiter *Launch Archive* – auch nach Reset und Entfernen.
+
+**Hand gewinnt je Feld.** Genau die Felder, die man geändert hat, überschreibt kein späterer
+Lauf mehr: weder der Tageslauf noch *Archive Import* noch die Sammelbestätigung; alle anderen
+Felder der Zeile aktualisiert NOLA weiter. Wird die Zeile entfernt, fallen auch ihre
+Markierungen weg, und *Undo* im Archiv bringt Zeile und Markierungen gemeinsam zurück.
+
+**Wechselt der Startplatz**, rechnet NOLA Inklination, Azimut und Orbitklasse aus dem neuen
+Platz und den gespeicherten Dropzones neu. Diese Werte sind dann als *berechnet* markiert,
+damit der Tageslauf sie nicht mit den Werten des alten Platzes überschreibt. Ein im selben
+Formular von Hand gesetzter Orbit bleibt. Kehrt man zum Wert zurück, den NOLA selbst hatte,
+verschwindet die Markierung.
+
+**Marken in der Tabelle** (Material-Symbole):
+
+| Symbol | Bedeutung |
+|---|---|
+| Stift (*edit*) | Feld von Hand gesetzt |
+| Kreispfeil (*autorenew*) | Feld aus dem neuen Platz neu berechnet (Orbit, Inklination, Azimut) |
+| Warndreieck (*warning*) | möglicherweise doppelter Start: die Zeile teilt eine NOTAM-Kennung mit einer anderen |
+
+Der **Tooltip** an einer Marke nennt den Wert, den NOLA dort hatte („NOLA: HAIN“; beim Orbit
+samt Inklination und Azimut). Die Orbit-Zelle fasst die Marken von Orbit, Inklination und
+Azimut zusammen.
+
+**Reset.** Im Formular steht für jedes von Hand gesetzte Feld *Reset … to NOLA value (…)*; das
+stellt den Wert wieder her, den NOLA hatte. Berechnete Felder haben keinen eigenen Reset – sie
+gehen mit dem Reset des Startplatzes zurück. Es gibt keinen Reset der ganzen Zeile.
+
+**Blättern.** Die Tabelle zeigt 50 Zeilen je Seite, das jüngste Startdatum zuerst
+(*Page n of m*, *Prev*/*Next*). Die Suche gilt für das ganze Archiv und wirkt vor dem Blättern.
+
+**Nur lokal.** *Edit* und *Reset* gibt es nur am eigenen Rechner (`local_admin_allowed`); die
+öffentliche Fassung zeigt das Archiv schreibgeschützt, *Remove* bleibt dort unverändert (offen
+als `nola-fqz`). Hat jemand die Zeile inzwischen geändert, erscheint die Konfliktmeldung und es
+wird nichts geschrieben.
+
+**Was nicht geht:** Die Zeile zusammenführen, wenn sich ihre NOTAM-Kennungen mit der Gruppierung
+ändern (der Archivschlüssel bleibt Startdatum + Kennungen, `nola-8m4`). Das Warndreieck zeigt
+solche Zeilen an, die Handwerte wandern aber nicht mit.
 
 ## Archiv-Import
 

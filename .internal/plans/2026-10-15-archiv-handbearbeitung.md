@@ -1176,7 +1176,8 @@ def _archiv_aendern(
     neu = bestand.copy()
     for spalte in ARCHIVE_COLUMNS:
         neu.iat[pos, neu.columns.get_loc(spalte)] = neue_zeile[spalte]
-    neu_hw = handwerte_mit(bestand_hw, schluessel, marken, datetime.now(timezone.utc).isoformat())
+    geaendert = {s for s in ARCHIVE_COLUMNS if neue_zeile[s] != zeile[s]}
+    neu_hw = handwerte_mit(bestand_hw, schluessel, marken, datetime.now(timezone.utc).isoformat(), geaendert)
     try:
         staende = archiv_und_handwerte_schreiben(neu, neu_hw, bestand, bestand_hw)
     except nola_db.Konflikt:

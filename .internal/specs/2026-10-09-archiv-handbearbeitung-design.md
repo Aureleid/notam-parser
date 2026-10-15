@@ -84,7 +84,7 @@ gegen gleichzeitige Änderungen geschützt.
 ## Formular
 
 Im Reiter *Launch Archive*: je Zeile ein Knopf **„Edit“** neben „Remove“; Felder mit Handwert tragen
-in der Tabelle ein ✎ (`hand`) bzw. ↻ (`berechnet`, „recomputed from site“). Das Formular erscheint unter der Zeile, höchstens eines gleichzeitig offen.
+in der Tabelle ein ✎ (`hand`) bzw. ↻ (`berechnet`, „recomputed from site“) – umgesetzt als Material-Icons (`:material/edit:`, `:material/autorenew:`, `:material/warning:`), weil das Projekt keine Piktogramm-Zeichen im Code zulässt (Tests). Das Formular erscheint unter der Zeile, höchstens eines gleichzeitig offen.
 **Kein `st.form`**: normale Widgets mit eigenen Schlüsseln plus Knöpfe „Save“ und „Cancel“, damit
 Platz- und Vehicle-Liste der gewählten Nation sofort folgen; geschrieben wird erst bei „Save“.
 
@@ -99,6 +99,8 @@ Platz- und Vehicle-Liste der gewählten Nation sofort folgen; geschrieben wird e
 **Speichern:**
 - Nur geänderte Felder werden geschrieben und markiert. Beim ersten Markieren eines Feldes wird der
   bisherige Wert als `nola_wert` gemerkt; ist das Feld schon markiert, bleibt der gemerkte NOLA-Wert.
+- Bekannte Grenze: Wählt der Benutzer nach einem Platzwechsel bewusst den ursprünglichen Orbit, entfällt dessen
+  Markierung (Regel unten); ein späterer Platzwechsel berechnet den Orbit dann neu.
 - Wird ein Feld genau auf seinen gemerkten `nola_wert` zurückgesetzt, **entfällt die Markierung**
   (ebenso Inklination/Azimuth, wenn der Platz auf den ursprünglichen zurückkehrt).
 - Eine Transaktion (`BEGIN IMMEDIATE`) für Archivzeile und Markierungen mit Standvergleich beider
