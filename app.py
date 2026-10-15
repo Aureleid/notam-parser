@@ -5405,8 +5405,9 @@ def archiv_und_importzustand_schreiben(
     handwerte: Optional[Tuple[pd.DataFrame, pd.DataFrame]] = None,
 ) -> Tuple[str, str]:
     """
-    Wie archiv_schreiben, dazu der Importzustand in derselben Transaktion
-    (Bestaetigen/Entfernen im Archiv-Import). Rueckgabe: neue Staende (Archiv, Zustand).
+    Bestaetigen/Entfernen im Archiv-Import: Startarchiv (Standvergleich mit `vorher`)
+    und Importzustand in EINER Transaktion ueber nola_db.ersetze_archiv_und_importzustand;
+    weicht ein Stand ab, wird nichts geschrieben (Konflikt). Rueckgabe: neue Staende (Archiv, Zustand).
     `handwerte = (neu_hw, vorher_hw)`: die Markierungen werden in derselben
     Transaktion mit Standvergleich ersetzt (vorher_hw wie von archiv_mit_handwerten_lesen).
     """
@@ -7251,6 +7252,26 @@ def _archiv_wahl_schluessel(kurz: str) -> str:
     return "aed_wahl_{}".format(kurz)
 
 
+#: Revision der Formular-Widgets (zaehlt bei jedem Oeffnen per Edit und bei jedem Konflikt hoch).
+ARCHIV_EDIT_REV = "archiv_edit_rev"
+#: Teile der Widget-Schluessel im Formular (Nation, Platz, Vehicle, Payload, Orbit).
+_ARCHIV_WIDGET_TEILE = ("n", "p", "v", "l", "o")
+
+
+def _archiv_widgets_neu(kurz: str) -> None:
+    """
+    Formular einer Zeile mit neuen Widgets: Der Browser behaelt den Wert eines Widgets,
+    solange dessen Kennung gleich bleibt (Streamlit 1.50: Schluessel + Optionen bzw.
+    max_chars) - Loeschen des session_state-Schluessels reicht nicht. Eine neue Revision
+    im Schluessel gibt neue Kennungen; die alten Schluessel und die gemerkte Wahl fallen weg.
+    """
+    st.session_state[ARCHIV_EDIT_REV] = int(st.session_state.get(ARCHIV_EDIT_REV, 0)) + 1
+    st.session_state.pop(_archiv_wahl_schluessel(kurz), None)
+    alt = tuple("aed_{}_{}_".format(teil, kurz) for teil in _ARCHIV_WIDGET_TEILE)
+    for schl in [k for k in st.session_state.keys() if str(k).startswith(alt)]:
+        st.session_state.pop(schl, None)
+
+
 def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
     """Tabelle des Startarchivs: Blaettern, Marken, Bearbeiten (nur lokal), Entfernen."""
     try:
@@ -7338,9 +7359,9 @@ def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
         )
         if darf and knopf.button("Edit", key="ed_arc_{}".format(kurz), use_container_width=True):
             # hoechstens ein Formular offen: neu zeichnen, damit ein frueher offenes verschwindet;
-            # eine alte, nie gespeicherte Wahl dieser Zeile gilt nicht mehr
+            # eine alte, nie gespeicherte Wahl oder Eingabe dieser Zeile gilt nicht mehr
             st.session_state["archiv_edit"] = schluessel
-            st.session_state.pop(_archiv_wahl_schluessel(kurz), None)
+            _archiv_widgets_neu(kurz)
             st.rerun(scope="fragment")
         if knopf.button("Remove", key="rm_arc_{}".format(kurz), use_container_width=True):
             _remove_archive_row(schluessel)
@@ -7372,6 +7393,12 @@ def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataF
     # getroffene Wahl wird deshalb selbst gemerkt und als index weitergegeben.
     wahl_schluessel = _archiv_wahl_schluessel(kurz)
     wahl = dict(st.session_state.get(wahl_schluessel) or {})
+    rev = int(st.session_state.get(ARCHIV_EDIT_REV, 0))
+
+    def wkey(teil: str) -> str:
+        # Widget-Schluessel mit Revision (siehe _archiv_widgets_neu)
+        return "aed_{}_{}_{}".format(teil, kurz, rev)
+
     # Grundlage des Formulars: die Zeile beim ersten Zeichnen (auch nach X/Escape) - die
     # Widgets behalten ihren Wert, ein spaeterer fremder Wert darf beim Save nicht als
     # Handaenderung gelten (siehe _archiv_edit_speichern, angezeigt)
@@ -7386,31 +7413,30 @@ def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataF
         st.session_state.pop(wahl_schluessel, None)
 
     def neu_aufbauen() -> None:
-        # Konflikt: Formular bleibt offen, beim naechsten Lauf gegen die frische Zeile
-        st.session_state.pop(wahl_schluessel, None)
-        for teil in ("n", "p", "v", "l", "o"):
-            st.session_state.pop("aed_{}_{}".format(teil, kurz), None)
+        # Konflikt: Formular bleibt offen und zeigt beim naechsten Lauf die frische Zeile -
+        # unter neuen Widget-Kennungen, sonst behielte der Browser die alten Werte
+        _archiv_widgets_neu(kurz)
 
     with st.container(border=True):
         nationen = auswahl(TARGET_NATIONS, basis["Nation"])
         nation = st.selectbox("Nation", nationen, index=nationen.index(basis["Nation"]),
-                              format_func=nation_label, key="aed_n_{}".format(kurz))
+                              format_func=nation_label, key=wkey("n"))
         erlaubt = archiv_erlaubt(spaceports, vehicles, nation)
         plaetze = auswahl(erlaubt["Weltraumbahnhof"], basis["Weltraumbahnhof"])
         platz = st.selectbox("Launch site", plaetze, index=vorwahl(plaetze, "Weltraumbahnhof"),
-                             key="aed_p_{}".format(kurz))
+                             key=wkey("p"))
         traeger = auswahl(erlaubt["Trägersystem"], basis["Trägersystem"])
         vehicle = st.selectbox("Vehicle", traeger, index=vorwahl(traeger, "Trägersystem"),
-                               format_func=lambda v: v or VEHICLE_NONE_LABEL, key="aed_v_{}".format(kurz))
+                               format_func=lambda v: v or VEHICLE_NONE_LABEL, key=wkey("v"))
         st.session_state[wahl_schluessel] = {"Weltraumbahnhof": platz, "Trägersystem": vehicle,
                                              "angezeigt": basis}
         payload = st.text_input("Payload", value=basis["Payload"], max_chars=max(PAYLOAD_MAX, len(basis["Payload"])),
-                                key="aed_l_{}".format(kurz))
+                                key=wkey("l"))
         st.caption("Inclination {} / azimuth {} - recomputed when the launch site changes.".format(
             _md_plain(str(zeile["Inklination"]) or "-"), _md_plain(str(zeile["Azimuth"]) or "-")))
         orbits = auswahl(ORBIT_AUSWAHL, basis["Orbit"])
         orbit = st.selectbox("Orbit", orbits, index=orbits.index(basis["Orbit"]),
-                             key="aed_o_{}".format(kurz))
+                             key=wkey("o"))
         # Reset nur fuer Handwerte; berechnete Werte setzt der Reset des Platzes mit zurueck
         for spalte, (nola, herkunft) in sorted(marken.items()):
             if herkunft == "hand" and st.button(

@@ -102,7 +102,9 @@ Platz- und Vehicle-Liste der gewählten Nation sofort folgen; geschrieben wird e
   für die nach X/Escape gemerkte Wahl). Unveränderte Felder werden nicht gesendet. Hat ein anderer
   Schreiber (Tab, Tageslauf, Import) eines der geänderten Felder seit dem Zeichnen geändert →
   Konfliktmeldung (`KONFLIKT_TEXT`) im Dialog, nichts geschrieben, das Formular baut sich gegen die
-  frische Zeile neu auf. Fremde Änderungen an anderen Feldern bleiben stehen und werden nicht markiert.
+  frische Zeile neu auf – unter neuen Widget-Schlüsseln (Revision `archiv_edit_rev`, zählt bei jedem
+  Konflikt und jedem Öffnen per Edit hoch), denn der Browser behält den Wert eines Widgets, solange
+  Schlüssel und Optionen gleich bleiben; die gemerkte Wahl (Nationswechsel) fällt dabei weg. Fremde Änderungen an anderen Feldern bleiben stehen und werden nicht markiert.
 - Beim ersten Markieren eines Feldes wird der
   bisherige Wert als `nola_wert` gemerkt; ist das Feld schon markiert, bleibt der gemerkte NOLA-Wert.
 - Bekannte Grenze: Wählt der Benutzer nach einem Platzwechsel bewusst den ursprünglichen Orbit, entfällt dessen
@@ -182,13 +184,15 @@ Next ▶“; die Suche filtert vor dem Blättern, die Seite steht in `session_st
 - Nach Platzwechsel überlebt der neu berechnete Orbit einen Tageslauf.
 - Konflikt (fremde Änderung an Archiv oder Markierungen) → nichts geschrieben, Meldung im Dialog.
 - Veraltetes Formular: fremde Änderung an einem anderen Feld bleibt stehen und unmarkiert; fremde
-  Änderung am selben Feld → Konflikt; unveränderte Felder werden nicht gesendet.
+  Änderung am selben Feld → Konflikt; unveränderte Felder werden nicht gesendet. Nach dem Konflikt
+  zeigt das Formular die frische Zeile (Fake-st mit Browser-Gedächtnis je Widget-Kennung), ein zweites
+  Save ohne Eingabe schreibt nichts.
 - Undo nimmt Wert und Markierung zurück.
 - Entfernen löscht Markierungen mit.
 - Blättern: alle Zeilen erreichbar, Suche filtert vor dem Blättern, Sortierung nach Datum.
 - ⚠ erscheint genau an Zeilen mit gemeinsamer NOTAM-Kennung am selben Startdatum.
 - Ungültige Werte (Nation/Platz/Vehicle/Orbit außerhalb von Liste ∪ aktuellem Wert, Payload > 200,
-  Payload mit `=`/`+`/`@`/Tab/CR am Anfang) → abgelehnt; die Prüfung liegt in der Schreibfunktion,
+  Payload mit `=`/`+`/`@`/Tab/CR oder `-` (außer genau `-`) am Anfang) → abgelehnt; die Prüfung liegt in der Schreibfunktion,
   nicht nur im Widget.
 - Ohne `local_admin_allowed()` keine Edit-/Reset-Knöpfe, und die Schreibfunktion verweigert.
 - Schema 1 → 2: Sicherung vorher, Tabelle angelegt, vorhandene Daten unverändert, Version 2.

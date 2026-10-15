@@ -74,7 +74,7 @@ li.hit>.row{background:var(--hl)}
     <h1>NOLA – NOTAM Space-Launch Analyzer</h1>
     <div class="sub">Funktionsbaum links, die großen Entwicklungsschritte rechts. Klick auf einen Schritt hebt seine Äste hervor.</div>
   </div>
-  <div class="stats"><span><b>8.991</b> Zeilen app.py</span><span><b>1.962</b> Tests (beide Läufe) grün bis auf den Umgebungstest F6</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
+  <div class="stats"><span><b>9.017</b> Zeilen app.py</span><span><b>1.970</b> Tests (beide Läufe) grün bis auf den Umgebungstest F6</span><span><b>32</b> Startplätze</span><span><b>130</b> FIRs</span><span><b>65</b> Trägersysteme</span></div>
 </header>
 
 <main>
@@ -141,8 +141,8 @@ var STEPS=[
  p:"Nation, Startplatz, Trägersystem, Payload und Orbit einer Archivzeile lassen sich von Hand ändern. Hand gewinnt je Feld: die neue Tabelle archiv_handwerte (Schema 2, Sicherung …-vor-schema-2.db vorher, ältere Fassungen verweigern Version 2) merkt je Feld, ob es von Hand gesetzt (hand) oder nach einem Platzwechsel aus dem neuen Platz neu berechnet ist (berechnet; Inklination, Azimut, Orbit). Tageslauf, Entfernen, Archiv-Import und Rückgängig beachten die Markierungen, der Export enthält archiv_handwerte.csv. Im Reiter zeigen Material-Symbole (Stift, Kreispfeil, Warndreieck bei gemeinsamer NOTAM-Kennung) mit Tooltip den NOLA-Wert, Reset gibt es je Hand-Feld, die Tabelle blättert zu 50 Zeilen, jüngster Start zuerst. Edit und Reset nur lokal; die öffentliche Fassung zeigt das Archiv schreibgeschützt. Nach Save, Reset und Remove öffnet der Dialog wieder den Reiter Launch Archive.",
  r:"Ergebnis: 1.947 Tests (1.635 + 312), bis auf den bekannten Umgebungstest F6 (unversionierter export/-Ordner) grün; der Schlüssel über Kennungs-Überschneidung bleibt offen (nola-8m4)."},
 {id:17,name:"Abschlussreview",h:"Archiv von Hand bearbeiten: veraltetes Formular, Bahn ohne Koordinaten, Formelschutz",
- p:"Save schreibt nur, was der Benutzer gegenüber der gezeichneten Zeile geändert hat; die Grundlage bleibt auch nach X/Escape die Zeile beim ersten Zeichnen. Hat ein anderer Tab, der Tageslauf oder ein Import eines dieser Felder seitdem geändert, erscheint die Konfliktmeldung, nichts wird geschrieben und das Formular baut sich gegen die frische Zeile neu auf – ein neuerer Wert wird nicht mehr zurückgesetzt und als Handwert geschützt. Ein Platzwechsel, bei dem die Bahn nicht gerechnet werden kann (keine brauchbaren Dropzones, Platz ohne Koordinaten), setzt Inklination und Azimut leer und den Orbit auf „-“ (berechnet), statt die Werte eines vorherigen Platzes stehen zu lassen. Payload: „-“ am Anfang nur, wenn der ganze Wert genau „-“ ist. archiv_handwerte.csv steht in .gitignore; Doku nennt die echten Schreibwege.",
- r:"Ergebnis: jede Verhaltensänderung zuerst mit rotem Test belegt. 1.962 Tests (1.650 + 312), bis auf den bekannten Umgebungstest F6 grün."},
+ p:"Save schreibt nur, was der Benutzer gegenüber der gezeichneten Zeile geändert hat; die Grundlage bleibt auch nach X/Escape die Zeile beim ersten Zeichnen. Hat ein anderer Tab, der Tageslauf oder ein Import eines dieser Felder seitdem geändert, erscheint die Konfliktmeldung, nichts wird geschrieben und das Formular baut sich gegen die frische Zeile neu auf, unter neuen Widget-Schlüsseln (Revision archiv_edit_rev), weil der Browser sonst die alten Werte behält und beim nächsten Save mitschickt – ein neuerer Wert wird nicht mehr zurückgesetzt und als Handwert geschützt. Ein Platzwechsel, bei dem die Bahn nicht gerechnet werden kann (keine brauchbaren Dropzones, Platz ohne Koordinaten), setzt Inklination und Azimut leer und den Orbit auf „-“ (berechnet), statt die Werte eines vorherigen Platzes stehen zu lassen. Payload: „-“ am Anfang nur, wenn der ganze Wert genau „-“ ist. archiv_handwerte.csv steht in .gitignore; Doku nennt die echten Schreibwege.",
+ r:"Ergebnis: jede Verhaltensänderung zuerst mit rotem Test belegt (Fix-Runde 2 mit einem Fake-st, der wie der Browser Widget-Werte je Kennung behält). 1.970 Tests (1.658 + 312), bis auf den bekannten Umgebungstest F6 grün."},
 {id:0,name:"Offen",h:"Offene Punkte",
  p:"Demo-Modus für die öffentliche Fassung, Vorankündigungs-NOTAMs, Archivspalten für Art und Zuverlässigkeit, zwei Startversuche desselben Starts, NATION_HINTS aus der Referenz ableiten. Aus dem Archiv-Import: Spaltenverschiebung durch ein Zusatzfeld in der ersten Archivzeile (nola-djk), echte NSF-Seite als Testfixture, Archivspalte Quelle, alte Dubletten, Zweitzeile des Tagesbetriebs neben einer Importzeile, kein Rückgängig für ergänzte Zeilen. Aus Vergangene Starts: Sammelknopf zum Verwerfen eingefügter Einträge vergangener Starts. Aus Archiv von Hand bearbeiten: Schlüssel über Kennungs-Überschneidung (nola-8m4), Remove und Referenz-Editoren in der Cloud absichern (nola-fqz), Import-Entscheidung vermerkt durch Handmarkierung verhinderte Werte (nola-ev1.6), Markierungen über Importwerten bei Ersetzen in derselben Auswahl (nola-ev1.7), KeyError beim Entfernen aus leerem Archiv (nola-cna). Aus der lokalen Datenbank: Dauerwarnung bei fehlendem Sicherungsordner, wählbare defekte Sicherungen, maskierte Schrägstriche in Rohmeldungen, in der Cloud kann eine entfernte Zeile in einer anderen Sitzung wiederkommen. Aus den Folgepunkten: Browser-Nachweis für X/Escape am Referenzdialog, Prüfsummen des Archiv-Imports bei wachsendem Korpus, Importzustand ohne Stand schreibt ohne Vergleich, Sicherungen derselben Sekunde.",
  r:"Quelle: STATUS.md, Abschnitt Offene Punkte."}
@@ -221,7 +221,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
    {t:"Archiv von Hand bearbeiten",s:16,n:"Hand gewinnt je Feld · nur lokal",f:"archiv_zeile_bearbeiten, _archiv_formular",c:[
      {t:"Tabelle archiv_handwerte, Schema 2",n:"hand · berechnet · Sicherung vor Schema 2",f:"archiv_mit_handwerten_lesen, archiv_und_handwerte_schreiben"},
      {t:"Platzwechsel rechnet Bahn neu",n:"Inklination · Azimut · Orbit · ohne Rechnung leer und „-“",f:"bahn_aus_platz",s2:17},
-     {t:"Veraltetes Formular: nur Geändertes, sonst Konflikt",s:17,n:"Grundlage ist die gezeichnete Zeile",f:"_archiv_edit_speichern, _archiv_formular"},
+     {t:"Veraltetes Formular: nur Geändertes, sonst Konflikt",s:17,n:"Grundlage ist die gezeichnete Zeile",f:"_archiv_edit_speichern, _archiv_formular, _archiv_widgets_neu"},
      {t:"Payload-Formelschutz",s:17,n:"=, +, @, Tab, CR · „-“ nur allein",f:"payload_bereinigen"},
      {t:"Reset je Hand-Feld",n:"Wert, den NOLA hatte",f:"archiv_feld_zuruecksetzen"},
      {t:"Warndreieck bei gemeinsamer Kennung",n:"Schlüsselproblem bleibt offen",f:"ueberschneidende_schluessel"},
@@ -272,7 +272,7 @@ var TREE={t:"NOLA",f:"app.py · Streamlit",s:0,c:[
      {t:"Eine Momentaufnahme",s:14,n:"eine Lesetransaktion",f:"_schreibe_export"}]},
    {t:"Nur lokal",s:13,n:"--server.address 127.0.0.1",f:"local_admin_allowed, server_address_is_loopback"}]}]},
 {t:"Qualität und Betrieb",s:8,c:[
- {t:"test_app.py",s:17,n:"1.650 Tests · 7.958 Zeilen"},
+ {t:"test_app.py",s:17,n:"1.658 Tests · 8.078 Zeilen"},
  {t:"test_nola_db.py",s:16,n:"312 Tests · 1.469 Zeilen · F6 Umgebungstest"},
  {t:"Externe Prüfung 25.09.2026",n:"6 Befunde behoben, 1 Vertragsfrage"},
  {t:"Veröffentlichung",n:"Streamlit Community Cloud"},

@@ -7953,6 +7953,126 @@ finally:
     app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_i, _db_orig_i, _lab_orig_i
 
 
+class _StB(_StU):
+    """
+    Wie der Browser: der Wert eines Widgets bleibt je Kennung ueber Laeufe erhalten, auch wenn
+    der session_state-Schluessel geloescht wurde. Kennung wie in Streamlit 1.50: Schluessel +
+    Optionen (selectbox) bzw. Schluessel + max_chars (text_input). Kennungen, die ein ganzer Lauf
+    nicht mehr zeichnet, vergisst er (Widget verschwindet aus der Seite).
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.browser, self.werte, self._eingabe, self._gezeichnet = {}, {}, {}, set()
+
+    def lauf(self, klick=(), eingabe=None):
+        self.aufrufe, self._klick, self._eingabe = [], set(klick), dict(eingabe or {})
+        self.werte, self._gezeichnet = {}, set()
+        ergebnis = _zeichne_u(self)
+        if ergebnis is None:
+            self.browser = {i: w for i, w in self.browser.items() if i in self._gezeichnet}
+        return ergebnis
+
+    def __getattr__(self, name):
+        basis = super().__getattr__(name)
+        if name not in ("selectbox", "text_input"):
+            return basis
+
+        def _f(*a, **k):
+            schl = k.get("key")
+            if schl is None or schl == "archiv_suche":
+                return basis(*a, **k)
+            self.aufrufe.append((name, a, k))
+            kennung = (name, schl, tuple(a[1]) if name == "selectbox" else k.get("max_chars"))
+            self._gezeichnet.add(kennung)
+            if kennung not in self.browser:
+                self.browser[kennung] = a[1][k.get("index", 0)] if name == "selectbox" else k.get("value", "")
+            for praefix, wert in self._eingabe.items():
+                if str(schl).startswith(praefix):
+                    self.browser[kennung] = wert
+            self.session_state[schl] = self.browser[kennung]
+            self.werte[str(schl)[:6]] = self.browser[kennung]
+            return self.browser[kennung]
+        return _f
+
+
+# I1-Rest: nach einem Konflikt baut das Formular wirklich neu auf (neue Widget-Kennung)
+_st_orig_r2, _db_orig_r2, _lab_orig_r2 = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _sp_r2, _ve_r2 = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _R2 = dict(_TSLC, NOTAM="B0901/26", **{"Trägersystem": "CZ-4C"})
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_R2)], set()), _h, _a, _h)
+    _k_r2 = app.archive_key(_R2)
+    _kurz_r2 = app.hashlib.sha1(_k_r2.encode()).hexdigest()[:10]
+
+    def _zeile_r2():
+        return app.archiv_lesen()[lambda d: d["NOTAM"] == _R2["NOTAM"]].iloc[0]
+
+    def _fremd_r2(**werte):
+        _x, _y = app.archiv_mit_handwerten_lesen()
+        _pos = [i for i, (_, r) in enumerate(_x.iterrows()) if app.archive_key(dict(r)) == _k_r2][0]
+        _n = _x.copy()
+        for _sp, _w in werte.items():
+            _n.iat[_pos, _n.columns.get_loc(_sp)] = _w
+        app.archiv_und_handwerte_schreiben(_n, _y, _x, _y)
+
+    _b_r2 = _StB(suche="b0901")
+    _b_r2.lauf(klick={"ed_arc_" + _kurz_r2})
+    _b_r2.lauf()
+    check("R2 Formular offen", _b_r2.werte.get("aed_o_") == "SSO" and _b_r2.werte.get("aed_v_") == "CZ-4C",
+          _b_r2.werte)
+    _fremd_r2(**{"Trägersystem": "CZ-2D", "Orbit": "GTO"})
+    _b_r2.lauf(klick={"aed_s_" + _kurz_r2}, eingabe={"aed_o_": "RETRO"})
+    _r_r2 = _zeile_r2()
+    check("R2 Save gegen fremde Aenderung: Konflikt, nichts geschrieben, Formular offen",
+          _b_r2.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT
+          and _r_r2["Orbit"] == "GTO" and _r_r2["Trägersystem"] == "CZ-2D"
+          and _b_r2.session_state.get("archiv_edit") == _k_r2, (dict(_r_r2), _b_r2.session_state))
+    _b_r2.session_state.pop("ref_flash_warning", None)
+    _b_r2.lauf()
+    check("R2 nach Konflikt: Widgets zeigen die frische Zeile (Vehicle CZ-2D, Orbit GTO)",
+          _b_r2.werte.get("aed_v_") == "CZ-2D" and _b_r2.werte.get("aed_o_") == "GTO", _b_r2.werte)
+    _stand_r2 = app.archiv_mit_handwerten_lesen()
+    _b_r2.lauf(klick={"aed_s_" + _kurz_r2})
+    _stand_r2b = app.archiv_mit_handwerten_lesen()
+    _r_r2b = _zeile_r2()
+    _mk_r2 = app.handwerte_index(_stand_r2b[1]).get(_k_r2, {})
+    check("R2 zweites Save ohne Eingabe: nichts zurueckgeschrieben, keine Marke",
+          _r_r2b["Trägersystem"] == "CZ-2D" and _r_r2b["Orbit"] == "GTO" and not _mk_r2
+          and _stand_r2b[0].attrs["nola_stand"] == _stand_r2[0].attrs["nola_stand"]
+          and _stand_r2b[1].attrs["nola_stand"] == _stand_r2[1].attrs["nola_stand"],
+          (dict(_r_r2b), _mk_r2))
+    # B1 mit Browser-Verhalten: Wahl bleibt bei Nationswechsel, auch nach einem Konflikt
+    _b_r2.lauf(klick={"ed_arc_" + _kurz_r2})
+    _b_r2.lauf(eingabe={"aed_p_": "JSLC"})
+    _b_r2.lauf(eingabe={"aed_n_": "Russland"})
+    check("R2 B1: Platzwahl bleibt bei Nationswechsel", _b_r2.werte.get("aed_p_") == "JSLC", _b_r2.werte)
+    _fremd_r2(Payload="Fremd-R2")
+    _b_r2.lauf(klick={"aed_s_" + _kurz_r2}, eingabe={"aed_l_": "Mein-R2"})
+    _b_r2.session_state.pop("ref_flash_warning", None)
+    _b_r2.lauf()
+    check("R2 nach Konflikt: gemerkte Wahl und Nation verworfen, frische Werte",
+          _b_r2.werte.get("aed_n_") == "China" and _b_r2.werte.get("aed_p_") == "TSLC"
+          and _b_r2.werte.get("aed_l_") == "Fremd-R2" and _zeile_r2()["Payload"] == "Fremd-R2", _b_r2.werte)
+    _alt_r2 = [k for k in _b_r2.session_state if str(k).startswith("aed_") and _kurz_r2 in str(k)
+               and k != app._archiv_wahl_schluessel(_kurz_r2)]
+    check("R2 alte Widget-Schluessel aufgeraeumt (nur eine Revision im Zustand)",
+          len({str(k).rsplit("_", 1)[-1] for k in _alt_r2}) == 1 and len(_alt_r2) == 5, _alt_r2)
+    # Edit oeffnet immer mit neuen Kennungen: eine vorige Eingabe kommt nicht zurueck
+    _b_r2.lauf(eingabe={"aed_o_": "RETRO"})
+    _b_r2.lauf(klick={"aed_c_" + _kurz_r2})
+    _b_r2.lauf()
+    _b_r2.lauf(klick={"ed_arc_" + _kurz_r2})
+    _b_r2.lauf()
+    check("R2 Edit nach Cancel: Formular zeigt die Zeile, nicht die alte Eingabe",
+          _b_r2.werte.get("aed_o_") == "GTO", _b_r2.werte)
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_r2, _db_orig_r2, _lab_orig_r2
+
+
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
 sys.exit(0 if ok else 1)
