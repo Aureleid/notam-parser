@@ -1512,7 +1512,7 @@ check("Hauptnavigation nutzt kein st.tabs mehr",
       "tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(" not in quelle,
       "Hauptnavigation noch auf st.tabs")
 check("  ... im Optionsdialog bleibt st.tabs zulaessig",
-      "reiter = st.tabs(titel)" in quelle)
+      "reiter = st.tabs(titel, default=" in quelle)
 check("Segmentleiste steuert die Bereiche", "st.segmented_control(" in quelle)
 check("sechs Bereiche definiert", quelle.count("if bereich == reiter[") == 6,
       quelle.count("if bereich == reiter["))
@@ -6043,7 +6043,7 @@ else:
     print("  SKIP  launch.json (nicht vorhanden)")
 
 print("== Lokale Datenbank: Start und Sicherheit, Verhalten (Fix-Runde 1) ==")
-import types as _types_s, tempfile as _tf_s, shutil as _sh_s, re as _re_s
+import types as _types_s, tempfile as _tf_s, shutil as _sh_s, re as _re_s, contextlib as _cl_s
 import nola_db as _db_s
 import nola_umzug as _um_s
 
@@ -6078,6 +6078,8 @@ def _fake_st_s():
         return label in _klick_s
 
     ns.stop, ns.rerun, ns.radio, ns.button = _stop, _rerun, _radio, _button
+    # Dialogmeldungen stehen in einem stets erzeugten Container (Fix-Runde 2, B2)
+    ns.container = lambda *a, **k: _cl_s.nullcontext()
     ns.columns = lambda n, **k: [_types_s.SimpleNamespace(button=_button)
                                  for _ in range(n if isinstance(n, int) else len(n))]
     return ns
@@ -6453,6 +6455,7 @@ def _fake_st_f(suche=""):
     ns.caption = ns.info = ns.divider = ns.error = ns.warning = ns.success = _leer
     ns.columns = lambda n, **k: [_spalte() for _ in range(n if isinstance(n, int) else len(n))]
     ns.form = lambda *a, **k: _cl_r.nullcontext()
+    ns.container = lambda *a, **k: _cl_r.nullcontext()
     ns.form_submit_button = lambda *a, **k: False
     ns.multiselect = lambda *a, **k: []
     ns.selectbox = lambda label, optionen, *a, **k: optionen[0]
@@ -7642,6 +7645,178 @@ try:
           len(_ti_f) == 1 and _ti_f[0].get("max_chars", 0) >= 250 and len(_ti_f[0].get("value", "")) == 250, _ti_f)
 finally:
     app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_f, _db_orig_f, _lab_orig_f
+
+
+print("== Archiv von Hand bearbeiten: Fix-Runde 2 ==")
+import contextlib as _cl_g
+import inspect as _ins_g
+
+
+class _StG(_StU):
+    """Wie _StU, dazu: Selectbox mit Schluessel-Praefix liefert einen festen Wert (Benutzerwahl)."""
+
+    def __init__(self, wahl=None, **kw):
+        super().__init__(**kw)
+        self._wahl = dict(wahl or {})
+
+    def __getattr__(self, name):
+        basis = super().__getattr__(name)
+        if name != "selectbox":
+            return basis
+
+        def _f(*a, **k):
+            ergebnis = basis(*a, **k)
+            for praefix, wert in self._wahl.items():
+                if str(k.get("key", "")).startswith(praefix):
+                    wert = wert(a[1]) if callable(wert) else wert
+                    return wert if wert in a[1] else ergebnis
+            return ergebnis
+        return _f
+
+
+def _sb_g(st_g, praefix):
+    """(Optionen, index) der Selectbox mit dem Schluessel-Praefix im letzten Lauf."""
+    treffer = [(list(a[1]), k.get("index")) for n, a, k in st_g.aufrufe
+               if n == "selectbox" and str(k.get("key", "")).startswith(praefix)]
+    return treffer[-1] if treffer else (None, None)
+
+
+_st_orig_g, _db_orig_g, _lab_orig_g = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_JSLC)], set()), _h, _a, _h)
+    _k_g = app.archive_key(_JSLC)
+    _kurz_g = app.hashlib.sha1(_k_g.encode()).hexdigest()[:10]
+    # B1: Wahl bleibt bei Nationswechsel
+    _anderes_v = lambda opts: [o for o in opts if o and o != _JSLC["Trägersystem"]][-1]  # noqa: E731
+    _s_g1 = _StG(wahl={"aed_p_": "TSLC", "aed_v_": _anderes_v}, suche="alsat")
+    _s_g1.session_state["archiv_edit"] = _k_g
+    _zeichne_u(_s_g1)
+    _v_wahl = _anderes_v(_sb_g(_s_g1, "aed_v_")[0])
+    _s_g2 = _StG(wahl={"aed_n_": "Russland"}, suche="alsat")
+    _s_g2.session_state.update(_s_g1.session_state)
+    _zeichne_u(_s_g2)
+    _opt_p, _idx_p = _sb_g(_s_g2, "aed_p_")
+    check("B1 Nationswechsel: Platz-Selectbox behaelt die Wahl TSLC (nicht Zeilenwert JSLC)",
+          _opt_p is not None and _opt_p[_idx_p] == "TSLC", (_opt_p and _opt_p[_idx_p], _opt_p and _opt_p[:4]))
+    _opt_v, _idx_v = _sb_g(_s_g2, "aed_v_")
+    check("B1 Nationswechsel: Vehicle-Selectbox behaelt die Wahl",
+          _opt_v is not None and _opt_v[_idx_v] == _v_wahl, (_opt_v and _opt_v[_idx_v], _v_wahl))
+    # ohne Wahl: Zeilenwert
+    _s_g0 = _StG(wahl={"aed_n_": "Russland"}, suche="alsat")
+    _s_g0.session_state["archiv_edit"] = _k_g
+    _zeichne_u(_s_g0)
+    _opt_p0, _idx_p0 = _sb_g(_s_g0, "aed_p_")
+    check("B1 ohne Wahl: Platz-Selectbox steht auf dem Zeilenwert", _opt_p0[_idx_p0] == "JSLC", _opt_p0[_idx_p0])
+    # Cancel verwirft die gemerkte Wahl; ein neu geoeffnetes Formular beginnt beim Zeilenwert
+    _s_g3 = _StG(klick={"aed_c_{}".format(_kurz_g)}, suche="alsat")
+    _s_g3.session_state.update(_s_g2.session_state)
+    _zeichne_u(_s_g3)
+    _rest_g = [k for k in _s_g3.session_state if _kurz_g in str(k)]
+    check("B1 Cancel: gemerkte Wahl verworfen", "archiv_edit" not in _s_g3.session_state and not _rest_g, _rest_g)
+    _s_g4 = _StG(klick={"ed_arc_{}".format(_kurz_g)}, suche="alsat")
+    _s_g4.session_state.update(_s_g2.session_state)
+    _s_g4.session_state.pop("archiv_edit", None)
+    _zeichne_u(_s_g4)
+    _rest_g4 = [k for k in _s_g4.session_state if _kurz_g in str(k)]
+    check("B1 Edit oeffnen: alte Wahl der Zeile verworfen", not _rest_g4, _rest_g4)
+    # Save verwirft die gemerkte Wahl
+    _s_g5 = _StG(klick={"aed_s_{}".format(_kurz_g)}, suche="alsat")
+    _s_g5.session_state.update(_s_g2.session_state)
+    app.st = _s_g5
+    _zeichne_u(_s_g5)
+    _rest_g5 = [k for k in _s_g5.session_state if _kurz_g in str(k) or "aed_" in str(k)]
+    check("B1 Save: gespeichert mit der Wahl, gemerkte Wahl verworfen",
+          "archiv_edit" not in _s_g5.session_state and not _rest_g5
+          and app.archiv_lesen()[lambda d: d["NOTAM"] == _JSLC["NOTAM"]].iloc[0]["Weltraumbahnhof"] == "TSLC",
+          (_rest_g5, _s_g5.session_state.get("ref_flash_error")))
+    # B2: nach Save/Reset/Remove oeffnet der Dialog wieder den Reiter Launch Archive
+    check("B2 Save: Merker fuer den Archiv-Reiter gesetzt", _s_g5.session_state.get("ref_reiter_archiv") is True,
+          dict(_s_g5.session_state))
+    _k_g2 = app.archive_key(app.archiv_lesen()[lambda d: d["NOTAM"] == _JSLC["NOTAM"]].iloc[0].to_dict())
+    _kurz_g2 = app.hashlib.sha1(_k_g2.encode()).hexdigest()[:10]
+    _s_g6 = _StG(klick={"rm_arc_{}".format(_kurz_g2)}, suche="alsat")
+    app.st = _s_g6
+    _e_g6 = _zeichne_u(_s_g6)
+    check("B2 Remove: Merker fuer den Archiv-Reiter gesetzt, rerun app",
+          _e_g6 == "app" and _s_g6.session_state.get("ref_reiter_archiv") is True, (_e_g6, dict(_s_g6.session_state)))
+
+    # Dialog: st.tabs bekommt das aktuelle Archiv-Label als default, nur im Lauf nach der Aktion
+    _tabs_g = []
+
+    class _StDG:
+        def __init__(self, zustand):
+            self.session_state = zustand
+            self.aufrufe = []
+
+        def __getattr__(self, name):
+            def _f(*a, **k):
+                self.aufrufe.append(name)
+                if name == "columns":
+                    return [self for _ in range(a[0] if isinstance(a[0], int) else len(a[0]))]
+                if name == "tabs":
+                    _tabs_g.append((list(a[0]), k.get("default")))
+                    return [_cl_g.nullcontext() for _ in a[0]]
+                if name == "container":
+                    return self
+                return None
+            return _f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    _orig_dg = (app._spaceport_editor, app._fir_editor, app._vehicle_editor, app._archive_editor,
+                app._sea_launch_editor, app._export_knopf, app.archive_import_allowed, app.archiv_anzeigen,
+                app._seestarts_anzeigen)
+    try:
+        for _n_g in ("_spaceport_editor", "_fir_editor", "_vehicle_editor", "_archive_editor",
+                     "_sea_launch_editor", "_export_knopf"):
+            setattr(app, _n_g, lambda *a, **k: None)
+        app.archive_import_allowed = lambda: False
+        app.archiv_anzeigen = lambda *a, **k: pd.DataFrame([dict(_JSLC)] * 3)
+        app._seestarts_anzeigen = lambda *a, **k: pd.DataFrame(columns=list(app.SEA_LAUNCH_COLUMNS))
+        _zust_g = {"ref_reiter_archiv": True, "ref_flash": "Archive row edited"}
+        app.st = _StDG(_zust_g)
+        _, _e_d1 = _lauf_s(lambda: app._reference_dialog.__wrapped__(sp, fir, veh))
+        app.st = _StDG(_zust_g)
+        _, _e_d2 = _lauf_s(lambda: app._reference_dialog.__wrapped__(sp, fir, veh))
+        check("B2 Dialog nach Archiv-Aktion: st.tabs default = aktuelles Archiv-Label",
+              _e_d1 is None and len(_tabs_g) == 2 and _tabs_g[0][1] == "Launch Archive (3)", (_e_d1, _tabs_g))
+        check("B2 Dialog im Lauf danach: default wieder None", _e_d2 is None and _tabs_g[-1][1] is None, _tabs_g)
+    finally:
+        (app._spaceport_editor, app._fir_editor, app._vehicle_editor, app._archive_editor, app._sea_launch_editor,
+         app._export_knopf, app.archive_import_allowed, app.archiv_anzeigen, app._seestarts_anzeigen) = _orig_dg
+    # Meldungen in einem stets erzeugten Container (Position von st.tabs bleibt gleich)
+    _s_m = _StDG({})
+    app.st = _s_m
+    app._zeige_dialog_meldungen()
+    _s_m2 = _StDG({"ref_flash": "x", "ref_flash_warning": "y"})
+    app.st = _s_m2
+    app._zeige_dialog_meldungen()
+    check("B2 Meldungen: Container auch ohne Meldung, genau ein Element davor",
+          _s_m.aufrufe == ["container"] and _s_m2.aufrufe[:1] == ["container"], (_s_m.aufrufe, _s_m2.aufrufe))
+    check("B2 Meldungen: Ausgabe steht im with st.container()",
+          "with st.container():" in _ins_g.getsource(app._zeige_dialog_meldungen))
+    _src_dlg_g = _ins_g.getsource(app._reference_dialog)
+    check("B2 Dialog: st.tabs mit default", "st.tabs(titel, default=" in _src_dlg_g)
+    # B3: Knoepfe untereinander in einer breiteren Spalte (kein Umbruch mitten im Wort)
+    _src_ed_g = _ins_g.getsource(app._archive_editor)
+    check("B3 Knopfspalte: Edit und Remove untereinander, nicht in zwei Unterspalten",
+          "knopf.columns(2)" not in _src_ed_g and "knopf.button(\"Edit\"" in _src_ed_g
+          and "knopf.button(\"Remove\"" in _src_ed_g)
+    _s_b3 = _StG(suche="z0")
+    app.st = _s_b3
+    _zeichne_u(_s_b3)
+    _br_g = [list(a[0]) for n, a, k in _s_b3.aufrufe if n == "columns" and not isinstance(a[0], int) and len(a[0]) == 9]
+    check("B3 Knopfspalte mindestens 15 Prozent der Zeilenbreite",
+          bool(_br_g) and _br_g[0][-1] / sum(_br_g[0]) >= 0.15, _br_g[:1])
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_g, _db_orig_g, _lab_orig_g
 
 
 print()

@@ -6164,16 +6164,23 @@ def _zeige_db_meldung() -> None:
 
 
 def _zeige_dialog_meldungen() -> None:
-    """Erfolg, Warnung und Fehler der letzten Dialog-Aktion - entschaerft (Labels enthalten DB-Schluessel)."""
-    flash = st.session_state.pop("ref_flash", None)
-    if flash:
-        st.success(_md_plain(flash))
-    warnung = st.session_state.pop("ref_flash_warning", None)
-    if warnung:
-        st.warning(_md_plain(warnung))
-    fehler = st.session_state.pop("ref_flash_error", None)
-    if fehler:
-        st.error(_md_plain(fehler))
+    """
+    Erfolg, Warnung und Fehler der letzten Dialog-Aktion - entschaerft (Labels enthalten DB-Schluessel).
+
+    Der Container entsteht immer, auch ohne Meldung: so behaelt das folgende
+    st.tabs seine Position, und der Dialog springt nicht auf den ersten Reiter,
+    wenn die Meldung im naechsten Lauf wegfaellt.
+    """
+    with st.container():
+        flash = st.session_state.pop("ref_flash", None)
+        if flash:
+            st.success(_md_plain(flash))
+        warnung = st.session_state.pop("ref_flash_warning", None)
+        if warnung:
+            st.warning(_md_plain(warnung))
+        fehler = st.session_state.pop("ref_flash_error", None)
+        if fehler:
+            st.error(_md_plain(fehler))
 
 
 def _write_reference(
@@ -6476,6 +6483,7 @@ def _ref_dialog_geschlossen() -> None:
     sonst oeffnete main() den Dialog beim naechsten Durchlauf wieder (nola-o25).
     """
     st.session_state["ref_dialog_open"] = False
+    st.session_state.pop(REF_REITER_ARCHIV, None)
 
 
 @st.dialog("Reference Data", width="large", on_dismiss=_ref_dialog_geschlossen)
@@ -6500,7 +6508,9 @@ def _reference_dialog(
     mit_import = archive_import_allowed()
     if mit_import:
         titel.append("Archive Import")
-    reiter = st.tabs(titel)
+    # nach einer Archiv-Aktion (rerun der ganzen App) wieder den Reiter Launch Archive zeigen;
+    # das Label traegt die Zahl, daher das aktuelle Label - nur in diesem einen Lauf
+    reiter = st.tabs(titel, default=titel[3] if st.session_state.pop(REF_REITER_ARCHIV, False) else None)
     with reiter[0]:
         _spaceport_editor(spaceports)
     with reiter[1]:
@@ -7190,6 +7200,21 @@ def _archiv_reset_klick(schluessel: str, spalte: str) -> bool:
     return _archiv_aendern(schluessel, aendern, "Archive field reset to NOLA value")
 
 
+#: Merker: der naechste Lauf des Referenzdialogs oeffnet den Reiter Launch Archive.
+REF_REITER_ARCHIV = "ref_reiter_archiv"
+
+
+def _archiv_neu_zeichnen() -> None:
+    """Nach Save, Reset oder Remove: ganze App neu (Meldung, Undo), Dialog wieder im Archiv-Reiter."""
+    st.session_state[REF_REITER_ARCHIV] = True
+    st.rerun(scope="app")
+
+
+def _archiv_wahl_schluessel(kurz: str) -> str:
+    """Schluessel der im Formular gemerkten Wahl (Platz, Vehicle) einer Zeile."""
+    return "aed_wahl_{}".format(kurz)
+
+
 def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
     """Tabelle des Startarchivs: Blaettern, Marken, Bearbeiten (nur lokal), Entfernen."""
     try:
@@ -7226,7 +7251,8 @@ def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
         st.session_state["archiv_suche_alt"] = suche
     seiten = max(1, -(-len(zeilen) // ARCHIV_SEITE))
     seite = max(0, min(int(st.session_state.get("archiv_seite", 0)), seiten - 1))
-    breiten = (1.5, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 0.9, 1.2)
+    # Knopfspalte breit genug fuer "Remove" ohne Umbruch im Wort (Knoepfe untereinander)
+    breiten = (1.4, 0.95, 0.7, 0.85, 0.95, 1.05, 1.15, 0.85, 1.6)
     _reference_row(("NOTAM", "Datum", "Zeit", "Nation", "Platz", "Vehicle", "Payload", "Orbit", ""),
                    breiten, header=True)
     st.caption("{} of {} launches".format(len(zeilen), len(archiv)))
@@ -7274,14 +7300,15 @@ def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
                      if schluessel in doppelt else None), None, None)
             + tuple(h for _, h in felder) + (None,),
         )
-        links, rechts = knopf.columns(2)
-        if darf and links.button("Edit", key="ed_arc_{}".format(kurz), use_container_width=True):
-            # hoechstens ein Formular offen: neu zeichnen, damit ein frueher offenes verschwindet
+        if darf and knopf.button("Edit", key="ed_arc_{}".format(kurz), use_container_width=True):
+            # hoechstens ein Formular offen: neu zeichnen, damit ein frueher offenes verschwindet;
+            # eine alte, nie gespeicherte Wahl dieser Zeile gilt nicht mehr
             st.session_state["archiv_edit"] = schluessel
+            st.session_state.pop(_archiv_wahl_schluessel(kurz), None)
             st.rerun(scope="fragment")
-        if rechts.button("Remove", key="rm_arc_{}".format(kurz), use_container_width=True):
+        if knopf.button("Remove", key="rm_arc_{}".format(kurz), use_container_width=True):
             _remove_archive_row(schluessel)
-            st.rerun(scope="app")
+            _archiv_neu_zeichnen()
         if darf and offen == schluessel:
             _archiv_formular(dict(r), marken.get(schluessel, {}), spaceports, vehicles, kurz)
     if seiten > 1:
@@ -7304,17 +7331,32 @@ def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataF
         # der aktuelle Wert der Zeile bleibt immer waehlbar
         return list(liste) + ([aktuell] if aktuell not in liste else [])
 
+    # Die Listen fuer Platz und Vehicle werden je Nation umsortiert; damit wechselt Streamlit
+    # die Selectbox (Kennung haengt an den Optionen) und faellt auf index zurueck. Die schon
+    # getroffene Wahl wird deshalb selbst gemerkt und als index weitergegeben.
+    wahl_schluessel = _archiv_wahl_schluessel(kurz)
+    wahl = dict(st.session_state.get(wahl_schluessel) or {})
+
+    def vorwahl(optionen: List[str], spalte: str) -> int:
+        gemerkt = wahl.get(spalte)
+        return optionen.index(gemerkt) if gemerkt in optionen else optionen.index(str(zeile[spalte]))
+
+    def schliessen() -> None:
+        st.session_state.pop("archiv_edit", None)
+        st.session_state.pop(wahl_schluessel, None)
+
     with st.container(border=True):
         nationen = auswahl(TARGET_NATIONS, str(zeile["Nation"]))
         nation = st.selectbox("Nation", nationen, index=nationen.index(str(zeile["Nation"])),
                               format_func=nation_label, key="aed_n_{}".format(kurz))
         erlaubt = archiv_erlaubt(spaceports, vehicles, nation)
         plaetze = auswahl(erlaubt["Weltraumbahnhof"], str(zeile["Weltraumbahnhof"]))
-        platz = st.selectbox("Launch site", plaetze, index=plaetze.index(str(zeile["Weltraumbahnhof"])),
+        platz = st.selectbox("Launch site", plaetze, index=vorwahl(plaetze, "Weltraumbahnhof"),
                              key="aed_p_{}".format(kurz))
         traeger = auswahl(erlaubt["Trägersystem"], str(zeile["Trägersystem"]))
-        vehicle = st.selectbox("Vehicle", traeger, index=traeger.index(str(zeile["Trägersystem"])),
+        vehicle = st.selectbox("Vehicle", traeger, index=vorwahl(traeger, "Trägersystem"),
                                format_func=lambda v: v or VEHICLE_NONE_LABEL, key="aed_v_{}".format(kurz))
+        st.session_state[wahl_schluessel] = {"Weltraumbahnhof": platz, "Trägersystem": vehicle}
         payload = st.text_input("Payload", value=str(zeile["Payload"]), max_chars=max(PAYLOAD_MAX, len(str(zeile["Payload"]))),
                                 key="aed_l_{}".format(kurz))
         st.caption("Inclination {} / azimuth {} - recomputed when the launch site changes.".format(
@@ -7328,17 +7370,17 @@ def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataF
                     "Reset {} to NOLA value ({})".format(archiv_feld_name(spalte), _md_plain(nola or "-")),
                     key="aed_r_{}_{}".format(kurz, hashlib.sha1(spalte.encode()).hexdigest()[:6])):
                 if _archiv_reset_klick(schluessel, spalte):
-                    st.session_state.pop("archiv_edit", None)
-                st.rerun(scope="app")
+                    schliessen()
+                _archiv_neu_zeichnen()
         speichern, abbrechen = st.columns(2)
         if speichern.button("Save", key="aed_s_{}".format(kurz), type="primary", use_container_width=True):
             if _archiv_edit_speichern(schluessel, {"Nation": nation, "Weltraumbahnhof": platz,
                                                    "Trägersystem": vehicle, "Payload": payload,
                                                    "Orbit": orbit}, spaceports, vehicles):
-                st.session_state.pop("archiv_edit", None)
-            st.rerun(scope="app")
+                schliessen()
+            _archiv_neu_zeichnen()
         if abbrechen.button("Cancel", key="aed_c_{}".format(kurz), use_container_width=True):
-            st.session_state.pop("archiv_edit", None)
+            schliessen()
             st.rerun(scope="fragment")
 
 
