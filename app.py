@@ -4896,11 +4896,15 @@ def handwerte_index(handwerte: pd.DataFrame) -> Dict[str, Marken]:
     return index
 
 
-def handwerte_mit(handwerte: pd.DataFrame, schluessel: str, marken: Marken, jetzt: str) -> pd.DataFrame:
+def handwerte_mit(handwerte: pd.DataFrame, schluessel: str, marken: Marken, jetzt: str,
+                  geaendert: Optional[Iterable[str]] = None) -> pd.DataFrame:
     """
-    Tabelle mit den Marken einer Zeile ersetzt. Unveraenderte Marken behalten
-    ihren Zeitpunkt, neue oder geaenderte bekommen `jetzt`.
+    Tabelle mit den Marken einer Zeile ersetzt. `geaendert` nennt die Spalten,
+    deren Wert in dieser Aenderung neu gesetzt wurde: sie bekommen `jetzt` (Zeitpunkt
+    der letzten Handaenderung). Uebrige Marken behalten ihren Zeitpunkt, neue
+    Marken bekommen `jetzt`.
     """
+    geaendert = set(geaendert or ())
     spalten = list(nola_db.FACHTABELLEN["archiv_handwerte"])
     alt = handwerte_index(handwerte).get(schluessel, {})
     zeit = {}
@@ -4911,7 +4915,8 @@ def handwerte_mit(handwerte: pd.DataFrame, schluessel: str, marken: Marken, jetz
         {s: r[s] for s in spalten} for _, r in handwerte.iterrows() if str(r["schluessel"]) != schluessel]
     eigene = [
         {"schluessel": schluessel, "spalte": sp, "nola_wert": nola, "herkunft": herkunft,
-         "geaendert_utc": zeit[sp] if alt.get(sp) == (nola, herkunft) and sp in zeit else jetzt}
+         "geaendert_utc": zeit[sp] if (sp in zeit and sp not in geaendert
+                                       and alt.get(sp) == (nola, herkunft)) else jetzt}
         for sp, (nola, herkunft) in sorted(marken.items())
     ]
     return pd.DataFrame(andere + eigene, columns=spalten)
@@ -4931,7 +4936,7 @@ def payload_bereinigen(text: str) -> str:
     roh = str(text or "").lstrip(" ")
     if roh.startswith(_PAYLOAD_FORMEL) or wert.startswith(_PAYLOAD_FORMEL[:3]):
         raise ArchivEingabeFehler(
-            "Payload must not start with =, +, @, a tab or a line break.")
+            "Payload must not start with =, +, @, a tab or a carriage return.")
     if len(wert) > PAYLOAD_MAX:
         raise ArchivEingabeFehler("Payload is longer than {} characters.".format(PAYLOAD_MAX))
     return wert
@@ -4990,7 +4995,8 @@ def _platz_der_referenz(spaceports: pd.DataFrame, code: str) -> Optional[pd.Seri
         return None
     r = treffer.iloc[0]
     try:
-        float(r["Latitude"]); float(r["Longitude"])
+        if not (math.isfinite(float(r["Latitude"])) and math.isfinite(float(r["Longitude"]))):
+            return None
     except (TypeError, ValueError):
         return None
     return r
@@ -5060,11 +5066,14 @@ def archiv_zeile_bearbeiten(
                 setze("Azimuth", azi, "berechnet")
                 if "Orbit" not in geaendert and marken.get("Orbit", ("", ""))[1] != "hand":
                     setze("Orbit", orbit, "berechnet")
-                if str(port["Land"]) != zeile["Nation"]:
-                    hinweise.append("launch site {} belongs to {}, the nation is {}".format(
-                        zeile["Weltraumbahnhof"], nation_label(str(port["Land"])), nation_label(zeile["Nation"])))
     if "Orbit" in geaendert:
         setze("Orbit", geaendert["Orbit"], "hand")
+    if "Weltraumbahnhof" in geaendert or "Nation" in geaendert:
+        # Platz passt nicht zur Nation: nur ein Hinweis, einmal fuer alle Aenderungen
+        ort = spaceports[spaceports["Kurzel"].astype(str) == zeile["Weltraumbahnhof"]]
+        if not ort.empty and str(ort.iloc[0]["Land"]) != zeile["Nation"]:
+            hinweise.append("launch site {} belongs to {}, the nation is {}".format(
+                zeile["Weltraumbahnhof"], nation_label(str(ort.iloc[0]["Land"])), nation_label(zeile["Nation"])))
     return zeile, marken, hinweise
 
 

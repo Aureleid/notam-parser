@@ -6980,7 +6980,9 @@ for _z in (_HAIN, _TSLC, _JSLC):
     check("Selbstprobe {}: Inklination und Azimuth +-1 Grad".format(_z["Weltraumbahnhof"]),
           abs(float(_i) - float(_z["Inklination"])) <= 1 and abs(float(_a) - float(_z["Azimuth"])) <= 1
           and _o == _z["Orbit"] and _hin == "", (_i, _a, _o, _hin))
-check("bahn_aus_platz: eine Nachkommastelle", re.fullmatch(r"\d+\.\d", _i) is not None, _i)
+_i1, _a1, _o1, _h1x = app.bahn_aus_platz(*_platz_h("HAIN"), _HAIN["Dropzones"])
+check("bahn_aus_platz: eine Nachkommastelle",
+      re.fullmatch(r"\d+\.\d", _i1) is not None and re.fullmatch(r"\d+\.\d", _a1) is not None, (_i1, _a1))
 check("bahn_aus_platz: keine Dropzones -> leer + Hinweis",
       app.bahn_aus_platz(19.6, 110.9, "") == ("", "", "-", "no drop zones to compute the orbit from"))
 check("bahn_aus_platz: Zone auf dem Platz -> leer + Hinweis",
@@ -6990,7 +6992,10 @@ _erl_h = app.archiv_erlaubt(_sp_h, _ve_h, "China")
 check("erlaubt: Orbit-Liste", list(_erl_h["Orbit"]) == list(app.ORBIT_AUSWAHL))
 check("erlaubt: Trennzeile nicht waehlbar", app.VEHICLE_SEPARATOR not in _erl_h["Trägersystem"]
       and app.VEHICLE_NONE in _erl_h["Trägersystem"])
-check("erlaubt: chinesische Plaetze zuerst", _erl_h["Weltraumbahnhof"][0] in {"JSLC", "TSLC", "XSLC", "WSLC", "HIIS", "HYOS", "HAIN"})
+_cn_h = [str(c) for c, l in zip(_sp_h["Kurzel"], _sp_h["Land"]) if l == "China"]
+_pl_h = list(_erl_h["Weltraumbahnhof"])
+check("erlaubt: chinesische Plaetze zuerst",
+      _pl_h[:len(_cn_h)] and set(_pl_h[:len(_cn_h)]) == set(_cn_h), _pl_h[:len(_cn_h) + 1])
 
 # Payload
 check("Payload: Zeilenumbruch -> Leerzeichen", app.payload_bereinigen(" a\nb ") == "a b")
@@ -7064,6 +7069,51 @@ _dup = dict(_HAIN, NOTAM="B0200/26")
 _ar_d = _pd_h.DataFrame([_HAIN, _dup, _TSLC, dict(_TSLC, Startdatum="26.03.2026", NOTAM="B0200/26")])
 check("Ueberschneidung: genau die beiden Zeilen desselben Datums",
       app.ueberschneidende_schluessel(_ar_d) == {app.archive_key(_HAIN), app.archive_key(_dup)})
+
+# Fix-Runde 1
+for _bad in ("\rx", " =x", "\n=x"):
+    try:
+        app.payload_bereinigen(_bad); check("Payload abgelehnt (R1): {!r}".format(_bad), False)
+    except app.ArchivEingabeFehler:
+        check("Payload abgelehnt (R1): {!r}".format(_bad), True)
+check("Payload: genau 200 Zeichen erlaubt", app.payload_bereinigen("x" * 200) == "x" * 200)
+try:
+    app.payload_bereinigen("=x")
+except app.ArchivEingabeFehler as _e_h:
+    check("Payload-Meldung nennt carriage return", "carriage return" in str(_e_h) and "line break" not in str(_e_h), str(_e_h))
+_zz, _mz, _hz = app.archiv_zeile_bearbeiten(
+    dict(_HAIN, Dropzones="{:.4f} {:.4f}; 7.6 120.6".format(*_platz_h("WSLC"))), {"Weltraumbahnhof": "WSLC"}, {}, _erl_h, _sp_h)
+check("Zone auf dem Platz ueber Bearbeiten: Hinweis, Bahn leer",
+      "zone on the launch site" in _hz and _zz["Inklination"] == "" and _zz["Azimuth"] == "", (_hz, _zz["Inklination"]))
+# F1: NaN-Koordinaten
+_sp_nan = _pd_h.concat([_sp_h, _sp_h[_sp_h["Kurzel"] == "HAIN"].assign(Kurzel="NOC", Latitude=float("nan"),
+                                                                       Longitude=float("nan"))], ignore_index=True)
+_zn, _mn, _hn = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "NOC"}, {},
+                                            app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+check("NaN-Koordinaten: Bahn unveraendert, Hinweis, keine berechnet-Marken",
+      _zn["Inklination"] == _JSLC["Inklination"] and _zn["Azimuth"] == _JSLC["Azimuth"]
+      and any("no coordinates" in h for h in _hn) and not any(v[1] == "berechnet" for v in _mn.values()), (_zn, _mn, _hn))
+# F2: geaendert_utc = Zeitpunkt der letzten Handaenderung
+_leer_h = _pd_h.DataFrame(columns=list(app.nola_db.FACHTABELLEN["archiv_handwerte"]))
+_mp = {"Payload": ("Alt", "hand")}
+_t1 = app.handwerte_mit(_leer_h, _k, _mp, "T1")
+_t2 = app.handwerte_mit(_t1, _k, _mp, "T2", geaendert={"Payload"})
+check("geaendert_utc: geaenderte Marke bekommt den neuen Zeitpunkt", list(_t2["geaendert_utc"]) == ["T2"], _t2.to_dict("records"))
+_t3 = app.handwerte_mit(_t1, _k, _mp, "T2")
+check("geaendert_utc: ohne geaendert bleibt der Zeitpunkt", list(_t3["geaendert_utc"]) == ["T1"], _t3.to_dict("records"))
+_t4 = app.handwerte_mit(_t1, _k, dict(_mp, Orbit=("SSO", "hand")), "T2", geaendert={"Orbit"})
+check("geaendert_utc: neue Marke jetzt, andere behalten",
+      dict(zip(_t4["spalte"], _t4["geaendert_utc"])) == {"Payload": "T1", "Orbit": "T2"}, _t4.to_dict("records"))
+_t5 = app.handwerte_mit(_t1, _k, dict(_mp, Orbit=("SSO", "hand")), "T2")
+check("geaendert_utc: neue Marke ohne geaendert bekommt jetzt",
+      dict(zip(_t5["spalte"], _t5["geaendert_utc"])) == {"Payload": "T1", "Orbit": "T2"}, _t5.to_dict("records"))
+# F3: Nur Nation geaendert
+_, _, _hn1 = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Nation": "Russland"}, {}, app.archiv_erlaubt(_sp_h, _ve_h, "China"), _sp_h)
+check("nur Nation geaendert: Hinweis bei unpassendem Platz", len([h for h in _hn1 if "nation" in h]) == 1, _hn1)
+_, _, _hn2 = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Nation": "China", "Payload": "x"}, {}, _erl_h, _sp_h)
+check("Nation passt: kein Nationshinweis", not any("nation" in h for h in _hn2), _hn2)
+_, _, _hn3 = app.archiv_zeile_bearbeiten(dict(_HAIN), {"Weltraumbahnhof": "KSS"}, {}, _erl_h, _sp_h)
+check("Platzwechsel + Nation: Nationshinweis nur einmal", len([h for h in _hn3 if "nation" in h]) == 1, _hn3)
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")
