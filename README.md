@@ -35,7 +35,7 @@ Seitenleiste darauf hin (siehe [Persistenz](#persistenz)).
 | `requirements.txt` | Abhängigkeiten |
 | `notam_workspace.json` | Früherer Arbeitsstand (manuelle NOTAMs, Entscheidungen) — nur noch Quelle für den Umzug |
 
-Die drei Referenz-CSVs, `startarchiv_updated.csv`, `seestarts_updated.csv`,
+Die drei Referenz-CSVs, `startarchiv_updated.csv`, `archiv_handwerte.csv`, `seestarts_updated.csv`,
 `archiv_korpus.json` und `archiv_import.json` sind seit der lokalen Datenbank nur noch die
 **Ausgangsdaten des Umzugs** und das Format des Exports; NOLA liest und schreibt sie im
 Betrieb nicht mehr (Ausnahme: die öffentliche Fassung liest die drei Referenz-CSVs aus dem
@@ -64,7 +64,7 @@ Verbindung, schreibt in einer Transaktion und schließt sie wieder.
 |---|---|---|
 | `startplaetze`, `firs`, `traegersysteme` | die drei Referenzen, Spalten wie in den CSVs | `*_updated.csv` |
 | `startarchiv` | eine Zeile je Start | `startarchiv_updated.csv` |
-| `archiv_handwerte` | Markierungen für von Hand gesetzte oder neu berechnete Felder einer Archivzeile | — |
+| `archiv_handwerte` | Markierungen für von Hand gesetzte oder neu berechnete Felder einer Archivzeile | `archiv_handwerte.csv` (fehlt sie, etwa in älteren Exporten, bleibt die Tabelle leer) |
 | `seestarts` | Seestart-Protokoll | `seestarts_updated.csv` |
 | `manuelle_notams` | eingefügte NOTAMs mit fester `id` | `notam_workspace.json` |
 | `entscheidungen` | bestätigt, ausgeblendet, abgelehnt, wiederhergestellt, aus Archiv/Protokoll entfernt | `notam_workspace.json` |
@@ -599,8 +599,17 @@ Markierungen weg, und *Undo* im Archiv bringt Zeile und Markierungen gemeinsam z
 **Wechselt der Startplatz**, rechnet NOLA Inklination, Azimut und Orbitklasse aus dem neuen
 Platz und den gespeicherten Dropzones neu. Diese Werte sind dann als *berechnet* markiert,
 damit der Tageslauf sie nicht mit den Werten des alten Platzes überschreibt. Ein im selben
-Formular von Hand gesetzter Orbit bleibt. Kehrt man zum Wert zurück, den NOLA selbst hatte,
+Formular von Hand gesetzter Orbit bleibt. Lässt sich vom neuen Platz aus nichts rechnen
+(keine brauchbaren Dropzones, Platz ohne Koordinaten in der Referenz), bleiben Inklination und
+Azimut leer und der Orbit steht auf `-` – ebenfalls als *berechnet* markiert; der Reset des
+Startplatzes holt die alten Werte zurück. Kehrt man zum Wert zurück, den NOLA selbst hatte,
 verschwindet die Markierung.
+
+**Save** schreibt nur die Felder, die man im Formular geändert hat. Hat inzwischen ein anderer
+Tab, der Tageslauf oder ein Import genau eines dieser Felder geändert, meldet NOLA einen Konflikt,
+schreibt nichts und baut das Formular mit dem neuen Stand auf; Änderungen an anderen Feldern
+bleiben stehen. Ein Payload darf nicht mit `=`, `+`, `@`, `-`, Tab oder CR beginnen (Schutz vor
+Formeln beim Öffnen des Exports in Excel); genau `-` ist erlaubt.
 
 **Marken in der Tabelle** (Material-Symbole):
 

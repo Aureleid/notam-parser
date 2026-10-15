@@ -7099,9 +7099,11 @@ _sp_nan = _pd_h.concat([_sp_h, _sp_h[_sp_h["Kurzel"] == "HAIN"].assign(Kurzel="N
                                                                        Longitude=float("nan"))], ignore_index=True)
 _zn, _mn, _hn = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "NOC"}, {},
                                             app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
-check("NaN-Koordinaten: Bahn unveraendert, Hinweis, keine berechnet-Marken",
-      _zn["Inklination"] == _JSLC["Inklination"] and _zn["Azimuth"] == _JSLC["Azimuth"]
-      and any("no coordinates" in h for h in _hn) and not any(v[1] == "berechnet" for v in _mn.values()), (_zn, _mn, _hn))
+# Abschlussreview M5: Bahn unbekannt wie ohne Dropzones (leer, Orbit "-", berechnet), nicht stehen lassen
+check("NaN-Koordinaten: Bahn leer, Orbit '-', berechnet markiert, Hinweis",
+      _zn["Inklination"] == "" and _zn["Azimuth"] == "" and _zn["Orbit"] == "-"
+      and any("no coordinates" in h for h in _hn)
+      and all(_mn.get(s, ("", ""))[1] == "berechnet" for s in ("Inklination", "Azimuth", "Orbit")), (_zn, _mn, _hn))
 # F2: geaendert_utc = Zeitpunkt der letzten Handaenderung
 _leer_h = _pd_h.DataFrame(columns=list(app.nola_db.FACHTABELLEN["archiv_handwerte"]))
 _mp = {"Payload": ("Alt", "hand")}
@@ -7817,6 +7819,138 @@ try:
           bool(_br_g) and _br_g[0][-1] / sum(_br_g[0]) >= 0.15, _br_g[:1])
 finally:
     app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_g, _db_orig_g, _lab_orig_g
+
+
+print("== Archiv von Hand bearbeiten: Abschlussreview ==")
+# M6: '-' am Anfang nur, wenn der ganze Wert genau '-' ist
+check("M6 Payload: genau '-' erlaubt", app.payload_bereinigen(" - ") == "-")
+for _bad in ("-1+2", "-x", " -x", "--"):
+    try:
+        app.payload_bereinigen(_bad); check("M6 Payload abgelehnt: {!r}".format(_bad), False)
+    except app.ArchivEingabeFehler as _e_m6:
+        check("M6 Payload abgelehnt: {!r}".format(_bad), "-" in str(_e_m6), str(_e_m6))
+check("M6 Payload: '-' mitten im Wert erlaubt", app.payload_bereinigen("Yaogan-50") == "Yaogan-50")
+# M5: Wechsel auf einen Platz ohne Koordinaten - Bahn unbekannt wie ohne Dropzones
+_z_m5a, _m_m5a, _ = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "TSLC"}, {},
+                                                app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+_z_m5, _m_m5, _h_m5 = app.archiv_zeile_bearbeiten(_z_m5a, {"Weltraumbahnhof": "NOC"}, _m_m5a,
+                                                  app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+check("M5 A->B->C ohne Koordinaten: Bahn leer, Orbit '-', berechnet markiert (NOLA-Werte von A), Hinweis",
+      _z_m5["Inklination"] == "" and _z_m5["Azimuth"] == "" and _z_m5["Orbit"] == "-"
+      and _m_m5.get("Inklination") == (_JSLC["Inklination"], "berechnet")
+      and _m_m5.get("Azimuth") == (_JSLC["Azimuth"], "berechnet")
+      and _m_m5.get("Orbit") == (_JSLC["Orbit"], "berechnet")
+      and _m_m5.get("Weltraumbahnhof") == ("JSLC", "hand")
+      and any("no coordinates" in h for h in _h_m5), (_z_m5, _m_m5, _h_m5))
+_z_m5h, _m_m5h, _ = app.archiv_zeile_bearbeiten(
+    dict(_JSLC), {"Weltraumbahnhof": "TSLC", "Orbit": "GTO"}, {}, app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+_z_m5h, _m_m5h, _ = app.archiv_zeile_bearbeiten(_z_m5h, {"Weltraumbahnhof": "NOC"}, _m_m5h,
+                                                app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+check("M5 ohne Koordinaten: Hand-Orbit bleibt", _z_m5h["Orbit"] == "GTO" and _m_m5h["Orbit"] == ("SSO", "hand")
+      and _z_m5h["Inklination"] == "", (_z_m5h, _m_m5h))
+_z_m5r, _m_m5r = app.archiv_feld_zuruecksetzen(_z_m5, _m_m5, "Weltraumbahnhof")
+check("M5 Reset des Platzes stellt die Bahn wieder her",
+      _m_m5r == {} and all(_z_m5r[s] == _JSLC[s] for s in ("Weltraumbahnhof", "Inklination", "Azimuth", "Orbit")),
+      (_z_m5r, _m_m5r))
+
+# I1: veraltetes Formular
+_st_orig_i, _db_orig_i, _lab_orig_i = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _sp_i, _ve_i = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _I1 = dict(_TSLC, **{"Trägersystem": ""})
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_I1)], set()), _h, _a, _h)
+    _k_i = app.archive_key(_I1)
+    _kurz_i = app.hashlib.sha1(_k_i.encode()).hexdigest()[:10]
+
+    def _zeile_i():
+        return app.archiv_lesen()[lambda d: d["NOTAM"] == _I1["NOTAM"]].iloc[0]
+
+    def _fremd_i(**werte):
+        # anderer Schreiber (anderer Tab, Tageslauf) aendert die Zeile
+        _x, _y = app.archiv_mit_handwerten_lesen()
+        _pos = [i for i, (_, r) in enumerate(_x.iterrows()) if app.archive_key(dict(r)) == _k_i][0]
+        _n = _x.copy()
+        for _sp, _w in werte.items():
+            _n.iat[_pos, _n.columns.get_loc(_sp)] = _w
+        app.archiv_und_handwerte_schreiben(_n, _y, _x, _y)
+
+    _form_i = {f: _I1[f] for f in app.ARCHIV_EDIT_FELDER}
+    # (a) direkt: nur Orbit geaendert, Traegersystem inzwischen fremd gesetzt
+    app.st = _StR()
+    _fremd_i(**{"Trägersystem": "CZ-2D"})
+    _ok_i = app._archiv_edit_speichern(_k_i, dict(_form_i, Orbit="GTO"), _sp_i, _ve_i, angezeigt=dict(_form_i))
+    _r_i = _zeile_i()
+    _mk_i = app.handwerte_index(app.archiv_mit_handwerten_lesen()[1]).get(_k_i, {})
+    check("I1a veraltetes Formular: fremdes Traegersystem bleibt, keine Marke dafuer, Orbit geschrieben",
+          _ok_i is True and _r_i["Trägersystem"] == "CZ-2D" and _r_i["Orbit"] == "GTO"
+          and "Trägersystem" not in _mk_i and _mk_i.get("Orbit") == ("SSO", "hand"), (_ok_i, dict(_r_i), _mk_i))
+    # (c) unveraenderte Felder werden nicht gesendet
+    _gesehen_i = []
+    _orig_bearb_i = app.archiv_zeile_bearbeiten
+    def _merke_i(zeile, neu, *a, **k):
+        _gesehen_i.append(dict(neu))
+        return _orig_bearb_i(zeile, neu, *a, **k)
+    app.archiv_zeile_bearbeiten = _merke_i
+    try:
+        _anz_c = {f: str(_zeile_i()[f]) for f in app.ARCHIV_EDIT_FELDER}
+        app._archiv_edit_speichern(_k_i, dict(_anz_c, Payload="Neu-C"), _sp_i, _ve_i, angezeigt=dict(_anz_c))
+    finally:
+        app.archiv_zeile_bearbeiten = _orig_bearb_i
+    check("I1c nur geaenderte Felder gesendet", _gesehen_i == [{"Payload": "Neu-C"}], _gesehen_i)
+    # (b) fremder Schreiber aendert genau das Feld des Benutzers -> Konflikt, nichts geschrieben
+    _anz_b = {f: str(_zeile_i()[f]) for f in app.ARCHIV_EDIT_FELDER}
+    _fremd_i(Payload="Fremd-B")
+    _stand_b = app.archiv_mit_handwerten_lesen()
+    app.st = _StR()
+    _ok_b = app._archiv_edit_speichern(_k_i, dict(_anz_b, Payload="Mein-B"), _sp_i, _ve_i, angezeigt=dict(_anz_b))
+    _stand_b2 = app.archiv_mit_handwerten_lesen()
+    check("I1b gleiches Feld fremd geaendert: Konflikt, nichts geschrieben",
+          _ok_b is False and app.st.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT
+          and _stand_b2[0].attrs["nola_stand"] == _stand_b[0].attrs["nola_stand"]
+          and _stand_b2[1].attrs["nola_stand"] == _stand_b[1].attrs["nola_stand"]
+          and _zeile_i()["Payload"] == "Fremd-B", (_ok_b, app.st.session_state))
+    # Oberflaeche: Grundlage ist die Zeile, gegen die das Formular gezeichnet wurde
+    _s_i1 = _StG(suche=_I1["NOTAM"][:5].lower())
+    _s_i1.session_state["archiv_edit"] = _k_i
+    app.st = _s_i1
+    _zeichne_u(_s_i1)
+    _gez_i = {f: str(_zeile_i()[f]) for f in app.ARCHIV_EDIT_FELDER}
+    _fremd_i(**{"Trägersystem": "CZ-4C"})
+    _s_i2 = _StG(klick={"aed_s_" + _kurz_i}, wahl={"aed_o_": "RETRO"}, suche=_I1["NOTAM"][:5].lower())
+    _s_i2.session_state.update(_s_i1.session_state)
+    app.st = _s_i2
+    _zeichne_u(_s_i2)
+    _r_i2 = _zeile_i()
+    _mk_i2 = app.handwerte_index(app.archiv_mit_handwerten_lesen()[1]).get(_k_i, {})
+    check("I1 Formular: nach fremder Aenderung nur der geaenderte Orbit geschrieben",
+          _r_i2["Trägersystem"] == "CZ-4C" and _r_i2["Orbit"] == "RETRO" and "Trägersystem" not in _mk_i2
+          and _r_i2["Payload"] == _gez_i["Payload"], (dict(_r_i2), _mk_i2, _s_i2.session_state.get("ref_flash_error")))
+    # Konflikt im Formular: Formular wird gegen die frische Zeile neu aufgebaut
+    _s_i3 = _StG(suche=_I1["NOTAM"][:5].lower())
+    _s_i3.session_state["archiv_edit"] = _k_i
+    app.st = _s_i3
+    _zeichne_u(_s_i3)
+    _fremd_i(Orbit="GTO")
+    _s_i4 = _StG(klick={"aed_s_" + _kurz_i}, wahl={"aed_o_": "SSO"}, suche=_I1["NOTAM"][:5].lower())
+    _s_i4.session_state.update(_s_i3.session_state)
+    app.st = _s_i4
+    _zeichne_u(_s_i4)
+    check("I1 Formular-Konflikt: Meldung, nichts geschrieben, Formular offen, gemerkte Wahl verworfen",
+          _s_i4.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT and _zeile_i()["Orbit"] == "GTO"
+          and _s_i4.session_state.get("archiv_edit") == _k_i
+          and app._archiv_wahl_schluessel(_kurz_i) not in _s_i4.session_state,
+          (_zeile_i()["Orbit"], dict(_s_i4.session_state)))
+    _s_i5 = _StG(suche=_I1["NOTAM"][:5].lower())
+    _s_i5.session_state.update(_s_i4.session_state)
+    app.st = _s_i5
+    _zeichne_u(_s_i5)
+    _opt_o, _idx_o = _sb_g(_s_i5, "aed_o_")
+    check("I1 nach Konflikt: Formular zeigt die frische Zeile", _opt_o[_idx_o] == "GTO", _opt_o[_idx_o])
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_i, _db_orig_i, _lab_orig_i
 
 
 print()

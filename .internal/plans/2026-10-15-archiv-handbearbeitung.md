@@ -18,7 +18,7 @@
 - TDD: erst der fehlschlagende `check()`, dann der Code.
 - Erlaubte Handwert-Spalten (CHECK): `Nation`, `Weltraumbahnhof`, `Trägersystem`, `Payload`, `Orbit`, `Inklination`, `Azimuth`. Herkunft (CHECK): `hand`, `berechnet`.
 - Orbit-Auswahl: `SSO`, `HIGH-INC`, `LEO/MEO`, `GTO`, `RETRO`, `-`.
-- Payload: höchstens 200 Zeichen, Zeilenumbrüche → Leerzeichen; Anfang `=`, `+`, `@`, Tab oder CR → abgelehnt; `-` erlaubt.
+- Payload: höchstens 200 Zeichen, Zeilenumbrüche → Leerzeichen; Anfang `=`, `+`, `@`, `-`, Tab oder CR → abgelehnt; genau `-` bleibt erlaubt.
 - Bahnwerte mit einer Nachkommastelle (`"96.8"`).
 - Edit/Reset nur bei `local_admin_allowed()` (fail-closed), geprüft in der Oberfläche **und** in der Schreibfunktion.
 - Schema-Version 2, Sicherung `…-vor-schema-2.db` vorher (vorhandener Mechanismus in `nola_umzug.stelle_bereit`).

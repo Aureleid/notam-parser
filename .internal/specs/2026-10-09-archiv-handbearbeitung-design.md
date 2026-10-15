@@ -93,11 +93,17 @@ Platz- und Vehicle-Liste der gewählten Nation sofort folgen; geschrieben wird e
 | Nation | Auswahl | `TARGET_NATIONS`, angezeigt über `NATION_LABELS`, gespeichert deutsch wie im Archiv |
 | Platz | Auswahl | alle `Kurzel` der Startplatz-Referenz, Plätze der gewählten Nation zuerst |
 | Vehicle | Auswahl | Trägersysteme der gewählten Nation zuerst, darunter die übrigen (wie `vehicle_options`), dazu „none“ (= leer); die Trennzeile ist nicht speicherbar |
-| Payload | Text | höchstens 200 Zeichen, Zeilenumbrüche werden zu Leerzeichen; beginnt der Wert mit `=`, `+`, `@`, Tab oder CR, wird er abgelehnt (Formel-Einschleusung beim Öffnen des Exports in Excel); `-` bleibt erlaubt |
+| Payload | Text | höchstens 200 Zeichen, Zeilenumbrüche werden zu Leerzeichen; beginnt der Wert mit `=`, `+`, `@`, Tab oder CR, wird er abgelehnt (Formel-Einschleusung beim Öffnen des Exports in Excel); `-` am Anfang ebenso (Excel liest `-1+2` als Formel) – nur genau `-` bleibt erlaubt |
 | Orbit | Auswahl | `SSO`, `HIGH-INC`, `LEO/MEO`, `GTO`, `RETRO`, `-` |
 
 **Speichern:**
-- Nur geänderte Felder werden geschrieben und markiert. Beim ersten Markieren eines Feldes wird der
+- Nur geänderte Felder werden geschrieben und markiert. „Geändert“ heißt: im Formular gegenüber der
+  **angezeigten** Zeile geändert – Grundlage ist die Zeile, gegen die das Formular gezeichnet wurde (auch
+  für die nach X/Escape gemerkte Wahl). Unveränderte Felder werden nicht gesendet. Hat ein anderer
+  Schreiber (Tab, Tageslauf, Import) eines der geänderten Felder seit dem Zeichnen geändert →
+  Konfliktmeldung (`KONFLIKT_TEXT`) im Dialog, nichts geschrieben, das Formular baut sich gegen die
+  frische Zeile neu auf. Fremde Änderungen an anderen Feldern bleiben stehen und werden nicht markiert.
+- Beim ersten Markieren eines Feldes wird der
   bisherige Wert als `nola_wert` gemerkt; ist das Feld schon markiert, bleibt der gemerkte NOLA-Wert.
 - Bekannte Grenze: Wählt der Benutzer nach einem Platzwechsel bewusst den ursprünglichen Orbit, entfällt dessen
   Markierung (Regel unten); ein späterer Platzwechsel berechnet den Orbit dann neu.
@@ -119,8 +125,12 @@ Platz- und Vehicle-Liste der gewählten Nation sofort folgen; geschrieben wird e
 - Inklination, Azimuth und Orbit werden als `berechnet` markiert, der Platz als `hand`.
 - Ein im selben Formular von Hand gewählter Orbit hat Vorrang vor dem berechneten und wird `hand`.
 - Keine Dropzones, keine gültigen Koordinaten oder eine Zone < 1 km vom Platz → Inklination/Azimuth
-  leer, Hinweis im Dialog („no drop zones to compute the orbit from“ bzw. „zone on the launch site“).
-- Der Platz muss Koordinaten in der Referenz haben, sonst keine Neuberechnung (Hinweis).
+  leer, Orbit `-` (außer Hand-Orbit), als `berechnet` markiert – die Bahn ist vom neuen Platz aus
+  unbekannt, der Reset des Platzes stellt die NOLA-Werte zurück; Hinweis im Dialog („no drop zones to
+  compute the orbit from“ bzw. „zone on the launch site“).
+- Hat der neue Platz keine Koordinaten in der Referenz, wird nicht gerechnet und genauso verfahren:
+  Inklination/Azimuth leer, Orbit `-` (außer Hand-Orbit), `berechnet`, Hinweis („launch site has no
+  coordinates in the reference“). Werte eines vorher gewählten Platzes bleiben nicht stehen.
 - Format wie im Archiv: eine Nachkommastelle (`"96.8"`).
 - Dasselbe Verfahren wie die Pipeline (`app.py`, Gruppen-Azimut = Kreismittel aller Zonen-Azimute).
 - Bekannte Näherung: Die Pipeline rechnet über Zonen-Mittelpunkte je NOTAM, das Archiv speichert
@@ -163,13 +173,16 @@ Next ▶“; die Suche filtert vor dem Blättern, die Seite steht in `session_st
 - Selbstprobe: jede Archivzeile am **eigenen** Platz neu berechnet ergibt die gespeicherte
   Inklination/Azimuth (±1°).
 - Zurück auf den NOLA-Wert entfernt die Markierung.
-- Platzwechsel: bekannter Start (z. B. Hainan → HAIN statt WSLC; Yaogan-50 auf TSLC) ergibt eine
-  plausible Inklination (Toleranz ±3° zum Pipeline-Wert am gleichen Platz); ohne Dropzones leer;
-  von Hand gesetzter Orbit bleibt.
+- Platzwechsel: Selbstprobe an drei Archivzeilen (HAIN, TSLC, JSLC) am eigenen Platz ±1°; HAIN → WSLC
+  ergibt dieselbe Inklination ±1° (nur der Platz markiert); JSLC → TSLC ergibt eine andere Bahn, als
+  `berechnet` markiert; ohne Dropzones bzw. Platz ohne Koordinaten leer und Orbit `-`; von Hand
+  gesetzter Orbit bleibt.
 - Reset stellt Wert(e) und Markierung zurück, auch die Bahnwerte nach Platzwechsel; ein von Hand
   gesetzter Orbit bleibt beim Reset des Platzes.
 - Nach Platzwechsel überlebt der neu berechnete Orbit einen Tageslauf.
 - Konflikt (fremde Änderung an Archiv oder Markierungen) → nichts geschrieben, Meldung im Dialog.
+- Veraltetes Formular: fremde Änderung an einem anderen Feld bleibt stehen und unmarkiert; fremde
+  Änderung am selben Feld → Konflikt; unveränderte Felder werden nicht gesendet.
 - Undo nimmt Wert und Markierung zurück.
 - Entfernen löscht Markierungen mit.
 - Blättern: alle Zeilen erreichbar, Suche filtert vor dem Blättern, Sortierung nach Datum.
