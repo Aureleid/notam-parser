@@ -4879,6 +4879,17 @@ BAHN_SPALTEN = ("Inklination", "Azimuth", "Orbit")
 #: Auswahl fuer das Orbit-Feld - die Kurzformen des Archivs.
 ORBIT_AUSWAHL = ("SSO", "HIGH-INC", "LEO/MEO", "GTO", "RETRO", "-")
 PAYLOAD_MAX = 200
+#: Englische Anzeigenamen der Archivspalten fuer die Oberflaeche.
+ARCHIV_FELD_NAME = {
+    "Nation": "nation", "Weltraumbahnhof": "launch site", "Trägersystem": "vehicle",
+    "Payload": "payload", "Orbit": "orbit", "Inklination": "inclination", "Azimuth": "azimuth",
+}
+
+
+def archiv_feld_name(spalte: str) -> str:
+    """Anzeigename einer Archivspalte (englisch); unbekannte Namen bleiben."""
+    return ARCHIV_FELD_NAME.get(spalte, spalte)
+
 #: Anfaenge, die Excel beim Oeffnen der Export-CSV als Formel liest.
 _PAYLOAD_FORMEL = ("=", "+", "@", "\t", "\r")
 #: Unterhalb dieser Entfernung liegt eine Zone auf dem Platz - keine Richtung ableitbar.
@@ -5027,13 +5038,13 @@ def archiv_zeile_bearbeiten(
     werte: Dict[str, str] = {}
     for feld, wert in neu.items():
         if feld not in ARCHIV_EDIT_FELDER:
-            raise ArchivEingabeFehler("{} cannot be edited.".format(feld))
+            raise ArchivEingabeFehler("{} cannot be edited.".format(archiv_feld_name(feld)))
         wert = str(wert if wert is not None else "")
         if feld == "Payload":
             if wert != zeile["Payload"]:
                 wert = payload_bereinigen(wert)
         elif wert != zeile[feld] and wert not in erlaubt.get(feld, ()):
-            raise ArchivEingabeFehler("{} is not an allowed value for {}.".format(wert, feld))
+            raise ArchivEingabeFehler("{} is not an allowed value for {}.".format(wert, archiv_feld_name(feld)))
         werte[feld] = wert
     geaendert = {f: w for f, w in werte.items() if w != zeile[f]}
     marken = dict(marken)
@@ -7168,7 +7179,7 @@ def _archiv_edit_speichern(
     def aendern(zeile: Dict[str, str], marken: Marken) -> Tuple[Dict[str, str], Marken, List[str]]:
         erlaubt = archiv_erlaubt(spaceports, vehicles, str(neu.get("Nation", zeile["Nation"])))
         return archiv_zeile_bearbeiten(zeile, neu, marken, erlaubt, spaceports)
-    return _archiv_aendern(schluessel, aendern, "Archivzeile bearbeitet")
+    return _archiv_aendern(schluessel, aendern, "Archive row edited")
 
 
 def _archiv_reset_klick(schluessel: str, spalte: str) -> bool:
@@ -7176,7 +7187,7 @@ def _archiv_reset_klick(schluessel: str, spalte: str) -> bool:
     def aendern(zeile: Dict[str, str], marken: Marken) -> Tuple[Dict[str, str], Marken, List[str]]:
         z, m = archiv_feld_zuruecksetzen(zeile, marken, spalte)
         return z, m, []
-    return _archiv_aendern(schluessel, aendern, "Archivfeld zurueckgesetzt")
+    return _archiv_aendern(schluessel, aendern, "Archive field reset to NOLA value")
 
 
 def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
@@ -7209,6 +7220,10 @@ def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
     zeilen = _archiv_sortiert(archiv)
     if suche:
         zeilen = zeilen[zeilen.apply(lambda r: suche in " ".join(str(v).lower() for v in r), axis=1)]
+    if suche != st.session_state.get("archiv_suche_alt", ""):
+        # neue Suche: wieder von der ersten Seite
+        st.session_state["archiv_seite"] = 0
+        st.session_state["archiv_suche_alt"] = suche
     seiten = max(1, -(-len(zeilen) // ARCHIV_SEITE))
     seite = max(0, min(int(st.session_state.get("archiv_seite", 0)), seiten - 1))
     breiten = (1.5, 1.0, 0.8, 0.9, 1.0, 1.1, 1.2, 0.9, 1.2)
@@ -7226,13 +7241,20 @@ def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
     def bahn_zelle(text: str, schluessel: str) -> Tuple[str, Optional[str]]:
         # Inklination und Azimuth haben keine eigene Spalte: ihre Neuberechnung zeigt die Orbit-Zelle
         eigene = marken.get(schluessel, {})
-        teile = [_md_plain(eigene["Orbit"][0] or "-")] if "Orbit" in eigene else []
-        teile += ["{} {}".format(name, _md_plain(eigene[sp][0] or "-"))
-                  for sp, name in (("Inklination", "inclination"), ("Azimuth", "azimuth")) if sp in eigene]
-        if not teile:
+        werte = ["{} {}".format(name, _md_plain(eigene[sp][0] or "-"))
+                 for sp, name in (("Inklination", "inclination"), ("Azimuth", "azimuth")) if sp in eigene]
+        if "Orbit" not in eigene and not werte:
             return _md_plain(text), None
-        zeichen = ARCHIV_MARKE_HAND if eigene.get("Orbit", ("", ""))[1] == "hand" else ARCHIV_MARKE_BERECHNET
-        return "{} {}".format(_md_plain(text), zeichen), "NOLA: " + ", ".join(teile)
+        von_hand = eigene.get("Orbit", ("", ""))[1] == "hand"
+        if von_hand:
+            # Herkunft je Wert: Orbit von Hand, Inklination/Azimuth aus dem Platz berechnet
+            tip = "NOLA: {} (orbit set by hand)".format(_md_plain(eigene["Orbit"][0] or "-"))
+            if werte:
+                tip += "; " + ", ".join(werte) + " (recomputed from site)"
+        else:
+            tip = "NOLA: " + ", ".join(([_md_plain(eigene["Orbit"][0] or "-")] if "Orbit" in eigene else []) + werte)
+        zeichen = ARCHIV_MARKE_HAND if von_hand else ARCHIV_MARKE_BERECHNET
+        return "{} {}".format(_md_plain(text), zeichen), tip
 
     offen = st.session_state.get("archiv_edit")
     for _, r in zeilen.iloc[seite * ARCHIV_SEITE:(seite + 1) * ARCHIV_SEITE].iterrows():
@@ -7293,7 +7315,7 @@ def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataF
         traeger = auswahl(erlaubt["Trägersystem"], str(zeile["Trägersystem"]))
         vehicle = st.selectbox("Vehicle", traeger, index=traeger.index(str(zeile["Trägersystem"])),
                                format_func=lambda v: v or VEHICLE_NONE_LABEL, key="aed_v_{}".format(kurz))
-        payload = st.text_input("Payload", value=str(zeile["Payload"]), max_chars=PAYLOAD_MAX,
+        payload = st.text_input("Payload", value=str(zeile["Payload"]), max_chars=max(PAYLOAD_MAX, len(str(zeile["Payload"]))),
                                 key="aed_l_{}".format(kurz))
         st.caption("Inclination {} / azimuth {} - recomputed when the launch site changes.".format(
             _md_plain(str(zeile["Inklination"]) or "-"), _md_plain(str(zeile["Azimuth"]) or "-")))
@@ -7303,7 +7325,7 @@ def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataF
         # Reset nur fuer Handwerte; berechnete Werte setzt der Reset des Platzes mit zurueck
         for spalte, (nola, herkunft) in sorted(marken.items()):
             if herkunft == "hand" and st.button(
-                    "Reset {} to NOLA value ({})".format(_md_plain(spalte), _md_plain(nola or "-")),
+                    "Reset {} to NOLA value ({})".format(archiv_feld_name(spalte), _md_plain(nola or "-")),
                     key="aed_r_{}_{}".format(kurz, hashlib.sha1(spalte.encode()).hexdigest()[:6])):
                 if _archiv_reset_klick(schluessel, spalte):
                     st.session_state.pop("archiv_edit", None)

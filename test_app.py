@@ -7546,7 +7546,8 @@ try:
           _sel_u.get("Launch site") == "WSLC" and _sel_u.get("Nation") == "China" and _sel_u.get("Orbit"), _sel_u)
     _reset_u = [a[0] for n, a, k in _s_u7.aufrufe if n == "button" and str(a[0]).startswith("Reset ")]
     check("Formular: Reset nur fuer den Handwert (Platz), nicht fuer berechnete",
-          len(_reset_u) == 1 and "Weltraumbahnhof" in _reset_u[0] and "HAIN" in _reset_u[0], _reset_u)
+          len(_reset_u) == 1 and "launch site" in _reset_u[0] and "Weltraumbahnhof" not in _reset_u[0]
+          and "HAIN" in _reset_u[0], _reset_u)
     check("Formular: kein st.form", not any(n == "form" for n, a, k in _s_u7.aufrufe))
     _s_u8 = _StU(klick={"aed_c_" + _kurz_u}); _s_u8.session_state["archiv_edit"] = _k_u
     check("Formular: Cancel schliesst ohne Schreiben",
@@ -7569,6 +7570,78 @@ try:
           any(n == "markdown" and a[0] == "WSLC " + app.ARCHIV_MARKE_HAND for n, a, k in _s_u10.aufrufe))
 finally:
     app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_u2, _db_orig_u2, _lab_orig_u2
+
+
+print("== Archiv von Hand bearbeiten: Fix-Runde 1 ==")
+_st_orig_f, _db_orig_f, _lab_orig_f = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _sp_f, _ve_f = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    _lang_f = dict(_HAIN, NOTAM="LONG001/26", Startdatum="02.02.2025", Payload="P" * 250)
+    _viele_f = [dict(_HAIN, NOTAM="Z{:04d}/26".format(i), Startdatum="{:02d}.01.2025".format(1 + i % 28))
+                for i in range(120)]
+    app.archiv_und_handwerte_schreiben(
+        app.merge_archive(_a, [dict(_HAIN), dict(_JSLC), _lang_f] + _viele_f, set()), _h, _a, _h)
+    # F1: englische Bezeichnungen
+    _k_f = app.archive_key(_HAIN)
+    app.st = _StR()
+    check("F1 Anzeigenamen: Konstante vorhanden",
+          getattr(app, "ARCHIV_FELD_NAME", {}).get("Weltraumbahnhof") == "launch site"
+          and app.ARCHIV_FELD_NAME.get("Trägersystem") == "vehicle")
+    app._archiv_edit_speichern(_k_f, {"Weltraumbahnhof": "WSLC"}, _sp_f, _ve_f)
+    check("F2 Erfolgsmeldung Save englisch", app.st.session_state.get("ref_flash") == "Archive row edited",
+          app.st.session_state.get("ref_flash"))
+    check("F2 Undo-Label Save", app.st.session_state["ref_undo"][-1].get("label") == "Archive row edited",
+          app.st.session_state["ref_undo"][-1])
+    _s_f1 = _StU(); _s_f1.session_state["archiv_edit"] = _k_f
+    _zeichne_u(_s_f1)
+    _res_f = [a[0] for n, a, k in _s_f1.aufrufe if n == "button" and str(a[0]).startswith("Reset ")]
+    check("F1 Reset-Label: launch site statt Weltraumbahnhof",
+          len(_res_f) == 1 and "launch site" in _res_f[0] and "Weltraumbahnhof" not in _res_f[0], _res_f)
+    try:
+        app.archiv_zeile_bearbeiten({s: "" for s in app.ARCHIVE_COLUMNS}, {"Trägersystem": "Nope"}, {}, {}, _sp_f)
+        _msg_f = ""
+    except app.ArchivEingabeFehler as exc:
+        _msg_f = str(exc)
+    check("F1 Fehlermeldung nennt vehicle, nicht Trägersystem", "vehicle" in _msg_f and "Trägersystem" not in _msg_f, _msg_f)
+    try:
+        app.archiv_zeile_bearbeiten({s: "" for s in app.ARCHIVE_COLUMNS}, {"Inklination": "1"}, {}, {}, _sp_f)
+        _msg_f2 = ""
+    except app.ArchivEingabeFehler as exc:
+        _msg_f2 = str(exc)
+    check("F1 Fehlermeldung nicht editierbar: englischer Name", "inclination" in _msg_f2 and "Inklination" not in _msg_f2, _msg_f2)
+    app.st = _StR()
+    app._archiv_reset_klick(_k_f, "Weltraumbahnhof")
+    check("F2 Erfolgsmeldung Reset englisch",
+          app.st.session_state.get("ref_flash") == "Archive field reset to NOLA value", app.st.session_state.get("ref_flash"))
+    # F3: Tooltip nennt Herkunft je Wert
+    app.st = _StR()
+    app._archiv_edit_speichern(app.archive_key(_JSLC), {"Weltraumbahnhof": "TSLC", "Orbit": "GTO"}, _sp_f, _ve_f)
+    _s_f3 = _StU(suche="alsat")
+    _zeichne_u(_s_f3)
+    _md_f3 = [(a[0], k.get("help")) for n, a, k in _s_f3.aufrufe if n == "markdown"]
+    check("F3 Orbit-Tooltip nennt Hand- und berechnete Herkunft",
+          any(str(t).endswith(app.ARCHIV_MARKE_HAND) and str(h) == "NOLA: SSO (orbit set by hand); inclination 98\\.0, "
+              "azimuth 193\\.2 (recomputed from site)" for t, h in _md_f3), [x for x in _md_f3 if x[1]])
+    # F4: Seite zurueck bei geaenderter Suche
+    _s_f4 = _StU(suche="z0"); _s_f4.session_state["archiv_seite"] = 2
+    _zeichne_u(_s_f4)
+    check("F4 geaenderte Suche -> Seite 1", _s_f4.session_state.get("archiv_seite") == 0
+          and any(n == "caption" and str(a[0]).startswith("Page 1 of") for n, a, k in _s_f4.aufrufe))
+    _s_f4b = _StU(suche="z0"); _s_f4b.session_state["archiv_seite"] = 2; _s_f4b.session_state["archiv_suche_alt"] = "z0"
+    _zeichne_u(_s_f4b)
+    check("F4 gleiche Suche -> Seite bleibt", _s_f4b.session_state.get("archiv_seite") == 2
+          and any(n == "caption" and str(a[0]).startswith("Page 3 of") for n, a, k in _s_f4b.aufrufe))
+    # F5: langer Payload wird nicht abgeschnitten
+    _s_f5 = _StU(suche="long001"); _s_f5.session_state["archiv_edit"] = app.archive_key(_lang_f)
+    _zeichne_u(_s_f5)
+    _ti_f = [k for n, a, k in _s_f5.aufrufe if n == "text_input" and a and a[0] == "Payload"]
+    check("F5 Payload-Feld: max_chars >= Laenge des vorhandenen Payloads",
+          len(_ti_f) == 1 and _ti_f[0].get("max_chars", 0) >= 250 and len(_ti_f[0].get("value", "")) == 250, _ti_f)
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_f, _db_orig_f, _lab_orig_f
 
 
 print()
