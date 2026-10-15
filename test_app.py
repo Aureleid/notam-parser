@@ -3672,9 +3672,9 @@ check("  ... Zustand unveraendert", zf["entscheidungen"] == _vorher, zf["entsche
 check("  ... kein Kandidat entschieden", all(k["entscheidung"] is None for k in ai.candidates(zf, _kein_archiv)))
 _entfernt_args = []
 _merge_orig = app.merge_archive
-def _merge_spion(bestand, neue, entfernt=None):
+def _merge_spion(bestand, neue, entfernt=None, handwerte=None):
     _entfernt_args.append(entfernt)
-    return _merge_orig(bestand, neue, entfernt=entfernt)
+    return _merge_orig(bestand, neue, entfernt=entfernt, handwerte=handwerte)
 archiv_f = _temp_db()
 app.merge_archive = _merge_spion
 try:
@@ -3684,7 +3684,7 @@ finally:
 check("Bestaetigen uebergibt merge_archive kein archiv_removed", _entfernt_args == [set()], _entfernt_args)
 _gemeinsam_orig = app.archiv_und_importzustand_schreiben  # Archiv + Zustand in einer Transaktion
 _vorher = _copy.deepcopy(zf["entscheidungen"])
-app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: ("x", "x")  # schreibt nichts
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None, handwerte=None: ("x", "x")  # schreibt nichts
 try:
     ai.remove_orphan(zf, kf["key"], archiv_f)
     _fehler = None
@@ -4200,7 +4200,7 @@ _kg_neu = dict(_kg, key=app.archive_key(_neu_row), row=_neu_row, notam_ids=["C00
                im_archiv=[], ersetzt=[])
 _schreib = []
 _gemeinsam_orig = app.archiv_und_importzustand_schreiben
-app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: (_schreib.append(db), _gemeinsam_orig(neu, vorher, z, ze, db=db))[1]
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None, handwerte=None: (_schreib.append(db), _gemeinsam_orig(neu, vorher, z, ze, db=db, handwerte=handwerte))[1]
 try:
     _zahl = ai.confirm_many(zg, [(_kg, "CZ-2D", "Pengcheng", None), (_kg_neu, "CZ-4C", "Yaogan 50", None)], archiv_g)
 finally:
@@ -4231,7 +4231,7 @@ zv, archiv_v = _dub_zustand("fehl", [_TAG_ROW])
 _kv = ai.candidates(zv, archiv_v)[0]
 _vorher_v = _copy.deepcopy(zv["entscheidungen"])
 _inhalt_v = app.archiv_lesen(archiv_v).attrs["nola_stand"]
-app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: ("x", "x")  # schreibt nichts
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None, handwerte=None: ("x", "x")  # schreibt nichts
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -5440,7 +5440,7 @@ _q_upd = _inspect_a.getsource(app._update_archive) + _inspect_a.getsource(app._u
 check("app.py schreibt keine Archiv-CSV mehr: CSV-Pfade nur definiert, Fortschreiben ueber nola.db",
       _q_csv.count("ARCHIVE_CSV") == 1 and _q_csv.count("SEA_LAUNCH_CSV") == 1
       and not hasattr(app, "persist_archive") and not hasattr(app, "persist_sea_launches")
-      and "archiv_schreiben(" in _q_upd and "seestarts_schreiben(" in _q_upd)
+      and "archiv_und_handwerte_schreiben(" in _q_upd and "seestarts_schreiben(" in _q_upd)
 
 print("== Lokale Datenbank: Archiv und Seestarts, Fortschreiben und Import ==")
 import types as _types_n, copy as _copy_n
@@ -5518,11 +5518,11 @@ try:
     # Archiv-Import: Archiv aendert sich zwischen Lesen und Schreiben -> ImportStateError, nichts geschrieben
     _idb = _temp_db()
     _merge_echt = _orig_n[5]
-    def _merge_mit_fremdschreiber(bestand, neue, entfernt=None):
+    def _merge_mit_fremdschreiber(bestand, neue, entfernt=None, handwerte=None):
         _jetzt_i = app.archiv_lesen(_idb)
         _fremd_i = dict(_zeile_n, NOTAM="Z6666/26")
         app.archiv_schreiben(_merge_echt(_jetzt_i, [_fremd_i], set()), vorher=_jetzt_i, db=_idb)
-        return _merge_echt(bestand, neue, entfernt=entfernt)
+        return _merge_echt(bestand, neue, entfernt=entfernt, handwerte=handwerte)
     app.merge_archive = _merge_mit_fremdschreiber
     _st_i = {"tage": {}, "entscheidungen": {}}
     _kand_i = {"key": "konflikt", "row": dict(_zeile_n, NOTAM="Z5555/26"), "notam_ids": ["Z5555/26"], "quellen": []}
@@ -5541,21 +5541,21 @@ try:
     # remove_orphan mit Konflikt
     _st_o = {"tage": {}, "entscheidungen": {"x": {"status": "confirmed"}}}
     _vor_o = app.archiv_lesen(_idb)
-    _lesen_echt = app.archiv_lesen
+    _lesen_echt = app.archiv_mit_handwerten_lesen
     def _lesen_veraltet(db=None, **_k):
-        _df = _lesen_echt(db)
+        _df, _hw = _lesen_echt(db)
         if db == _idb and not getattr(_lesen_veraltet, "fertig", False):
             _lesen_veraltet.fertig = True
             app.archiv_schreiben(_merge_echt(_df, [dict(_zeile_n, NOTAM="Z4444/26")], set()), vorher=_df, db=_idb)
-        return _df
-    app.archiv_lesen = _lesen_veraltet
+        return _df, _hw
+    app.archiv_mit_handwerten_lesen = _lesen_veraltet
     try:
         ai.remove_orphan(_st_o, app.archive_key(dict(_vor_o.iloc[0])), _idb)
         _fehler_o = None
     except ai.ImportStateError as exc:
         _fehler_o = str(exc)
     finally:
-        app.archiv_lesen = _lesen_echt
+        app.archiv_mit_handwerten_lesen = _lesen_echt
     check("Import: Remove bei geaendertem Archiv -> ImportStateError, Zeile bleibt",
           _fehler_o is not None and "changed meanwhile" in _fehler_o
           and "Z6666/26" in set(app.archiv_lesen(_idb)["NOTAM"]) and _st_o["entscheidungen"]["x"]["status"] == "confirmed",
@@ -5687,13 +5687,15 @@ try:
     _orig_n[4](_pd_a.concat([_a_j, _pd_a.DataFrame([dict(_zeile_j, NOTAM="Z9/26")])], ignore_index=True),
                vorher=_a_j, db=_db_j)
     _stand_j = app.archiv_lesen(_db_j).attrs["nola_stand"]
-    _orig_lesen_j = app.archiv_lesen
-    app.archiv_lesen = lambda db=None, **_k: _a_j  # Reiter A hat das Archiv vor der fremden Aenderung gelesen
+    _orig_lesen_j = app.archiv_mit_handwerten_lesen
+    _hw_j = _orig_lesen_j(_db_j)[1]  # Handwerte unveraendert
+    # Reiter A hat das Archiv vor der fremden Aenderung gelesen
+    app.archiv_mit_handwerten_lesen = lambda db=None, **_k: (_a_j, _hw_j)
     try:
         _f_c_j = _versuch_j(lambda: ai.confirm_many(_za_j, [(_kand_j, "CZ-2D", "P", None)], _db_j))
         _f_r_j = _versuch_j(lambda: ai.remove_orphan(_za_j, _key_j, _db_j))
     finally:
-        app.archiv_lesen = _orig_lesen_j
+        app.archiv_mit_handwerten_lesen = _orig_lesen_j
     check("Fix-Runde 1: fremdes Archiv -> Bestaetigen und Remove melden Konflikt",
           _f_c_j == _MELDUNG_AR and _f_r_j == _MELDUNG_AR, (_f_c_j, _f_r_j))
     check("  ... nichts geschrieben: Archiv und Zustand unveraendert",
@@ -5837,14 +5839,15 @@ try:
     _roh_f = "disk *full* [x](y)"
     app.st = _StR()
     app.DB_PATH = _temp_db()
-    app.archiv_schreiben = _wirf_db
+    _orig_ahs_f = app.archiv_und_handwerte_schreiben
+    app.archiv_und_handwerte_schreiben = lambda neu, neu_hw, vorher, vorher_hw, db=None, **_k: _wirf_db(neu, vorher)
     _e_f = None
     try:
         app._update_archive([], _grp_f("voll"), _tab_f)
     except Exception as exc:  # noqa: BLE001
         _e_f = exc
     finally:
-        app.archiv_schreiben = _orig_f[4]
+        app.archiv_und_handwerte_schreiben = _orig_ahs_f
     _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
     check("Fix4: DbFehler beim Archiv-Schreiben -> genau eine Warnung, keine Ausnahme",
           _e_f is None and len(_wf) == 1, (repr(_e_f), _wf))
@@ -5916,11 +5919,13 @@ try:
     app.DB_PATH = _temp_db()
     app._update_archive([], _grp_f("voll"), _tab_f)
     _ak_f = app.archive_key(_zeilen_f["voll"])
-    app.archiv_schreiben = _wirf_konflikt
+    _orig_ahs_f = app.archiv_und_handwerte_schreiben
+    app.archiv_und_handwerte_schreiben = (
+        lambda neu, neu_hw, vorher, vorher_hw, db=None, **_k: _wirf_konflikt(neu, vorher))
     try:
         app._remove_archive_row(_ak_f)
     finally:
-        app.archiv_schreiben = _orig_f[4]
+        app.archiv_und_handwerte_schreiben = _orig_ahs_f
     check("Fix4: Archivzeile entfernen, Konflikt -> KONFLIKT_TEXT, kein Undo, Schluessel nicht gemerkt",
           app.st.session_state.get("ref_flash_warning") == _ndb.KONFLIKT_TEXT
           and "db_meldung" not in app.st.session_state
@@ -6329,7 +6334,7 @@ try:
     _e_a, _m_a = _dialog_meldungen_a()
     check("I2 _write_reference Sperre -> Dialog zeigt Fehler mit GESPERRT_TEXT",
           _e_a is None and _m_a == [("error", app._md_plain(_db_s.GESPERRT_TEXT))], (_m_a, _e_a))
-    for _name_a, _attr_a, _f_a in [("_remove_archive_row", "archiv_schreiben", app._remove_archive_row),
+    for _name_a, _attr_a, _f_a in [("_remove_archive_row", "archiv_und_handwerte_schreiben", app._remove_archive_row),
                                    ("_remove_sea_launch_row", "seestarts_schreiben", app._remove_sea_launch_row)]:
         for _art_a, _werfer_a, _text_a in [("warning", _wirf_konflikt_a, _db_s.KONFLIKT_TEXT),
                                             ("error", _wirf_gesperrt_a, _db_s.GESPERRT_TEXT)]:
@@ -6891,10 +6896,11 @@ try:
     _zaehler_5 = []
 
     def _lesen_dann(nachher):
+        # Vor dem Schreiben liest der Import ueber archiv_mit_handwerten_lesen (Archiv und
+        # Handwerte); archiv_lesen ist hier nur noch das Zuruecklesen nach dem Speichern
         def _lesen(db=None, **k):
             _zaehler_5.append(1)
-            echt = _orig_5[5](db, **k)
-            return echt if len(_zaehler_5) == 1 else nachher(echt)
+            return nachher(_orig_5[5](db, **k))
         return _lesen
 
     def _nachher_fehler(_echt):
@@ -7114,6 +7120,238 @@ _, _, _hn2 = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Nation": "China", "Paylo
 check("Nation passt: kein Nationshinweis", not any("nation" in h for h in _hn2), _hn2)
 _, _, _hn3 = app.archiv_zeile_bearbeiten(dict(_HAIN), {"Weltraumbahnhof": "KSS"}, {}, _erl_h, _sp_h)
 check("Platzwechsel + Nation: Nationshinweis nur einmal", len([h for h in _hn3 if "nation" in h]) == 1, _hn3)
+
+print("== Archiv von Hand bearbeiten: Schreibwege ==")
+_hwsp = list(app.nola_db.FACHTABELLEN["archiv_handwerte"])
+_alt_m = {"NOTAM": "Z7001/26", "Startdatum": "01.10.2026", "Startzeit": "01:00", "Nation": "China",
+          "Weltraumbahnhof": "WSLC", "Trägersystem": "", "Payload": "", "Orbit": "LEO/MEO",
+          "Inklination": "41.0", "Azimuth": "120.0", "Dropzones": ""}
+_k_m = app.archive_key(_alt_m)
+_hand = {_k_m: {"Weltraumbahnhof", "Orbit"}}
+_neuer_lauf = dict(_alt_m, Weltraumbahnhof="WSLC", Orbit="SSO", Inklination="97.0", Startzeit="02:00")
+_bestand_m = _pd_h.DataFrame([dict(_alt_m, Weltraumbahnhof="HAIN", Orbit="GTO")])
+_m_erg = app.merge_archive(_bestand_m, [_neuer_lauf], set(), _hand).iloc[0]
+check("merge: markierte Spalten bleiben", _m_erg["Weltraumbahnhof"] == "HAIN" and _m_erg["Orbit"] == "GTO")
+check("merge: unmarkierte aktualisiert", _m_erg["Startzeit"] == "02:00" and _m_erg["Inklination"] == "97.0")
+check("merge ohne handwerte wie bisher",
+      app.merge_archive(_bestand_m, [_neuer_lauf], set()).iloc[0]["Weltraumbahnhof"] == "WSLC")
+_bestand_p = _pd_h.DataFrame([dict(_alt_m, Payload="Alt-P", **{"Trägersystem": "CZ-2D"})])
+_m_p = app.merge_archive(_bestand_p, [dict(_alt_m, Payload="Neu-P")], set(), {_k_m: {"Payload"}}).iloc[0]
+check("merge: markierte Payload bleibt, Traegersystem-Sonderregel unveraendert",
+      _m_p["Payload"] == "Alt-P" and _m_p["Trägersystem"] == "CZ-2D", dict(_m_p))
+check("merge: Marken eines unbekannten Schluessels wirken nicht auf neue Zeilen",
+      app.merge_archive(_bestand_m.iloc[0:0], [_neuer_lauf], set(), _hand).iloc[0]["Orbit"] == "SSO")
+
+_st_orig_m = app.st; app.st = _StR()
+_db_orig_m = app.DB_PATH
+_lab_orig_m = app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    check("lesen: beide mit Stand", "nola_stand" in _a.attrs and "nola_stand" in _h.attrs)
+    _a2 = app.merge_archive(_a, [dict(_alt_m, Weltraumbahnhof="HAIN")], set())
+    _h2 = app.handwerte_mit(_h, _k_m, {"Weltraumbahnhof": ("WSLC", "hand")}, "2026-10-15T00:00:00+00:00")
+    app.archiv_und_handwerte_schreiben(_a2, _h2, _a, _h)
+    # Tageslauf liefert WSLC - Handwert HAIN muss bleiben
+    _a3, _h3 = app.archiv_mit_handwerten_lesen()
+    _lauf = app.merge_archive(_a3, [_alt_m], set(),
+                              {k: set(v) for k, v in app.handwerte_index(_h3).items()})
+    app.archiv_und_handwerte_schreiben(_lauf, _h3, _a3, _h3)
+    _nach = app.archiv_lesen()
+    check("Handwert ueberlebt den Lauf",
+          _nach[_nach["NOTAM"] == "Z7001/26"].iloc[0]["Weltraumbahnhof"] == "HAIN")
+    # Konflikt nur ueber die Handwerte
+    _a4, _h4 = app.archiv_mit_handwerten_lesen()
+    with app._db() as _c:
+        app.nola_db.ersetze_tabelle(_c, "archiv_handwerte", _h4.iloc[0:0], _h4.attrs["nola_stand"])
+    try:
+        app.archiv_und_handwerte_schreiben(_a4, _h4, _a4, _h4); check("fremde Handwert-Aenderung -> Konflikt", False)
+    except app.nola_db.Konflikt:
+        _a4b, _h4b = app.archiv_mit_handwerten_lesen()
+        check("fremde Handwert-Aenderung -> Konflikt, nichts geschrieben",
+              _a4b.attrs["nola_stand"] == _a4.attrs["nola_stand"] and _h4b.empty)
+    try:
+        app.archiv_und_handwerte_schreiben(_a4, _h4, _pd_h.DataFrame(columns=list(app.ARCHIVE_COLUMNS)), _h4)
+        check("ohne Stand -> ValueError", False)
+    except ValueError:
+        check("ohne Stand -> ValueError", True)
+    # wieder markieren fuer Entfernen/Undo
+    _a5, _h5 = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(_a5, app.handwerte_mit(_h5, _k_m, {"Weltraumbahnhof": ("WSLC", "hand")}, "t"), _a5, _h5)
+    app._remove_archive_row(_k_m)
+    _a6, _h6 = app.archiv_mit_handwerten_lesen()
+    check("Entfernen loescht Zeile und Markierung",
+          "Z7001/26" not in set(_a6["NOTAM"]) and _k_m not in set(_h6["schluessel"]))
+    check("  ... Undo-Eintrag fuehrt beide Tabellen",
+          [t["tabelle"] for t in app.st.session_state["ref_undo"][-1].get("weitere", [])] == ["archiv_handwerte"])
+    app._undo_reference()
+    _a7, _h7 = app.archiv_mit_handwerten_lesen()
+    check("Undo stellt Zeile und Markierung wieder her",
+          "Z7001/26" in set(_a7["NOTAM"]) and _k_m in set(_h7["schluessel"]))
+    app._remove_archive_row(_k_m)
+    _a8, _h8 = app.archiv_mit_handwerten_lesen()
+    with app._db() as _c:
+        app.nola_db.ersetze_tabelle(_c, "archiv_handwerte",
+                                    app.handwerte_mit(_h8, "x|y", {"Nation": ("China", "hand")}, "t"),
+                                    _h8.attrs["nola_stand"])
+    try:
+        app._undo_reference(); check("Undo nach fremder Handwert-Aenderung verweigert", False)
+    except app.UndoRefused as _e_u:
+        _a9, _h9 = app.archiv_mit_handwerten_lesen()
+        check("Undo nach fremder Handwert-Aenderung verweigert, nichts geaendert",
+              "Z7001/26" not in set(_a9["NOTAM"]) and _a9.attrs["nola_stand"] == _a8.attrs["nola_stand"]
+              and set(_h9["schluessel"]) == {"x|y"} and str(_e_u) == app.ARCHIVE_UNDO_REFUSED, str(_e_u))
+    # Undo nach fremder Aenderung am Archiv (die Handwerte bleiben gleich)
+    _a10, _h10 = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(_a10, app.handwerte_mit(_h10, _k_m, {"Orbit": ("LEO/MEO", "hand")}, "t"), _a10, _h10)
+    app._remove_archive_row(_k_m)
+    _a11, _h11 = app.archiv_mit_handwerten_lesen()
+    app.archiv_schreiben(app.merge_archive(_a11, [dict(_alt_m, NOTAM="Z7002/26")], set()), vorher=_a11)
+    _a11b = app.archiv_lesen()
+    try:
+        app._undo_reference(); check("Undo nach fremder Archiv-Aenderung verweigert", False)
+    except app.UndoRefused:
+        _a12, _h12 = app.archiv_mit_handwerten_lesen()
+        check("Undo nach fremder Archiv-Aenderung verweigert, nichts geaendert",
+              _a12.attrs["nola_stand"] == _a11b.attrs["nola_stand"]
+              and _h12.attrs["nola_stand"] == _h11.attrs["nola_stand"] and _k_m not in set(_h12["schluessel"]))
+    # Alter Undo-Eintrag mit einer Tabelle (ohne "weitere") funktioniert unveraendert
+    _a13 = app.archiv_lesen()
+    _neu13 = app.archiv_schreiben(_a13[_a13["NOTAM"] != "Z7002/26"], vorher=_a13)
+    app.st.session_state.setdefault("ref_undo", []).append(
+        {"tabelle": "startarchiv", "zeilen": _a13[list(app.ARCHIVE_COLUMNS)].to_dict("records"),
+         "nachher": _neu13, "label": "alt"})
+    check("alter Undo-Eintrag mit einer Tabelle", app._undo_reference() == "alt"
+          and "Z7002/26" in set(app.archiv_lesen()["NOTAM"]))
+    # Unlesbare DB: Entfernen schreibt nichts, meldet im Dialog
+    app.DB_PATH = _kaputte_db()
+    app.st.session_state.pop("ref_flash_error", None)
+    app._remove_archive_row(_k_m)
+    check("Entfernen bei unlesbarer DB: Meldung, nichts entfernt",
+          "Nothing was removed" in app.st.session_state.get("ref_flash_error", ""))
+    try:
+        app.archiv_mit_handwerten_lesen(); check("archiv_mit_handwerten_lesen: unlesbar -> ArchiveUnreadable", False)
+    except app.ArchiveUnreadable:
+        check("archiv_mit_handwerten_lesen: unlesbar -> ArchiveUnreadable", True)
+finally:
+    app.st = _st_orig_m
+    app.DB_PATH = _db_orig_m
+    app.local_admin_allowed = _lab_orig_m
+
+# Tageslauf: Konflikt nur ueber die Handwerte -> einmal neu lesen, die fremde Markierung gilt
+import types as _types_m
+_orig_t = (app.st, app.DB_PATH, app.archive_row, app.archiv_mit_handwerten_lesen)
+try:
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    _alt_t = app.archiv_lesen()
+    app.archiv_schreiben(_pd_h.DataFrame([dict(_alt_m, Orbit="GTO")], columns=list(app.ARCHIVE_COLUMNS)), vorher=_alt_t)
+    app.archive_row = lambda g, ev: dict(_alt_m, Orbit="SSO")
+    _grp_t = [_types_m.SimpleNamespace(spaceport_code="WSLC", row_indices=[0], site_from_geometry=True)]
+    _tab_t = _pd_h.DataFrame({"Status": ["OK"], "_row": [0]})
+    _lesen_echt_t = _orig_t[3]
+    _aufrufe_t = []
+    def _lesen_dann_fremd_markieren(db=None, wartezeit=app.nola_db.WARTEZEIT):
+        _erg = _lesen_echt_t(db, wartezeit)
+        _aufrufe_t.append(1)
+        if len(_aufrufe_t) == 1:  # ein anderer Reiter markiert Orbit zwischen Lesen und Schreiben
+            _ah, _hh = _lesen_echt_t(db)
+            app.archiv_und_handwerte_schreiben(
+                _ah, app.handwerte_mit(_hh, _k_m, {"Orbit": ("LEO/MEO", "hand")}, "t"), _ah, _hh, db=db)
+        return _erg
+    app.archiv_mit_handwerten_lesen = _lesen_dann_fremd_markieren
+    app._update_archive([], _grp_t, _tab_t)
+    app.archiv_mit_handwerten_lesen = _lesen_echt_t
+    _at, _ht = app.archiv_mit_handwerten_lesen()
+    check("Tageslauf: Konflikt nur ueber Handwerte -> einmal neu gelesen",
+          len(_aufrufe_t) == 2, len(_aufrufe_t))
+    check("  ... fremde Markierung gilt: Orbit bleibt, Markierung bleibt",
+          list(_at["Orbit"]) == ["GTO"] and app.handwerte_index(_ht) == {_k_m: {"Orbit": ("LEO/MEO", "hand")}},
+          (_at.to_dict("records"), _ht.to_dict("records")))
+    check("  ... ohne Warnung", not app.st.session_state.get("_w"), app.st.session_state.get("_w"))
+    # Unmarkierte Spalte schreibt der naechste Lauf fort, die markierte nicht
+    app.archive_row = lambda g, ev: dict(_alt_m, Orbit="SSO", Startzeit="03:00")
+    app._update_archive([], _grp_t, _tab_t)
+    _at2 = app.archiv_lesen()
+    check("Tageslauf: unmarkierte Spalte fortgeschrieben, markierte bleibt",
+          list(_at2["Startzeit"]) == ["03:00"] and list(_at2["Orbit"]) == ["GTO"], _at2.to_dict("records"))
+finally:
+    app.st, app.DB_PATH, app.archive_row, app.archiv_mit_handwerten_lesen = _orig_t
+
+# Archiv-Import: confirm_many und remove_orphan beachten die Markierungen
+_MELDUNG_AR_m = "The launch archive changed meanwhile - nothing was written, please reload the tab."
+_db_i = _temp_db()
+_vor_i = app.archiv_lesen(_db_i)
+_zeile_i = dict(_alt_m, Payload="Hand-P")
+_zeile_i2 = dict(_alt_m, NOTAM="Z7003/26", Startdatum="02.10.2026", Payload="Hand-Q")
+_zeile_i3 = dict(_alt_m, NOTAM="Z7005/26", Startdatum="03.10.2026")
+_k_i, _k_i2, _k_i3 = app.archive_key(_zeile_i), app.archive_key(_zeile_i2), app.archive_key(_zeile_i3)
+app.archiv_schreiben(_pd_h.DataFrame([_zeile_i, _zeile_i2, _zeile_i3], columns=list(app.ARCHIVE_COLUMNS)), vorher=_vor_i, db=_db_i)
+_ai_i, _hi_i = app.archiv_mit_handwerten_lesen(_db_i)
+_hw_i = app.handwerte_mit(_hi_i, _k_i, {"Payload": ("", "hand")}, "t")
+_hw_i = app.handwerte_mit(_hw_i, _k_i2, {"Payload": ("", "hand")}, "t")
+app.archiv_und_handwerte_schreiben(_ai_i, _hw_i, _ai_i, _hi_i, db=_db_i)
+_kand_e = {"key": "erg-1", "row": dict(_zeile_i), "notam_ids": ["Z7001/26"], "quellen": ["q"], "im_archiv": [_k_i]}
+# Fremde Aenderung an den Markierungen -> ImportStateError, nichts geschrieben
+_zi = ai.zustand_laden(_db_i)
+_zs_vor_i = _zi.nola_stand
+_ai_s, _hi_s = app.archiv_mit_handwerten_lesen(_db_i)  # Reiter A liest
+_ai_f, _hi_f = app.archiv_mit_handwerten_lesen(_db_i)
+app.archiv_und_handwerte_schreiben(_ai_f, app.handwerte_mit(_hi_f, _k_i3, {"Nation": ("China", "hand")}, "t"),
+                                   _ai_f, _hi_f, db=_db_i)  # Reiter B markiert
+_ai_n, _hi_n = app.archiv_mit_handwerten_lesen(_db_i)
+_orig_lesen_i = app.archiv_mit_handwerten_lesen
+app.archiv_mit_handwerten_lesen = lambda db=None, **_k: (_ai_s, _hi_s)
+try:
+    def _versuch_i(f):
+        try:
+            f()
+        except ai.ImportStateError as exc:
+            return str(exc)
+        return None
+    _f_c_i = _versuch_i(lambda: ai.confirm_many(_zi, [(_kand_e, "CZ-2D", "Import-P", None)], _db_i))
+    _f_r_i = _versuch_i(lambda: ai.remove_orphan(_zi, _k_i, _db_i))
+finally:
+    app.archiv_mit_handwerten_lesen = _orig_lesen_i
+_ai_n2, _hi_n2 = app.archiv_mit_handwerten_lesen(_db_i)
+check("Import: fremde Markierung -> Bestaetigen und Remove melden Konflikt",
+      _f_c_i == _MELDUNG_AR_m and _f_r_i == _MELDUNG_AR_m, (_f_c_i, _f_r_i))
+check("  ... nichts geschrieben: Archiv, Markierungen und Zustand unveraendert",
+      _ai_n2.attrs["nola_stand"] == _ai_n.attrs["nola_stand"] and _hi_n2.attrs["nola_stand"] == _hi_n.attrs["nola_stand"]
+      and ai.zustand_laden(_db_i).nola_stand == _zs_vor_i and "erg-1" not in _zi["entscheidungen"])
+# Ergaenzen: markierte Payload bleibt, unmarkiertes Traegersystem wird ergaenzt
+_zi = ai.zustand_laden(_db_i)
+ai.confirm_many(_zi, [(_kand_e, "CZ-2D", "Import-P", None)], _db_i)
+_ae = app.archiv_lesen(_db_i)
+_re = _ae[_ae["NOTAM"] == "Z7001/26"].iloc[0]
+check("confirm_many: markierte Payload unveraendert, Traegersystem ergaenzt",
+      _re["Payload"] == "Hand-P" and _re["Trägersystem"] == "CZ-2D", dict(_re))
+# Anlegen einer Zeile, deren Schluessel Markierungen hat: markierte Spalte bleibt
+_kand_a = {"key": "anl-1", "row": dict(_zeile_i2, Payload=""), "notam_ids": ["Z7003/26"], "quellen": ["q"]}
+_zi = ai.zustand_laden(_db_i)
+ai.confirm_many(_zi, [(_kand_a, "CZ-4C", "Import-Q", None)], _db_i)
+_aa = app.archiv_lesen(_db_i)
+_ra = _aa[_aa["NOTAM"] == "Z7003/26"].iloc[0]
+check("confirm_many: Anlegen ueber markierte Zeile behaelt markierte Payload",
+      len(_aa[_aa["NOTAM"] == "Z7003/26"]) == 1 and _ra["Payload"] == "Hand-Q" and _ra["Trägersystem"] == "CZ-4C", dict(_ra))
+# Ersetzen: die ersetzte Zeile verliert ihre Markierungen
+_zeile_r = dict(_zeile_i2, NOTAM="Z7003/26, Z7004/26", Payload="")
+_kand_r = {"key": app.archive_key(_zeile_r), "row": _zeile_r, "notam_ids": ["Z7003/26", "Z7004/26"],
+           "quellen": ["q"], "ersetzt": [_k_i2]}
+_zi = ai.zustand_laden(_db_i)
+ai.confirm_many(_zi, [(_kand_r, "CZ-4C", "Neu-R", None)], _db_i)
+_ar_i, _hr_i = app.archiv_mit_handwerten_lesen(_db_i)
+check("confirm_many: ersetzte Zeile verliert ihre Markierungen, andere bleiben",
+      _k_i2 not in set(_hr_i["schluessel"]) and _k_i in set(_hr_i["schluessel"])
+      and _k_i2 not in {app.archive_key(dict(r)) for _, r in _ar_i.iterrows()}, _hr_i.to_dict("records"))
+# remove_orphan loescht die Markierungen der Zeile mit
+_zi = ai.zustand_laden(_db_i)
+ai.remove_orphan(_zi, _k_i, _db_i)
+_ao_i, _ho_i = app.archiv_mit_handwerten_lesen(_db_i)
+check("remove_orphan: Zeile und Markierungen weg, fremde bleiben",
+      _k_i not in {app.archive_key(dict(r)) for _, r in _ao_i.iterrows()}
+      and _k_i not in set(_ho_i["schluessel"]) and set(_ho_i["schluessel"]) == {_k_i3}, _ho_i.to_dict("records"))
+
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

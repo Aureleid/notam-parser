@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -4826,6 +4826,7 @@ def merge_archive(
     bestand: pd.DataFrame,
     neue: Sequence[Dict[str, Any]],
     entfernt: Optional[Set[str]] = None,
+    handwerte: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> pd.DataFrame:
     """
     Fuehrt neu erkannte Starts mit dem vorhandenen Archiv zusammen.
@@ -4837,6 +4838,8 @@ def merge_archive(
     Wert); ein neuer, nicht leerer Wert ueberschreibt ihn.
     Von Hand geloeschte Zeilen kommen nicht zurueck, solange ihr Schluessel in
     `entfernt` steht.
+    Von Hand gesetzte Spalten (`handwerte`: {Schluessel: Spalten}) uebernimmt ein
+    Lauf aus dem Bestand.
     """
     entfernt = entfernt or set()
     zeilen: List[Dict[str, Any]] = []
@@ -4858,6 +4861,9 @@ def merge_archive(
             alt = zeilen[index[schluessel]]
             for spalte in ("Payload", "Tr\u00e4gersystem"):
                 if not row[spalte]:
+                    row[spalte] = alt[spalte]
+            for spalte in (handwerte or {}).get(schluessel, ()):
+                if spalte in alt:  # Marke auf eine unbekannte Spalte: nichts zu schuetzen
                     row[spalte] = alt[spalte]
             zeilen[index[schluessel]] = row
         else:
@@ -5374,17 +5380,67 @@ def archiv_schreiben(
 def archiv_und_importzustand_schreiben(
     neu: pd.DataFrame, vorher: pd.DataFrame, zustand: Dict[str, Any],
     zustand_erwartet: Optional[str], db: Optional[Path] = None,
+    handwerte: Optional[Tuple[pd.DataFrame, pd.DataFrame]] = None,
 ) -> Tuple[str, str]:
     """
     Wie archiv_schreiben, dazu der Importzustand in derselben Transaktion
     (Bestaetigen/Entfernen im Archiv-Import). Rueckgabe: neue Staende (Archiv, Zustand).
+    `handwerte = (neu_hw, vorher_hw)`: die Markierungen werden in derselben
+    Transaktion mit Standvergleich ersetzt (vorher_hw wie von archiv_mit_handwerten_lesen).
     """
     stand = vorher.attrs.get("nola_stand")
     if not stand:
         raise ValueError("archiv_und_importzustand_schreiben needs `vorher` as read by archiv_lesen")
+    hw = None
+    if handwerte is not None:
+        neu_hw, vorher_hw = handwerte
+        stand_hw = vorher_hw.attrs.get("nola_stand")
+        if not stand_hw:
+            raise ValueError(
+                "archiv_und_importzustand_schreiben needs `handwerte` as read by archiv_mit_handwerten_lesen")
+        hw = (_handwerte_spalten(neu_hw), stand_hw)
     with _db(db) as conn:
         return nola_db.ersetze_archiv_und_importzustand(
-            conn, neu[list(ARCHIVE_COLUMNS)], stand, zustand, zustand_erwartet)
+            conn, neu[list(ARCHIVE_COLUMNS)], stand, zustand, zustand_erwartet, handwerte=hw)
+
+
+def _handwerte_spalten(df: pd.DataFrame) -> pd.DataFrame:
+    """Handwerte in der Spaltenfolge der Tabelle; leer auch ohne Spalten."""
+    spalten = list(nola_db.FACHTABELLEN["archiv_handwerte"])
+    return pd.DataFrame(columns=spalten) if df is None or df.empty else df[spalten]
+
+
+def archiv_mit_handwerten_lesen(
+    db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Startarchiv und Handwerte aus EINER Momentaufnahme; Lesefehler -> ArchiveUnreadable."""
+    try:
+        with _db(db, wartezeit) as conn:
+            beide = nola_db.lese_tabellen(conn, ("startarchiv", "archiv_handwerte"))
+    except nola_db.DbFehler as exc:
+        raise ArchiveUnreadable(
+            "The launch archive could not be read from the database ({}). It was left "
+            "untouched and not updated.".format(exc)
+        ) from exc
+    return beide["startarchiv"], beide["archiv_handwerte"]
+
+
+def archiv_und_handwerte_schreiben(
+    neu: pd.DataFrame, neu_hw: pd.DataFrame, vorher: pd.DataFrame, vorher_hw: pd.DataFrame,
+    db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT,
+) -> Dict[str, str]:
+    """
+    Archiv und Handwerte gemeinsam - nur, wenn beide noch dem gelesenen Stand
+    entsprechen (sonst nola_db.Konflikt, keine geschrieben). Rueckgabe: neue Staende je Tabelle.
+    """
+    stand, stand_hw = vorher.attrs.get("nola_stand"), vorher_hw.attrs.get("nola_stand")
+    if not stand or not stand_hw:
+        raise ValueError("archiv_und_handwerte_schreiben needs `vorher` as read by archiv_mit_handwerten_lesen")
+    with _db(db, wartezeit) as conn:
+        return nola_db.ersetze_tabellen_geprueft(conn, {
+            "startarchiv": (neu[list(ARCHIVE_COLUMNS)], stand),
+            "archiv_handwerte": (_handwerte_spalten(neu_hw), stand_hw),
+        })
 
 
 def seestarts_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
@@ -5993,24 +6049,42 @@ def _spalten_von(tabelle: str) -> Tuple[str, ...]:
     return nola_db.FACHTABELLEN[tabelle]
 
 
-def _push_undo(tabelle: str, vorher: pd.DataFrame, nachher_stand: str, label: str) -> Dict[str, Any]:
-    """Merkt den Tabelleninhalt vor und den Stand nach einer Aenderung."""
+def _push_undo(
+    tabelle: str, vorher: pd.DataFrame, nachher_stand: str, label: str,
+    weitere: Optional[Sequence[Tuple[str, pd.DataFrame, str]]] = None,
+) -> Dict[str, Any]:
+    """
+    Merkt den Tabelleninhalt vor und den Stand nach einer Aenderung. `weitere`:
+    Tabellen, die in derselben Transaktion geaendert wurden (Tabelle, vorher, Stand nachher).
+    """
     stapel = st.session_state.setdefault("ref_undo", [])
     eintrag = {
         "tabelle": tabelle,
-        "zeilen": vorher[list(_spalten_von(tabelle))].to_dict("records"),
+        "zeilen": _undo_zeilen(tabelle, vorher),
         "nachher": nachher_stand,
         "label": label,
     }
+    if weitere:
+        eintrag["weitere"] = [
+            {"tabelle": t, "zeilen": _undo_zeilen(t, df), "nachher": n} for t, df, n in weitere
+        ]
     stapel.append(eintrag)
     del stapel[:-UNDO_LIMIT]
     return eintrag
 
 
+def _undo_zeilen(tabelle: str, df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Zeilen fuer den Undo-Stapel; eine leere Tabelle auch ohne Spalten."""
+    if df is None or df.empty:
+        return []
+    return df[list(_spalten_von(tabelle))].to_dict("records")
+
+
 def _undo_reference() -> Optional[str]:
     """
     Nimmt die letzte Aenderung zurueck - nur, wenn die Tabelle seitdem
-    unveraendert ist. Sonst faellt der Eintrag vom Stapel (dieser Stand kehrt
+    unveraendert ist (bei einem Eintrag mit `weitere`: alle seine Tabellen, alle
+    oder keine zurueck). Sonst faellt der Eintrag vom Stapel (dieser Stand kehrt
     nicht zurueck) und UndoRefused nennt den Grund. Bei einem Lesefehler bleibt
     der Eintrag liegen.
     """
@@ -6024,10 +6098,18 @@ def _undo_reference() -> Optional[str]:
     )
     try:
         with _db() as conn:
-            nola_db.ersetze_tabelle(
-                conn, tabelle, pd.DataFrame(letzter["zeilen"], columns=list(_spalten_von(tabelle))),
-                letzter["nachher"],
-            )
+            teile = [letzter] + list(letzter.get("weitere", []))
+            if len(teile) == 1:
+                nola_db.ersetze_tabelle(
+                    conn, tabelle, pd.DataFrame(letzter["zeilen"], columns=list(_spalten_von(tabelle))),
+                    letzter["nachher"],
+                )
+            else:
+                nola_db.ersetze_tabellen_geprueft(conn, {
+                    t["tabelle"]: (
+                        pd.DataFrame(t["zeilen"], columns=list(_spalten_von(t["tabelle"]))), t["nachher"])
+                    for t in teile
+                })
     except nola_db.Konflikt as exc:
         stapel.pop()
         raise UndoRefused(verweigert) from exc
@@ -6772,7 +6854,8 @@ def _update_archive(
     # schreibt erneut fort.
     for _ in range(2):
         try:
-            bestand = archiv_lesen(wartezeit=WARTEZEIT_AUTOMATISCH)
+            # Markierungen aus derselben Momentaufnahme: von Hand gesetzte Spalten bleiben
+            bestand, bestand_hw = archiv_mit_handwerten_lesen(wartezeit=WARTEZEIT_AUTOMATISCH)
         except ArchiveUnreadable as exc:
             # Nie ueber ein unlesbares Archiv schreiben; die Auswertung laeuft weiter.
             st.warning("Launch archive: {}".format(_md_plain(exc)))
@@ -6794,11 +6877,14 @@ def _update_archive(
             bestand,
             zeilen,
             set(st.session_state.get("archiv_removed", set())),
+            {k: set(v) for k, v in handwerte_index(bestand_hw).items()},
         )
         if neu.to_csv(index=False) == bestand.to_csv(index=False):
             return
         try:
-            archiv_schreiben(neu, vorher=bestand, wartezeit=WARTEZEIT_AUTOMATISCH)
+            # Handwerte unveraendert, aber mit Standvergleich: eine inzwischen gesetzte
+            # oder entfernte Markierung ist ein Konflikt -> neu lesen
+            archiv_und_handwerte_schreiben(neu, bestand_hw, bestand, bestand_hw, wartezeit=WARTEZEIT_AUTOMATISCH)
             return
         except nola_db.Konflikt:
             continue
@@ -6972,14 +7058,16 @@ def _remove_archive_row(schluessel: str) -> None:
     denselben Start sofort wieder an, solange sein NOTAM in der Tagesdatei steht.
     """
     try:
-        bestand = archiv_lesen()
+        bestand, bestand_hw = archiv_mit_handwerten_lesen()
     except ArchiveUnreadable as exc:
         # Meldung fuer den naechsten Durchlauf - der Aufrufer zeichnet sofort neu
         _melde_db_dialog("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     behalten = bestand[[archive_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
+    # Markierungen folgen der Zeile - in derselben Transaktion
+    behalten_hw = handwerte_bereinigen(bestand_hw, behalten)
     try:
-        neu_stand = archiv_schreiben(behalten, vorher=bestand)
+        neu = archiv_und_handwerte_schreiben(behalten, behalten_hw, bestand, bestand_hw)
     except nola_db.Konflikt:
         _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
         return
@@ -6987,7 +7075,8 @@ def _remove_archive_row(schluessel: str) -> None:
         _melde_db_dialog("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
-    _push_undo("startarchiv", bestand, neu_stand, "Archivzeile entfernt")
+    _push_undo("startarchiv", bestand, neu["startarchiv"], "Archivzeile entfernt",
+               weitere=[("archiv_handwerte", bestand_hw, neu["archiv_handwerte"])])
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
     grund = _persist_workspace(im_dialog=True)
     if grund:
