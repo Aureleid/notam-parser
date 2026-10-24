@@ -1512,7 +1512,7 @@ check("Hauptnavigation nutzt kein st.tabs mehr",
       "tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(" not in quelle,
       "Hauptnavigation noch auf st.tabs")
 check("  ... im Optionsdialog bleibt st.tabs zulaessig",
-      "reiter = st.tabs(titel)" in quelle)
+      "reiter = st.tabs(titel, default=" in quelle)
 check("Segmentleiste steuert die Bereiche", "st.segmented_control(" in quelle)
 check("sechs Bereiche definiert", quelle.count("if bereich == reiter[") == 6,
       quelle.count("if bereich == reiter["))
@@ -1855,7 +1855,7 @@ check("wird bei jeder Auswertung fortgeschrieben",
       "_update_archive(events, stats.get(\"groups\", []), table)" in quelle_a)
 check("Filter der Seitenleiste wirken nicht aufs Archiv",
       quelle_a.index("_update_archive(events") < quelle_a.index("nation_filter = st.multiselect"))
-check("eigener Reiter im Optionsmenue", "_archive_editor()" in quelle_a)
+check("eigener Reiter im Optionsmenue", "_archive_editor(spaceports, vehicles)" in quelle_a)
 check("Statuszeile in der Seitenleiste", "Launch archive: {} launch(es)" in quelle_a)
 check("Statuszeile zeigt den Stand nach der Auswertung",
       quelle_a.count("_show_archive_status(") == 3, quelle_a.count("_show_archive_status("))
@@ -3672,9 +3672,9 @@ check("  ... Zustand unveraendert", zf["entscheidungen"] == _vorher, zf["entsche
 check("  ... kein Kandidat entschieden", all(k["entscheidung"] is None for k in ai.candidates(zf, _kein_archiv)))
 _entfernt_args = []
 _merge_orig = app.merge_archive
-def _merge_spion(bestand, neue, entfernt=None):
+def _merge_spion(bestand, neue, entfernt=None, handwerte=None):
     _entfernt_args.append(entfernt)
-    return _merge_orig(bestand, neue, entfernt=entfernt)
+    return _merge_orig(bestand, neue, entfernt=entfernt, handwerte=handwerte)
 archiv_f = _temp_db()
 app.merge_archive = _merge_spion
 try:
@@ -3684,7 +3684,7 @@ finally:
 check("Bestaetigen uebergibt merge_archive kein archiv_removed", _entfernt_args == [set()], _entfernt_args)
 _gemeinsam_orig = app.archiv_und_importzustand_schreiben  # Archiv + Zustand in einer Transaktion
 _vorher = _copy.deepcopy(zf["entscheidungen"])
-app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: ("x", "x")  # schreibt nichts
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None, handwerte=None: ("x", "x")  # schreibt nichts
 try:
     ai.remove_orphan(zf, kf["key"], archiv_f)
     _fehler = None
@@ -4200,7 +4200,7 @@ _kg_neu = dict(_kg, key=app.archive_key(_neu_row), row=_neu_row, notam_ids=["C00
                im_archiv=[], ersetzt=[])
 _schreib = []
 _gemeinsam_orig = app.archiv_und_importzustand_schreiben
-app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: (_schreib.append(db), _gemeinsam_orig(neu, vorher, z, ze, db=db))[1]
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None, handwerte=None: (_schreib.append(db), _gemeinsam_orig(neu, vorher, z, ze, db=db, handwerte=handwerte))[1]
 try:
     _zahl = ai.confirm_many(zg, [(_kg, "CZ-2D", "Pengcheng", None), (_kg_neu, "CZ-4C", "Yaogan 50", None)], archiv_g)
 finally:
@@ -4231,7 +4231,7 @@ zv, archiv_v = _dub_zustand("fehl", [_TAG_ROW])
 _kv = ai.candidates(zv, archiv_v)[0]
 _vorher_v = _copy.deepcopy(zv["entscheidungen"])
 _inhalt_v = app.archiv_lesen(archiv_v).attrs["nola_stand"]
-app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None: ("x", "x")  # schreibt nichts
+app.archiv_und_importzustand_schreiben = lambda neu, vorher, z, ze, db=None, handwerte=None: ("x", "x")  # schreibt nichts
 try:
     ai.confirm_many(zv, [(_kv, "CZ-2D", "Pengcheng", None)], archiv_v)
     _fehler = None
@@ -4602,7 +4602,7 @@ try:
     for _p_e in (_kaputt_db_u, _fremd_db):
         app.st = _StubSt()
         app.DB_PATH = _p_e
-        _r, _e = _versuch(app._archive_editor)
+        _r, _e = _versuch(app._archive_editor, pd.DataFrame(), pd.DataFrame())
         _namen_e = [n for n, _ in app.st.aufrufe]
         check("Archiv-Editor ({}): st.error nennt die Datenbank, keine Remove-Knoepfe".format(_p_e.name),
               _e is None and any(n == "error" and "database" in t for n, t in app.st.aufrufe)
@@ -5440,7 +5440,7 @@ _q_upd = _inspect_a.getsource(app._update_archive) + _inspect_a.getsource(app._u
 check("app.py schreibt keine Archiv-CSV mehr: CSV-Pfade nur definiert, Fortschreiben ueber nola.db",
       _q_csv.count("ARCHIVE_CSV") == 1 and _q_csv.count("SEA_LAUNCH_CSV") == 1
       and not hasattr(app, "persist_archive") and not hasattr(app, "persist_sea_launches")
-      and "archiv_schreiben(" in _q_upd and "seestarts_schreiben(" in _q_upd)
+      and "archiv_und_handwerte_schreiben(" in _q_upd and "seestarts_schreiben(" in _q_upd)
 
 print("== Lokale Datenbank: Archiv und Seestarts, Fortschreiben und Import ==")
 import types as _types_n, copy as _copy_n
@@ -5518,11 +5518,11 @@ try:
     # Archiv-Import: Archiv aendert sich zwischen Lesen und Schreiben -> ImportStateError, nichts geschrieben
     _idb = _temp_db()
     _merge_echt = _orig_n[5]
-    def _merge_mit_fremdschreiber(bestand, neue, entfernt=None):
+    def _merge_mit_fremdschreiber(bestand, neue, entfernt=None, handwerte=None):
         _jetzt_i = app.archiv_lesen(_idb)
         _fremd_i = dict(_zeile_n, NOTAM="Z6666/26")
         app.archiv_schreiben(_merge_echt(_jetzt_i, [_fremd_i], set()), vorher=_jetzt_i, db=_idb)
-        return _merge_echt(bestand, neue, entfernt=entfernt)
+        return _merge_echt(bestand, neue, entfernt=entfernt, handwerte=handwerte)
     app.merge_archive = _merge_mit_fremdschreiber
     _st_i = {"tage": {}, "entscheidungen": {}}
     _kand_i = {"key": "konflikt", "row": dict(_zeile_n, NOTAM="Z5555/26"), "notam_ids": ["Z5555/26"], "quellen": []}
@@ -5541,21 +5541,21 @@ try:
     # remove_orphan mit Konflikt
     _st_o = {"tage": {}, "entscheidungen": {"x": {"status": "confirmed"}}}
     _vor_o = app.archiv_lesen(_idb)
-    _lesen_echt = app.archiv_lesen
+    _lesen_echt = app.archiv_mit_handwerten_lesen
     def _lesen_veraltet(db=None, **_k):
-        _df = _lesen_echt(db)
+        _df, _hw = _lesen_echt(db)
         if db == _idb and not getattr(_lesen_veraltet, "fertig", False):
             _lesen_veraltet.fertig = True
             app.archiv_schreiben(_merge_echt(_df, [dict(_zeile_n, NOTAM="Z4444/26")], set()), vorher=_df, db=_idb)
-        return _df
-    app.archiv_lesen = _lesen_veraltet
+        return _df, _hw
+    app.archiv_mit_handwerten_lesen = _lesen_veraltet
     try:
         ai.remove_orphan(_st_o, app.archive_key(dict(_vor_o.iloc[0])), _idb)
         _fehler_o = None
     except ai.ImportStateError as exc:
         _fehler_o = str(exc)
     finally:
-        app.archiv_lesen = _lesen_echt
+        app.archiv_mit_handwerten_lesen = _lesen_echt
     check("Import: Remove bei geaendertem Archiv -> ImportStateError, Zeile bleibt",
           _fehler_o is not None and "changed meanwhile" in _fehler_o
           and "Z6666/26" in set(app.archiv_lesen(_idb)["NOTAM"]) and _st_o["entscheidungen"]["x"]["status"] == "confirmed",
@@ -5687,13 +5687,15 @@ try:
     _orig_n[4](_pd_a.concat([_a_j, _pd_a.DataFrame([dict(_zeile_j, NOTAM="Z9/26")])], ignore_index=True),
                vorher=_a_j, db=_db_j)
     _stand_j = app.archiv_lesen(_db_j).attrs["nola_stand"]
-    _orig_lesen_j = app.archiv_lesen
-    app.archiv_lesen = lambda db=None, **_k: _a_j  # Reiter A hat das Archiv vor der fremden Aenderung gelesen
+    _orig_lesen_j = app.archiv_mit_handwerten_lesen
+    _hw_j = _orig_lesen_j(_db_j)[1]  # Handwerte unveraendert
+    # Reiter A hat das Archiv vor der fremden Aenderung gelesen
+    app.archiv_mit_handwerten_lesen = lambda db=None, **_k: (_a_j, _hw_j)
     try:
         _f_c_j = _versuch_j(lambda: ai.confirm_many(_za_j, [(_kand_j, "CZ-2D", "P", None)], _db_j))
         _f_r_j = _versuch_j(lambda: ai.remove_orphan(_za_j, _key_j, _db_j))
     finally:
-        app.archiv_lesen = _orig_lesen_j
+        app.archiv_mit_handwerten_lesen = _orig_lesen_j
     check("Fix-Runde 1: fremdes Archiv -> Bestaetigen und Remove melden Konflikt",
           _f_c_j == _MELDUNG_AR and _f_r_j == _MELDUNG_AR, (_f_c_j, _f_r_j))
     check("  ... nichts geschrieben: Archiv und Zustand unveraendert",
@@ -5837,14 +5839,15 @@ try:
     _roh_f = "disk *full* [x](y)"
     app.st = _StR()
     app.DB_PATH = _temp_db()
-    app.archiv_schreiben = _wirf_db
+    _orig_ahs_f = app.archiv_und_handwerte_schreiben
+    app.archiv_und_handwerte_schreiben = lambda neu, neu_hw, vorher, vorher_hw, db=None, **_k: _wirf_db(neu, vorher)
     _e_f = None
     try:
         app._update_archive([], _grp_f("voll"), _tab_f)
     except Exception as exc:  # noqa: BLE001
         _e_f = exc
     finally:
-        app.archiv_schreiben = _orig_f[4]
+        app.archiv_und_handwerte_schreiben = _orig_ahs_f
     _wf = [str(a[0]) for a in app.st.session_state.get("_w", [])]
     check("Fix4: DbFehler beim Archiv-Schreiben -> genau eine Warnung, keine Ausnahme",
           _e_f is None and len(_wf) == 1, (repr(_e_f), _wf))
@@ -5916,11 +5919,13 @@ try:
     app.DB_PATH = _temp_db()
     app._update_archive([], _grp_f("voll"), _tab_f)
     _ak_f = app.archive_key(_zeilen_f["voll"])
-    app.archiv_schreiben = _wirf_konflikt
+    _orig_ahs_f = app.archiv_und_handwerte_schreiben
+    app.archiv_und_handwerte_schreiben = (
+        lambda neu, neu_hw, vorher, vorher_hw, db=None, **_k: _wirf_konflikt(neu, vorher))
     try:
         app._remove_archive_row(_ak_f)
     finally:
-        app.archiv_schreiben = _orig_f[4]
+        app.archiv_und_handwerte_schreiben = _orig_ahs_f
     check("Fix4: Archivzeile entfernen, Konflikt -> KONFLIKT_TEXT, kein Undo, Schluessel nicht gemerkt",
           app.st.session_state.get("ref_flash_warning") == _ndb.KONFLIKT_TEXT
           and "db_meldung" not in app.st.session_state
@@ -6038,7 +6043,7 @@ else:
     print("  SKIP  launch.json (nicht vorhanden)")
 
 print("== Lokale Datenbank: Start und Sicherheit, Verhalten (Fix-Runde 1) ==")
-import types as _types_s, tempfile as _tf_s, shutil as _sh_s, re as _re_s
+import types as _types_s, tempfile as _tf_s, shutil as _sh_s, re as _re_s, contextlib as _cl_s
 import nola_db as _db_s
 import nola_umzug as _um_s
 
@@ -6073,6 +6078,8 @@ def _fake_st_s():
         return label in _klick_s
 
     ns.stop, ns.rerun, ns.radio, ns.button = _stop, _rerun, _radio, _button
+    # Dialogmeldungen stehen in einem stets erzeugten Container (Fix-Runde 2, B2)
+    ns.container = lambda *a, **k: _cl_s.nullcontext()
     ns.columns = lambda n, **k: [_types_s.SimpleNamespace(button=_button)
                                  for _ in range(n if isinstance(n, int) else len(n))]
     return ns
@@ -6329,7 +6336,7 @@ try:
     _e_a, _m_a = _dialog_meldungen_a()
     check("I2 _write_reference Sperre -> Dialog zeigt Fehler mit GESPERRT_TEXT",
           _e_a is None and _m_a == [("error", app._md_plain(_db_s.GESPERRT_TEXT))], (_m_a, _e_a))
-    for _name_a, _attr_a, _f_a in [("_remove_archive_row", "archiv_schreiben", app._remove_archive_row),
+    for _name_a, _attr_a, _f_a in [("_remove_archive_row", "archiv_und_handwerte_schreiben", app._remove_archive_row),
                                    ("_remove_sea_launch_row", "seestarts_schreiben", app._remove_sea_launch_row)]:
         for _art_a, _werfer_a, _text_a in [("warning", _wirf_konflikt_a, _db_s.KONFLIKT_TEXT),
                                             ("error", _wirf_gesperrt_a, _db_s.GESPERRT_TEXT)]:
@@ -6448,6 +6455,7 @@ def _fake_st_f(suche=""):
     ns.caption = ns.info = ns.divider = ns.error = ns.warning = ns.success = _leer
     ns.columns = lambda n, **k: [_spalte() for _ in range(n if isinstance(n, int) else len(n))]
     ns.form = lambda *a, **k: _cl_r.nullcontext()
+    ns.container = lambda *a, **k: _cl_r.nullcontext()
     ns.form_submit_button = lambda *a, **k: False
     ns.multiselect = lambda *a, **k: []
     ns.selectbox = lambda label, optionen, *a, **k: optionen[0]
@@ -6891,10 +6899,11 @@ try:
     _zaehler_5 = []
 
     def _lesen_dann(nachher):
+        # Vor dem Schreiben liest der Import ueber archiv_mit_handwerten_lesen (Archiv und
+        # Handwerte); archiv_lesen ist hier nur noch das Zuruecklesen nach dem Speichern
         def _lesen(db=None, **k):
             _zaehler_5.append(1)
-            echt = _orig_5[5](db, **k)
-            return echt if len(_zaehler_5) == 1 else nachher(echt)
+            return nachher(_orig_5[5](db, **k))
         return _lesen
 
     def _nachher_fehler(_echt):
@@ -6955,6 +6964,1114 @@ finally:
      app.archiv_lesen, app._undo_klick, app._spaceport_editor, app._fir_editor, app._vehicle_editor,
      app._archive_editor, app._sea_launch_editor, app._export_knopf, app.archive_import_allowed,
      app.archiv_anzeigen, app._seestarts_anzeigen, app._zeige_dialog_meldungen, app.referenz_lesen) = _orig_5
+
+print("== Archiv von Hand bearbeiten: Logik ==")
+import pandas as _pd_h
+_sp_h = app.referenz_lesen("startplaetze")
+_ve_h = app.referenz_lesen("traegersysteme")
+_HAIN = {"NOTAM": "B0200/26, B0202/26, B0067/26, B0068/26", "Startdatum": "13.01.2026", "Startzeit": "15:17",
+         "Nation": "China", "Weltraumbahnhof": "HAIN", "Trägersystem": "CZ-8A", "Payload": "Xingwang Digui 18A-I",
+         "Orbit": "LEO/MEO", "Inklination": "51.3", "Azimuth": "140.8",
+         "Dropzones": "12.9178 116.4648; 7.6076 120.6037"}
+_TSLC = {"NOTAM": "A0787/26, A0788/26", "Startdatum": "25.03.2026", "Startzeit": "22:43", "Nation": "China",
+         "Weltraumbahnhof": "TSLC", "Trägersystem": "CZ-2D", "Payload": "Siwei Gaojing-2 05 & 06", "Orbit": "SSO",
+         "Inklination": "95.6", "Azimuth": "189.8", "Dropzones": "33.8297 110.6076; 29.8167 109.7583"}
+_JSLC = {"NOTAM": "A0114/26, A0115/26", "Startdatum": "15.01.2026", "Startzeit": "03:53", "Nation": "China",
+         "Weltraumbahnhof": "JSLC", "Trägersystem": "CZ-2C", "Payload": "AlSat-3A", "Orbit": "SSO",
+         "Inklination": "98.0", "Azimuth": "193.2", "Dropzones": "36.1119 98.9012; 32.5881 97.9734"}
+
+def _platz_h(code):
+    r = _sp_h[_sp_h["Kurzel"] == code].iloc[0]
+    return float(r["Latitude"]), float(r["Longitude"])
+
+for _z in (_HAIN, _TSLC, _JSLC):
+    _i, _a, _o, _hin = app.bahn_aus_platz(*_platz_h(_z["Weltraumbahnhof"]), _z["Dropzones"])
+    check("Selbstprobe {}: Inklination und Azimuth +-1 Grad".format(_z["Weltraumbahnhof"]),
+          abs(float(_i) - float(_z["Inklination"])) <= 1 and abs(float(_a) - float(_z["Azimuth"])) <= 1
+          and _o == _z["Orbit"] and _hin == "", (_i, _a, _o, _hin))
+_i1, _a1, _o1, _h1x = app.bahn_aus_platz(*_platz_h("HAIN"), _HAIN["Dropzones"])
+check("bahn_aus_platz: eine Nachkommastelle",
+      re.fullmatch(r"\d+\.\d", _i1) is not None and re.fullmatch(r"\d+\.\d", _a1) is not None, (_i1, _a1))
+check("bahn_aus_platz: keine Dropzones -> leer + Hinweis",
+      app.bahn_aus_platz(19.6, 110.9, "") == ("", "", "-", "no drop zones to compute the orbit from"))
+check("bahn_aus_platz: Zone auf dem Platz -> leer + Hinweis",
+      app.bahn_aus_platz(19.6310, 110.9458, "19.6310 110.9458; 7.6 120.6")[3] == "zone on the launch site")
+
+_erl_h = app.archiv_erlaubt(_sp_h, _ve_h, "China")
+check("erlaubt: Orbit-Liste", list(_erl_h["Orbit"]) == list(app.ORBIT_AUSWAHL))
+check("erlaubt: Trennzeile nicht waehlbar", app.VEHICLE_SEPARATOR not in _erl_h["Trägersystem"]
+      and app.VEHICLE_NONE in _erl_h["Trägersystem"])
+_cn_h = [str(c) for c, l in zip(_sp_h["Kurzel"], _sp_h["Land"]) if l == "China"]
+_pl_h = list(_erl_h["Weltraumbahnhof"])
+check("erlaubt: chinesische Plaetze zuerst",
+      _pl_h[:len(_cn_h)] and set(_pl_h[:len(_cn_h)]) == set(_cn_h), _pl_h[:len(_cn_h) + 1])
+
+# Payload
+check("Payload: Zeilenumbruch -> Leerzeichen", app.payload_bereinigen(" a\nb ") == "a b")
+check("Payload: '-' erlaubt", app.payload_bereinigen("-") == "-")
+for _bad in ("=HYPERLINK(1)", "+1", "@SUM", "\tx", "x" * 201):
+    try:
+        app.payload_bereinigen(_bad); check("Payload abgelehnt: {!r}".format(_bad[:6]), False)
+    except app.ArchivEingabeFehler:
+        check("Payload abgelehnt: {!r}".format(_bad[:6]), True)
+
+# Nur Geaendertes markieren, nola_wert bleibt der erste
+_z1, _m1, _h1 = app.archiv_zeile_bearbeiten(dict(_HAIN), {"Payload": "Neu", "Nation": "China"}, {}, _erl_h, _sp_h)
+check("nur Payload markiert", _m1 == {"Payload": ("Xingwang Digui 18A-I", "hand")} and _z1["Payload"] == "Neu", _m1)
+_z2, _m2, _ = app.archiv_zeile_bearbeiten(_z1, {"Payload": "Neuer"}, _m1, _erl_h, _sp_h)
+check("zweite Aenderung behaelt den ersten nola_wert", _m2["Payload"] == ("Xingwang Digui 18A-I", "hand"))
+_z3, _m3, _ = app.archiv_zeile_bearbeiten(_z2, {"Payload": "Xingwang Digui 18A-I"}, _m2, _erl_h, _sp_h)
+check("zurueck auf NOLA-Wert entfernt die Markierung", _m3 == {} and _z3["Payload"] == "Xingwang Digui 18A-I")
+
+# Platzwechsel HAIN -> WSLC (2 km entfernt): gleiche Bahnwerte, also keine berechnete Marke
+_zw, _mw, _ = app.archiv_zeile_bearbeiten(dict(_HAIN), {"Weltraumbahnhof": "WSLC"}, {}, _erl_h, _sp_h)
+check("Platzwechsel HAIN->WSLC: Inklination +-1 Grad, nur der Platz markiert",
+      abs(float(_zw["Inklination"]) - 51.3) <= 1 and _mw == {"Weltraumbahnhof": ("HAIN", "hand")}, (_zw["Inklination"], _mw))
+# Platzwechsel JSLC -> TSLC: andere Bahn (gerechnet 137.4 / 251.7 / RETRO), alle drei berechnet markiert
+_z4, _m4, _h4 = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "TSLC"}, {}, _erl_h, _sp_h)
+check("Platzwechsel: Platz hand, Bahn berechnet",
+      _m4["Weltraumbahnhof"] == ("JSLC", "hand") and _m4.get("Inklination", ("", ""))[1] == "berechnet"
+      and _m4.get("Azimuth", ("", ""))[1] == "berechnet" and _m4.get("Orbit") == ("SSO", "berechnet"), _m4)
+_z5, _m5, _ = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "TSLC", "Orbit": "GTO"}, {}, _erl_h, _sp_h)
+check("Platzwechsel mit Hand-Orbit: Orbit bleibt hand", _z5["Orbit"] == "GTO" and _m5["Orbit"] == ("SSO", "hand"), _m5)
+_z6, _m6, _ = app.archiv_zeile_bearbeiten(_z4, {"Weltraumbahnhof": "JSLC"}, _m4, _erl_h, _sp_h)
+check("Platz zurueck: Bahnwerte zurueck, keine Markierung",
+      _m6 == {} and all(_z6[s] == _JSLC[s] for s in ("Inklination", "Azimuth", "Orbit")), (_m6, _z6))
+_ohne = dict(_HAIN, Dropzones="")
+_z7, _m7, _h7 = app.archiv_zeile_bearbeiten(_ohne, {"Weltraumbahnhof": "WSLC"}, {}, _erl_h, _sp_h)
+check("ohne Dropzones: Bahn leer + Hinweis", _z7["Inklination"] == "" and
+      "no drop zones to compute the orbit from" in " ".join(_h7), _h7)
+_sea = dict(_HAIN, Weltraumbahnhof="SEA-21N112E")
+_z8, _m8, _h8 = app.archiv_zeile_bearbeiten(_sea, {"Payload": "x"}, {}, _erl_h, _sp_h)
+check("aktueller Wert ausserhalb der Liste bleibt gueltig (SEA-Platz)", _z8["Weltraumbahnhof"] == "SEA-21N112E")
+_z9, _m9, _h9 = app.archiv_zeile_bearbeiten(dict(_HAIN), {"Weltraumbahnhof": "KSS"}, {},
+                                            app.archiv_erlaubt(_sp_h, _ve_h, "China"), _sp_h)
+check("Platz passt nicht zur Nation: nur Hinweis", _z9["Weltraumbahnhof"] == "KSS" and
+      any("nation" in h for h in _h9), _h9)
+
+for _label, _neu in [("Nation", {"Nation": "Atlantis"}), ("Platz", {"Weltraumbahnhof": "XXXX"}),
+                     ("Vehicle", {"Trägersystem": "NOPE-1"}), ("Trennzeile", {"Trägersystem": app.VEHICLE_SEPARATOR}),
+                     ("Orbit", {"Orbit": "MARS"}), ("Payload", {"Payload": "=1"})]:
+    try:
+        app.archiv_zeile_bearbeiten(dict(_HAIN), _neu, {}, _erl_h, _sp_h); check("abgelehnt: " + _label, False)
+    except app.ArchivEingabeFehler:
+        check("abgelehnt: " + _label, True)
+
+# Reset
+_r1, _rm1 = app.archiv_feld_zuruecksetzen(_z5, _m5, "Weltraumbahnhof")
+check("Reset Platz: berechnete zurueck, Hand-Orbit bleibt",
+      _r1["Weltraumbahnhof"] == "JSLC" and _r1["Inklination"] == "98.0" and _rm1 == {"Orbit": ("SSO", "hand")}, _rm1)
+_r2, _rm2 = app.archiv_feld_zuruecksetzen(_r1, _rm1, "Orbit")
+check("Reset Orbit", _r2["Orbit"] == "SSO" and _rm2 == {})
+
+# Index, Tabelle, Bereinigen, Ueberschneidung
+_k = app.archive_key(_HAIN)
+_hw_h = app.handwerte_mit(_pd_h.DataFrame(columns=list(app.nola_db.FACHTABELLEN["archiv_handwerte"])),
+                          _k, _m4, "2026-10-15T00:00:00+00:00")
+check("handwerte_mit/handwerte_index Rundweg", app.handwerte_index(_hw_h) == {_k: _m4})
+check("handwerte_mit: leere Marken entfernen die Zeilen",
+      app.handwerte_mit(_hw_h, _k, {}, "x").empty)
+_ar_h = _pd_h.DataFrame([_HAIN, _TSLC])
+check("bereinigen behaelt vorhandene", len(app.handwerte_bereinigen(_hw_h, _ar_h)) == len(_hw_h))
+check("bereinigen entfernt verwaiste", app.handwerte_bereinigen(_hw_h, _pd_h.DataFrame([_TSLC])).empty)
+_dup = dict(_HAIN, NOTAM="B0200/26")
+_ar_d = _pd_h.DataFrame([_HAIN, _dup, _TSLC, dict(_TSLC, Startdatum="26.03.2026", NOTAM="B0200/26")])
+check("Ueberschneidung: genau die beiden Zeilen desselben Datums",
+      app.ueberschneidende_schluessel(_ar_d) == {app.archive_key(_HAIN), app.archive_key(_dup)})
+
+# Fix-Runde 1
+for _bad in ("\rx", " =x", "\n=x"):
+    try:
+        app.payload_bereinigen(_bad); check("Payload abgelehnt (R1): {!r}".format(_bad), False)
+    except app.ArchivEingabeFehler:
+        check("Payload abgelehnt (R1): {!r}".format(_bad), True)
+check("Payload: genau 200 Zeichen erlaubt", app.payload_bereinigen("x" * 200) == "x" * 200)
+try:
+    app.payload_bereinigen("=x")
+except app.ArchivEingabeFehler as _e_h:
+    check("Payload-Meldung nennt carriage return", "carriage return" in str(_e_h) and "line break" not in str(_e_h), str(_e_h))
+_zz, _mz, _hz = app.archiv_zeile_bearbeiten(
+    dict(_HAIN, Dropzones="{:.4f} {:.4f}; 7.6 120.6".format(*_platz_h("WSLC"))), {"Weltraumbahnhof": "WSLC"}, {}, _erl_h, _sp_h)
+check("Zone auf dem Platz ueber Bearbeiten: Hinweis, Bahn leer",
+      "zone on the launch site" in _hz and _zz["Inklination"] == "" and _zz["Azimuth"] == "", (_hz, _zz["Inklination"]))
+# F1: NaN-Koordinaten
+_sp_nan = _pd_h.concat([_sp_h, _sp_h[_sp_h["Kurzel"] == "HAIN"].assign(Kurzel="NOC", Latitude=float("nan"),
+                                                                       Longitude=float("nan"))], ignore_index=True)
+_zn, _mn, _hn = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "NOC"}, {},
+                                            app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+# Abschlussreview M5: Bahn unbekannt wie ohne Dropzones (leer, Orbit "-", berechnet), nicht stehen lassen
+check("NaN-Koordinaten: Bahn leer, Orbit '-', berechnet markiert, Hinweis",
+      _zn["Inklination"] == "" and _zn["Azimuth"] == "" and _zn["Orbit"] == "-"
+      and any("no coordinates" in h for h in _hn)
+      and all(_mn.get(s, ("", ""))[1] == "berechnet" for s in ("Inklination", "Azimuth", "Orbit")), (_zn, _mn, _hn))
+# F2: geaendert_utc = Zeitpunkt der letzten Handaenderung
+_leer_h = _pd_h.DataFrame(columns=list(app.nola_db.FACHTABELLEN["archiv_handwerte"]))
+_mp = {"Payload": ("Alt", "hand")}
+_t1 = app.handwerte_mit(_leer_h, _k, _mp, "T1")
+_t2 = app.handwerte_mit(_t1, _k, _mp, "T2", geaendert={"Payload"})
+check("geaendert_utc: geaenderte Marke bekommt den neuen Zeitpunkt", list(_t2["geaendert_utc"]) == ["T2"], _t2.to_dict("records"))
+_t3 = app.handwerte_mit(_t1, _k, _mp, "T2")
+check("geaendert_utc: ohne geaendert bleibt der Zeitpunkt", list(_t3["geaendert_utc"]) == ["T1"], _t3.to_dict("records"))
+_t4 = app.handwerte_mit(_t1, _k, dict(_mp, Orbit=("SSO", "hand")), "T2", geaendert={"Orbit"})
+check("geaendert_utc: neue Marke jetzt, andere behalten",
+      dict(zip(_t4["spalte"], _t4["geaendert_utc"])) == {"Payload": "T1", "Orbit": "T2"}, _t4.to_dict("records"))
+_t5 = app.handwerte_mit(_t1, _k, dict(_mp, Orbit=("SSO", "hand")), "T2")
+check("geaendert_utc: neue Marke ohne geaendert bekommt jetzt",
+      dict(zip(_t5["spalte"], _t5["geaendert_utc"])) == {"Payload": "T1", "Orbit": "T2"}, _t5.to_dict("records"))
+# F3: Nur Nation geaendert
+_, _, _hn1 = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Nation": "Russland"}, {}, app.archiv_erlaubt(_sp_h, _ve_h, "China"), _sp_h)
+check("nur Nation geaendert: Hinweis bei unpassendem Platz", len([h for h in _hn1 if "nation" in h]) == 1, _hn1)
+_, _, _hn2 = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Nation": "China", "Payload": "x"}, {}, _erl_h, _sp_h)
+check("Nation passt: kein Nationshinweis", not any("nation" in h for h in _hn2), _hn2)
+_, _, _hn3 = app.archiv_zeile_bearbeiten(dict(_HAIN), {"Weltraumbahnhof": "KSS"}, {}, _erl_h, _sp_h)
+check("Platzwechsel + Nation: Nationshinweis nur einmal", len([h for h in _hn3 if "nation" in h]) == 1, _hn3)
+
+print("== Archiv von Hand bearbeiten: Schreibwege ==")
+_hwsp = list(app.nola_db.FACHTABELLEN["archiv_handwerte"])
+_alt_m = {"NOTAM": "Z7001/26", "Startdatum": "01.10.2026", "Startzeit": "01:00", "Nation": "China",
+          "Weltraumbahnhof": "WSLC", "Trägersystem": "", "Payload": "", "Orbit": "LEO/MEO",
+          "Inklination": "41.0", "Azimuth": "120.0", "Dropzones": ""}
+_k_m = app.archive_key(_alt_m)
+_hand = {_k_m: {"Weltraumbahnhof", "Orbit"}}
+_neuer_lauf = dict(_alt_m, Weltraumbahnhof="WSLC", Orbit="SSO", Inklination="97.0", Startzeit="02:00")
+_bestand_m = _pd_h.DataFrame([dict(_alt_m, Weltraumbahnhof="HAIN", Orbit="GTO")])
+_m_erg = app.merge_archive(_bestand_m, [_neuer_lauf], set(), _hand).iloc[0]
+check("merge: markierte Spalten bleiben", _m_erg["Weltraumbahnhof"] == "HAIN" and _m_erg["Orbit"] == "GTO")
+check("merge: unmarkierte aktualisiert", _m_erg["Startzeit"] == "02:00" and _m_erg["Inklination"] == "97.0")
+check("merge ohne handwerte wie bisher",
+      app.merge_archive(_bestand_m, [_neuer_lauf], set()).iloc[0]["Weltraumbahnhof"] == "WSLC")
+_bestand_p = _pd_h.DataFrame([dict(_alt_m, Payload="Alt-P", **{"Trägersystem": "CZ-2D"})])
+_m_p = app.merge_archive(_bestand_p, [dict(_alt_m, Payload="Neu-P")], set(), {_k_m: {"Payload"}}).iloc[0]
+check("merge: markierte Payload bleibt, Traegersystem-Sonderregel unveraendert",
+      _m_p["Payload"] == "Alt-P" and _m_p["Trägersystem"] == "CZ-2D", dict(_m_p))
+check("merge: Marken eines unbekannten Schluessels wirken nicht auf neue Zeilen",
+      app.merge_archive(_bestand_m.iloc[0:0], [_neuer_lauf], set(), _hand).iloc[0]["Orbit"] == "SSO")
+
+_st_orig_m = app.st; app.st = _StR()
+_db_orig_m = app.DB_PATH
+_lab_orig_m = app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    check("lesen: beide mit Stand", "nola_stand" in _a.attrs and "nola_stand" in _h.attrs)
+    _a2 = app.merge_archive(_a, [dict(_alt_m, Weltraumbahnhof="HAIN")], set())
+    _h2 = app.handwerte_mit(_h, _k_m, {"Weltraumbahnhof": ("WSLC", "hand")}, "2026-10-15T00:00:00+00:00")
+    app.archiv_und_handwerte_schreiben(_a2, _h2, _a, _h)
+    # Tageslauf liefert WSLC - Handwert HAIN muss bleiben
+    _a3, _h3 = app.archiv_mit_handwerten_lesen()
+    _lauf = app.merge_archive(_a3, [_alt_m], set(),
+                              {k: set(v) for k, v in app.handwerte_index(_h3).items()})
+    app.archiv_und_handwerte_schreiben(_lauf, _h3, _a3, _h3)
+    _nach = app.archiv_lesen()
+    check("Handwert ueberlebt den Lauf",
+          _nach[_nach["NOTAM"] == "Z7001/26"].iloc[0]["Weltraumbahnhof"] == "HAIN")
+    # Konflikt nur ueber die Handwerte
+    _a4, _h4 = app.archiv_mit_handwerten_lesen()
+    with app._db() as _c:
+        app.nola_db.ersetze_tabelle(_c, "archiv_handwerte", _h4.iloc[0:0], _h4.attrs["nola_stand"])
+    try:
+        app.archiv_und_handwerte_schreiben(_a4, _h4, _a4, _h4); check("fremde Handwert-Aenderung -> Konflikt", False)
+    except app.nola_db.Konflikt:
+        _a4b, _h4b = app.archiv_mit_handwerten_lesen()
+        check("fremde Handwert-Aenderung -> Konflikt, nichts geschrieben",
+              _a4b.attrs["nola_stand"] == _a4.attrs["nola_stand"] and _h4b.empty)
+    try:
+        app.archiv_und_handwerte_schreiben(_a4, _h4, _pd_h.DataFrame(columns=list(app.ARCHIVE_COLUMNS)), _h4)
+        check("ohne Stand -> ValueError", False)
+    except ValueError:
+        check("ohne Stand -> ValueError", True)
+    # wieder markieren fuer Entfernen/Undo
+    _a5, _h5 = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(_a5, app.handwerte_mit(_h5, _k_m, {"Weltraumbahnhof": ("WSLC", "hand")}, "t"), _a5, _h5)
+    app._remove_archive_row(_k_m)
+    _a6, _h6 = app.archiv_mit_handwerten_lesen()
+    check("Entfernen loescht Zeile und Markierung",
+          "Z7001/26" not in set(_a6["NOTAM"]) and _k_m not in set(_h6["schluessel"]))
+    check("  ... Undo-Eintrag fuehrt beide Tabellen",
+          [t["tabelle"] for t in app.st.session_state["ref_undo"][-1].get("weitere", [])] == ["archiv_handwerte"])
+    app._undo_reference()
+    _a7, _h7 = app.archiv_mit_handwerten_lesen()
+    check("Undo stellt Zeile und Markierung wieder her",
+          "Z7001/26" in set(_a7["NOTAM"]) and _k_m in set(_h7["schluessel"]))
+    app._remove_archive_row(_k_m)
+    _a8, _h8 = app.archiv_mit_handwerten_lesen()
+    with app._db() as _c:
+        app.nola_db.ersetze_tabelle(_c, "archiv_handwerte",
+                                    app.handwerte_mit(_h8, "x|y", {"Nation": ("China", "hand")}, "t"),
+                                    _h8.attrs["nola_stand"])
+    try:
+        app._undo_reference(); check("Undo nach fremder Handwert-Aenderung verweigert", False)
+    except app.UndoRefused as _e_u:
+        _a9, _h9 = app.archiv_mit_handwerten_lesen()
+        check("Undo nach fremder Handwert-Aenderung verweigert, nichts geaendert",
+              "Z7001/26" not in set(_a9["NOTAM"]) and _a9.attrs["nola_stand"] == _a8.attrs["nola_stand"]
+              and set(_h9["schluessel"]) == {"x|y"} and str(_e_u) == app.ARCHIVE_UNDO_REFUSED, str(_e_u))
+    # Undo nach fremder Aenderung am Archiv (die Handwerte bleiben gleich)
+    _a10, _h10 = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(_a10, app.handwerte_mit(_h10, _k_m, {"Orbit": ("LEO/MEO", "hand")}, "t"), _a10, _h10)
+    app._remove_archive_row(_k_m)
+    _a11, _h11 = app.archiv_mit_handwerten_lesen()
+    app.archiv_schreiben(app.merge_archive(_a11, [dict(_alt_m, NOTAM="Z7002/26")], set()), vorher=_a11)
+    _a11b = app.archiv_lesen()
+    try:
+        app._undo_reference(); check("Undo nach fremder Archiv-Aenderung verweigert", False)
+    except app.UndoRefused:
+        _a12, _h12 = app.archiv_mit_handwerten_lesen()
+        check("Undo nach fremder Archiv-Aenderung verweigert, nichts geaendert",
+              _a12.attrs["nola_stand"] == _a11b.attrs["nola_stand"]
+              and _h12.attrs["nola_stand"] == _h11.attrs["nola_stand"] and _k_m not in set(_h12["schluessel"]))
+    # Alter Undo-Eintrag mit einer Tabelle (ohne "weitere") funktioniert unveraendert
+    _a13 = app.archiv_lesen()
+    _neu13 = app.archiv_schreiben(_a13[_a13["NOTAM"] != "Z7002/26"], vorher=_a13)
+    app.st.session_state.setdefault("ref_undo", []).append(
+        {"tabelle": "startarchiv", "zeilen": _a13[list(app.ARCHIVE_COLUMNS)].to_dict("records"),
+         "nachher": _neu13, "label": "alt"})
+    check("alter Undo-Eintrag mit einer Tabelle", app._undo_reference() == "alt"
+          and "Z7002/26" in set(app.archiv_lesen()["NOTAM"]))
+    # Unlesbare DB: Entfernen schreibt nichts, meldet im Dialog
+    app.DB_PATH = _kaputte_db()
+    app.st.session_state.pop("ref_flash_error", None)
+    app._remove_archive_row(_k_m)
+    check("Entfernen bei unlesbarer DB: Meldung, nichts entfernt",
+          "Nothing was removed" in app.st.session_state.get("ref_flash_error", ""))
+    try:
+        app.archiv_mit_handwerten_lesen(); check("archiv_mit_handwerten_lesen: unlesbar -> ArchiveUnreadable", False)
+    except app.ArchiveUnreadable:
+        check("archiv_mit_handwerten_lesen: unlesbar -> ArchiveUnreadable", True)
+finally:
+    app.st = _st_orig_m
+    app.DB_PATH = _db_orig_m
+    app.local_admin_allowed = _lab_orig_m
+
+# Tageslauf: Konflikt nur ueber die Handwerte -> einmal neu lesen, die fremde Markierung gilt
+import types as _types_m
+_orig_t = (app.st, app.DB_PATH, app.archive_row, app.archiv_mit_handwerten_lesen)
+try:
+    app.st = _StR()
+    app.DB_PATH = _temp_db()
+    _alt_t = app.archiv_lesen()
+    app.archiv_schreiben(_pd_h.DataFrame([dict(_alt_m, Orbit="GTO")], columns=list(app.ARCHIVE_COLUMNS)), vorher=_alt_t)
+    app.archive_row = lambda g, ev: dict(_alt_m, Orbit="SSO")
+    _grp_t = [_types_m.SimpleNamespace(spaceport_code="WSLC", row_indices=[0], site_from_geometry=True)]
+    _tab_t = _pd_h.DataFrame({"Status": ["OK"], "_row": [0]})
+    _lesen_echt_t = _orig_t[3]
+    _aufrufe_t = []
+    def _lesen_dann_fremd_markieren(db=None, wartezeit=app.nola_db.WARTEZEIT):
+        _erg = _lesen_echt_t(db, wartezeit)
+        _aufrufe_t.append(1)
+        if len(_aufrufe_t) == 1:  # ein anderer Reiter markiert Orbit zwischen Lesen und Schreiben
+            _ah, _hh = _lesen_echt_t(db)
+            app.archiv_und_handwerte_schreiben(
+                _ah, app.handwerte_mit(_hh, _k_m, {"Orbit": ("LEO/MEO", "hand")}, "t"), _ah, _hh, db=db)
+        return _erg
+    app.archiv_mit_handwerten_lesen = _lesen_dann_fremd_markieren
+    app._update_archive([], _grp_t, _tab_t)
+    app.archiv_mit_handwerten_lesen = _lesen_echt_t
+    _at, _ht = app.archiv_mit_handwerten_lesen()
+    check("Tageslauf: Konflikt nur ueber Handwerte -> einmal neu gelesen",
+          len(_aufrufe_t) == 2, len(_aufrufe_t))
+    check("  ... fremde Markierung gilt: Orbit bleibt, Markierung bleibt",
+          list(_at["Orbit"]) == ["GTO"] and app.handwerte_index(_ht) == {_k_m: {"Orbit": ("LEO/MEO", "hand")}},
+          (_at.to_dict("records"), _ht.to_dict("records")))
+    check("  ... ohne Warnung", not app.st.session_state.get("_w"), app.st.session_state.get("_w"))
+    # Unmarkierte Spalte schreibt der naechste Lauf fort, die markierte nicht
+    app.archive_row = lambda g, ev: dict(_alt_m, Orbit="SSO", Startzeit="03:00")
+    app._update_archive([], _grp_t, _tab_t)
+    _at2 = app.archiv_lesen()
+    check("Tageslauf: unmarkierte Spalte fortgeschrieben, markierte bleibt",
+          list(_at2["Startzeit"]) == ["03:00"] and list(_at2["Orbit"]) == ["GTO"], _at2.to_dict("records"))
+finally:
+    app.st, app.DB_PATH, app.archive_row, app.archiv_mit_handwerten_lesen = _orig_t
+
+# Archiv-Import: confirm_many und remove_orphan beachten die Markierungen
+_MELDUNG_AR_m = "The launch archive changed meanwhile - nothing was written, please reload the tab."
+_db_i = _temp_db()
+_vor_i = app.archiv_lesen(_db_i)
+_zeile_i = dict(_alt_m, Payload="Hand-P")
+_zeile_i2 = dict(_alt_m, NOTAM="Z7003/26", Startdatum="02.10.2026", Payload="Hand-Q")
+_zeile_i3 = dict(_alt_m, NOTAM="Z7005/26", Startdatum="03.10.2026")
+_k_i, _k_i2, _k_i3 = app.archive_key(_zeile_i), app.archive_key(_zeile_i2), app.archive_key(_zeile_i3)
+app.archiv_schreiben(_pd_h.DataFrame([_zeile_i, _zeile_i2, _zeile_i3], columns=list(app.ARCHIVE_COLUMNS)), vorher=_vor_i, db=_db_i)
+_ai_i, _hi_i = app.archiv_mit_handwerten_lesen(_db_i)
+_hw_i = app.handwerte_mit(_hi_i, _k_i, {"Payload": ("", "hand")}, "t")
+_hw_i = app.handwerte_mit(_hw_i, _k_i2, {"Payload": ("", "hand")}, "t")
+app.archiv_und_handwerte_schreiben(_ai_i, _hw_i, _ai_i, _hi_i, db=_db_i)
+_kand_e = {"key": "erg-1", "row": dict(_zeile_i), "notam_ids": ["Z7001/26"], "quellen": ["q"], "im_archiv": [_k_i]}
+# Fremde Aenderung an den Markierungen -> ImportStateError, nichts geschrieben
+_zi = ai.zustand_laden(_db_i)
+_zs_vor_i = _zi.nola_stand
+_ai_s, _hi_s = app.archiv_mit_handwerten_lesen(_db_i)  # Reiter A liest
+_ai_f, _hi_f = app.archiv_mit_handwerten_lesen(_db_i)
+app.archiv_und_handwerte_schreiben(_ai_f, app.handwerte_mit(_hi_f, _k_i3, {"Nation": ("China", "hand")}, "t"),
+                                   _ai_f, _hi_f, db=_db_i)  # Reiter B markiert
+_ai_n, _hi_n = app.archiv_mit_handwerten_lesen(_db_i)
+_orig_lesen_i = app.archiv_mit_handwerten_lesen
+app.archiv_mit_handwerten_lesen = lambda db=None, **_k: (_ai_s, _hi_s)
+try:
+    def _versuch_i(f):
+        try:
+            f()
+        except ai.ImportStateError as exc:
+            return str(exc)
+        return None
+    _f_c_i = _versuch_i(lambda: ai.confirm_many(_zi, [(_kand_e, "CZ-2D", "Import-P", None)], _db_i))
+    _f_r_i = _versuch_i(lambda: ai.remove_orphan(_zi, _k_i, _db_i))
+finally:
+    app.archiv_mit_handwerten_lesen = _orig_lesen_i
+_ai_n2, _hi_n2 = app.archiv_mit_handwerten_lesen(_db_i)
+check("Import: fremde Markierung -> Bestaetigen und Remove melden Konflikt",
+      _f_c_i == _MELDUNG_AR_m and _f_r_i == _MELDUNG_AR_m, (_f_c_i, _f_r_i))
+check("  ... nichts geschrieben: Archiv, Markierungen und Zustand unveraendert",
+      _ai_n2.attrs["nola_stand"] == _ai_n.attrs["nola_stand"] and _hi_n2.attrs["nola_stand"] == _hi_n.attrs["nola_stand"]
+      and ai.zustand_laden(_db_i).nola_stand == _zs_vor_i and "erg-1" not in _zi["entscheidungen"])
+# Ergaenzen: markierte Payload bleibt, unmarkiertes Traegersystem wird ergaenzt
+_zi = ai.zustand_laden(_db_i)
+ai.confirm_many(_zi, [(_kand_e, "CZ-2D", "Import-P", None)], _db_i)
+_ae = app.archiv_lesen(_db_i)
+_re = _ae[_ae["NOTAM"] == "Z7001/26"].iloc[0]
+check("confirm_many: markierte Payload unveraendert, Traegersystem ergaenzt",
+      _re["Payload"] == "Hand-P" and _re["Trägersystem"] == "CZ-2D", dict(_re))
+# Anlegen einer Zeile, deren Schluessel Markierungen hat: markierte Spalte bleibt
+_kand_a = {"key": "anl-1", "row": dict(_zeile_i2, Payload=""), "notam_ids": ["Z7003/26"], "quellen": ["q"]}
+_zi = ai.zustand_laden(_db_i)
+ai.confirm_many(_zi, [(_kand_a, "CZ-4C", "Import-Q", None)], _db_i)
+_aa = app.archiv_lesen(_db_i)
+_ra = _aa[_aa["NOTAM"] == "Z7003/26"].iloc[0]
+check("confirm_many: Anlegen ueber markierte Zeile behaelt markierte Payload",
+      len(_aa[_aa["NOTAM"] == "Z7003/26"]) == 1 and _ra["Payload"] == "Hand-Q" and _ra["Trägersystem"] == "CZ-4C", dict(_ra))
+# Ersetzen: die ersetzte Zeile verliert ihre Markierungen
+_zeile_r = dict(_zeile_i2, NOTAM="Z7003/26, Z7004/26", Payload="")
+_kand_r = {"key": app.archive_key(_zeile_r), "row": _zeile_r, "notam_ids": ["Z7003/26", "Z7004/26"],
+           "quellen": ["q"], "ersetzt": [_k_i2]}
+_zi = ai.zustand_laden(_db_i)
+ai.confirm_many(_zi, [(_kand_r, "CZ-4C", "Neu-R", None)], _db_i)
+_ar_i, _hr_i = app.archiv_mit_handwerten_lesen(_db_i)
+check("confirm_many: ersetzte Zeile verliert ihre Markierungen, andere bleiben",
+      _k_i2 not in set(_hr_i["schluessel"]) and _k_i in set(_hr_i["schluessel"])
+      and _k_i2 not in {app.archive_key(dict(r)) for _, r in _ar_i.iterrows()}, _hr_i.to_dict("records"))
+# remove_orphan loescht die Markierungen der Zeile mit
+_zi = ai.zustand_laden(_db_i)
+ai.remove_orphan(_zi, _k_i, _db_i)
+_ao_i, _ho_i = app.archiv_mit_handwerten_lesen(_db_i)
+check("remove_orphan: Zeile und Markierungen weg, fremde bleiben",
+      _k_i not in {app.archive_key(dict(r)) for _, r in _ao_i.iterrows()}
+      and _k_i not in set(_ho_i["schluessel"]) and set(_ho_i["schluessel"]) == {_k_i3}, _ho_i.to_dict("records"))
+
+
+print("== Archiv von Hand bearbeiten: Oberflaeche ==")
+_st_orig_u = app.st; app.st = _StR()
+_db_orig_u = app.DB_PATH
+_lab_orig_u = app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    _sp_u, _ve_u = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_HAIN), dict(_JSLC)], set()), _h, _a, _h)
+    _k_u = app.archive_key(_HAIN)
+    _k_j = app.archive_key(_JSLC)
+    app.local_admin_allowed = lambda: True
+    check("Speichern JSLC->TSLC: Bahn als berechnet markiert",
+          app._archiv_edit_speichern(_k_j, {"Weltraumbahnhof": "TSLC"}, _sp_u, _ve_u) is True
+          and app.handwerte_index(app.archiv_mit_handwerten_lesen()[1])[_k_j]["Inklination"][1] == "berechnet")
+    app.local_admin_allowed = lambda: True
+    check("Speichern ok", app._archiv_edit_speichern(_k_u, {"Weltraumbahnhof": "WSLC"}, _sp_u, _ve_u) is True)
+    _a1, _h1 = app.archiv_mit_handwerten_lesen()
+    _z_u = _a1[_a1["NOTAM"] == _HAIN["NOTAM"]].iloc[0]
+    check("Speichern: Platz geschrieben und markiert",
+          _z_u["Weltraumbahnhof"] == "WSLC" and app.handwerte_index(_h1)[_k_u]["Weltraumbahnhof"] == ("HAIN", "hand"))
+    check("Speichern: ein Undo-Eintrag mit zwei Tabellen",
+          app.st.session_state["ref_undo"][-1].get("weitere", [{}])[0].get("tabelle") == "archiv_handwerte")
+    check("Reset ok", app._archiv_reset_klick(_k_u, "Weltraumbahnhof") is True)
+    _a2, _h2 = app.archiv_mit_handwerten_lesen()
+    check("Reset: Platz zurueck, keine Markierung",
+          _a2[_a2["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Weltraumbahnhof"] == "HAIN" and _k_u not in app.handwerte_index(_h2))
+    app._undo_reference()
+    _a3, _h3 = app.archiv_mit_handwerten_lesen()
+    check("Undo nach Reset: WSLC und Markierung wieder da",
+          _a3[_a3["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Weltraumbahnhof"] == "WSLC" and _k_u in app.handwerte_index(_h3))
+    app.st.session_state.pop("ref_flash_error", None)
+    check("ungueltiger Wert: verweigert",
+          app._archiv_edit_speichern(_k_u, {"Orbit": "MARS"}, _sp_u, _ve_u) is False
+          and "allowed" in app.st.session_state.get("ref_flash_error", ""))
+    check("Zeile fehlt: verweigert mit Warnung",
+          app._archiv_edit_speichern("gibt-es-nicht", {"Payload": "x"}, _sp_u, _ve_u) is False
+          and app.st.session_state.get("ref_flash_warning") == app.ARCHIV_ZEILE_FEHLT)
+    # Konflikt: Archiv zwischen Lesen und Schreiben fremd geaendert
+    _orig_lesen_u = app.archiv_mit_handwerten_lesen
+    def _lesen_und_stoeren(*a, **k):
+        _ar, _hw = _orig_lesen_u(*a, **k)
+        _x, _y = _orig_lesen_u()
+        app.archiv_und_handwerte_schreiben(app.merge_archive(_x, [dict(_TSLC)], set()), _y, _x, _y)
+        return _ar, _hw
+    app.archiv_mit_handwerten_lesen = _lesen_und_stoeren
+    try:
+        _vor_u = app.archiv_lesen()[lambda d: d["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Payload"]
+        check("Konflikt: verweigert", app._archiv_edit_speichern(_k_u, {"Payload": "Konflikt"}, _sp_u, _ve_u) is False
+              and app.st.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT)
+    finally:
+        app.archiv_mit_handwerten_lesen = _orig_lesen_u
+    check("Konflikt: nichts geschrieben",
+          app.archiv_lesen()[lambda d: d["NOTAM"] == _HAIN["NOTAM"]].iloc[0]["Payload"] == _vor_u)
+    app.local_admin_allowed = lambda: False
+    _stand_u = app.archiv_mit_handwerten_lesen()
+    check("nicht lokal: Speichern verweigert",
+          app._archiv_edit_speichern(_k_u, {"Payload": "x"}, _sp_u, _ve_u) is False
+          and app.st.session_state.get("ref_flash_error") == app.ARCHIV_EDIT_NUR_LOKAL)
+    app.st.session_state.pop("ref_flash_error", None)
+    check("nicht lokal: Reset verweigert", app._archiv_reset_klick(_k_u, "Weltraumbahnhof") is False
+          and app.st.session_state.get("ref_flash_error") == app.ARCHIV_EDIT_NUR_LOKAL)
+    _stand_u2 = app.archiv_mit_handwerten_lesen()
+    check("nicht lokal: nichts geschrieben",
+          _stand_u2[0].attrs["nola_stand"] == _stand_u[0].attrs["nola_stand"]
+          and _stand_u2[1].attrs["nola_stand"] == _stand_u[1].attrs["nola_stand"])
+    # Sortierung und Seiten
+    _df_s = _pd_h.DataFrame([dict(_HAIN, Startdatum="02.01.2026"), dict(_HAIN, Startdatum="10.12.2025"),
+                             dict(_HAIN, Startdatum="15.03.2026")])
+    check("sortiert: neuestes Datum zuerst (nicht als Text)",
+          list(app._archiv_sortiert(_df_s)["Startdatum"]) == ["15.03.2026", "02.01.2026", "10.12.2025"])
+    _df_s2 = _pd_h.DataFrame([dict(_HAIN, Startdatum="kaputt"), dict(_HAIN, Startdatum="02.01.2026")])
+    check("sortiert: unlesbares Datum ans Ende",
+          list(app._archiv_sortiert(_df_s2)["Startdatum"]) == ["02.01.2026", "kaputt"])
+finally:
+    app.st = _st_orig_u
+    app.DB_PATH = _db_orig_u
+    app.local_admin_allowed = _lab_orig_u
+import inspect as _ins_u
+_src_u = _ins_u.getsource(app._archive_editor)
+check("Editor: kein st.form, kein head(60), Blaettern, Freigabe",
+      "st.form" not in _src_u and "head(60)" not in _src_u and "ARCHIV_SEITE" in _src_u
+      and "local_admin_allowed()" in _src_u and "_md_plain(" in _src_u)
+check("Editor: Formular ohne st.form", "st.form" not in _ins_u.getsource(app._archiv_formular))
+
+# Darstellung mit einem Fake-st: Seiten, Marken, Tooltips, Formular, Freigabe
+class _StU:
+    def __init__(self, klick=(), suche=""):
+        self.session_state, self.aufrufe, self._klick, self._suche = {}, [], set(klick), suche
+
+    def __getattr__(self, name):
+        def _f(*a, **k):
+            self.aufrufe.append((name, a, k))
+            if name == "columns":
+                n = a[0] if isinstance(a[0], int) else len(a[0])
+                return [self for _ in range(n)]
+            if name == "container":
+                return self
+            if name == "button":
+                return k.get("key") in self._klick
+            if name == "selectbox":
+                return a[1][k.get("index", 0)]
+            if name == "text_input":
+                return self._suche if k.get("key") == "archiv_suche" else k.get("value", "")
+            if name == "rerun":
+                raise _RerunU(k.get("scope", "app"))
+            return None
+        return _f
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _RerunU(Exception):
+    pass
+
+
+def _zeichne_u(st_u):
+    app.st = st_u
+    try:
+        app._archive_editor(_sp_u, _ve_u)
+    except _RerunU as exc:
+        return str(exc)
+    return None
+
+
+_st_orig_u2, _db_orig_u2, _lab_orig_u2 = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    _viele_u = [dict(_HAIN, NOTAM="Z{:04d}/26".format(i), Startdatum="{:02d}.01.2025".format(1 + i % 28))
+                for i in range(120)]
+    app.archiv_und_handwerte_schreiben(
+        app.merge_archive(_a, [dict(_HAIN), dict(_JSLC)] + _viele_u, set()), _h, _a, _h)
+    _k_u = app.archive_key(_HAIN)
+    app.local_admin_allowed = lambda: True
+    app.st = _StR()
+    app._archiv_edit_speichern(_k_u, {"Weltraumbahnhof": "WSLC"}, _sp_u, _ve_u)
+    _n_u = len(app.archiv_lesen())
+    _s_u = _StU()
+    check("Darstellung: zeichnet ohne Fehler", _zeichne_u(_s_u) is None)
+    _md_u = [(a[0], k.get("help")) for n, a, k in _s_u.aufrufe if n == "markdown"]
+    _knoepfe_u = [k.get("key", "") for n, a, k in _s_u.aufrufe if n == "button"]
+    check("Darstellung: 50 Zeilen auf Seite 1, Edit und Remove je Zeile",
+          sum(1 for x in _knoepfe_u if x.startswith("rm_arc_")) == app.ARCHIV_SEITE
+          and sum(1 for x in _knoepfe_u if x.startswith("ed_arc_")) == app.ARCHIV_SEITE, len(_knoepfe_u))
+    check("Darstellung: Seitenzahl", any(n == "caption" and "Page 1 of {}".format(-(-_n_u // 50)) in str(a[0])
+                                         for n, a, k in _s_u.aufrufe))
+    check("Darstellung: Handwert-Marke mit Tooltip NOLA: HAIN",
+          any(t == "WSLC " + app.ARCHIV_MARKE_HAND and h == "NOLA: HAIN" for t, h in _md_u), _md_u[:20])
+    app._archiv_edit_speichern(app.archive_key(_JSLC), {"Weltraumbahnhof": "TSLC"}, _sp_u, _ve_u)
+    _s_ub = _StU(suche="alsat")
+    _zeichne_u(_s_ub)
+    _md_ub = [(a[0], k.get("help")) for n, a, k in _s_ub.aufrufe if n == "markdown"]
+    check("Darstellung: berechnete Bahn an der Orbit-Zelle (Tooltip mit NOLA-Inklination)",
+          any(str(t).endswith(app.ARCHIV_MARKE_BERECHNET) and str(h).startswith("NOLA: SSO, inclination 98\\.0, azimuth 193\\.2")
+              for t, h in _md_ub), [x for x in _md_ub if x[1]])
+    check("Darstellung: neuestes Datum zuerst",
+          [a[0] for n, a, k in _s_u.aufrufe if n == "markdown"].index("15\\.01\\.2026")
+          < [a[0] for n, a, k in _s_u.aufrufe if n == "markdown"].index("13\\.01\\.2026"))
+    # Seite 2
+    _s_u2 = _StU(); _s_u2.session_state["archiv_seite"] = 1
+    _zeichne_u(_s_u2)
+    check("Darstellung: Seite 2 erreichbar",
+          any(n == "caption" and str(a[0]).startswith("Page 2 of") for n, a, k in _s_u2.aufrufe))
+    _s_u3 = _StU(klick={"archiv_next"})
+    check("Darstellung: Next blaettert (Fragment-Rerun)",
+          _zeichne_u(_s_u3) == "fragment" and _s_u3.session_state.get("archiv_seite") == 1)
+    _s_u4 = _StU(); _s_u4.session_state["archiv_seite"] = 99
+    _zeichne_u(_s_u4)
+    check("Darstellung: zu grosse Seite -> letzte Seite",
+          any(n == "caption" and "Page {0} of {0}".format(-(-_n_u // 50)) in str(a[0]) for n, a, k in _s_u4.aufrufe))
+    # Suche vor dem Blaettern
+    _s_u5 = _StU(suche="alsat")
+    _s_u5.session_state["archiv_seite"] = 2
+    _zeichne_u(_s_u5)
+    check("Darstellung: Suche filtert vor dem Blaettern (Treffer trotz Seite 3)",
+          sum(1 for n, a, k in _s_u5.aufrufe if n == "button" and k.get("key", "").startswith("rm_arc_")) == 1)
+    # Formular: Edit oeffnet, Felder vorbelegt, Reset nur fuer Handwerte
+    _kurz_u = __import__("hashlib").sha1(_k_u.encode()).hexdigest()[:10]
+    _s_u6 = _StU(klick={"ed_arc_" + _kurz_u})
+    check("Formular: Edit merkt die Zeile und zeichnet neu",
+          _zeichne_u(_s_u6) == "fragment" and _s_u6.session_state.get("archiv_edit") == _k_u)
+    _s_u7 = _StU(); _s_u7.session_state["archiv_edit"] = _k_u
+    _zeichne_u(_s_u7)
+    _sel_u = {a[0]: a[1][k["index"]] for n, a, k in _s_u7.aufrufe if n == "selectbox"}
+    check("Formular: aktuelle Werte vorgewaehlt",
+          _sel_u.get("Launch site") == "WSLC" and _sel_u.get("Nation") == "China" and _sel_u.get("Orbit"), _sel_u)
+    _reset_u = [a[0] for n, a, k in _s_u7.aufrufe if n == "button" and str(a[0]).startswith("Reset ")]
+    check("Formular: Reset nur fuer den Handwert (Platz), nicht fuer berechnete",
+          len(_reset_u) == 1 and "launch site" in _reset_u[0] and "Weltraumbahnhof" not in _reset_u[0]
+          and "HAIN" in _reset_u[0], _reset_u)
+    check("Formular: kein st.form", not any(n == "form" for n, a, k in _s_u7.aufrufe))
+    _s_u8 = _StU(klick={"aed_c_" + _kurz_u}); _s_u8.session_state["archiv_edit"] = _k_u
+    check("Formular: Cancel schliesst ohne Schreiben",
+          _zeichne_u(_s_u8) == "fragment" and "archiv_edit" not in _s_u8.session_state
+          and len(app.archiv_lesen()) == _n_u)
+    _s_u9 = _StU(klick={"aed_s_" + _kurz_u}); _s_u9.session_state["archiv_edit"] = _k_u
+    _stand_u9 = app.archiv_lesen().attrs["nola_stand"]
+    check("Formular: Save ohne Aenderung schliesst (App-Rerun), schreibt nichts, kein Undo-Eintrag",
+          _zeichne_u(_s_u9) == "app" and "archiv_edit" not in _s_u9.session_state
+          and app.archiv_lesen().attrs["nola_stand"] == _stand_u9 and not _s_u9.session_state.get("ref_undo"))
+    # nicht lokal: keine Edit-/Reset-Knoepfe, Formular bleibt zu, Marken bleiben sichtbar
+    app.local_admin_allowed = lambda: False
+    _s_u10 = _StU(); _s_u10.session_state["archiv_edit"] = _k_u
+    _zeichne_u(_s_u10)
+    check("nicht lokal: keine Edit-/Reset-Knoepfe, kein Formular",
+          not any(n == "button" and (k.get("key", "").startswith(("ed_arc_", "aed_")))
+                  for n, a, k in _s_u10.aufrufe)
+          and not any(n == "selectbox" for n, a, k in _s_u10.aufrufe))
+    check("nicht lokal: Marken bleiben sichtbar",
+          any(n == "markdown" and a[0] == "WSLC " + app.ARCHIV_MARKE_HAND for n, a, k in _s_u10.aufrufe))
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_u2, _db_orig_u2, _lab_orig_u2
+
+
+print("== Archiv von Hand bearbeiten: Fix-Runde 1 ==")
+_st_orig_f, _db_orig_f, _lab_orig_f = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _sp_f, _ve_f = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    _lang_f = dict(_HAIN, NOTAM="LONG001/26", Startdatum="02.02.2025", Payload="P" * 250)
+    _viele_f = [dict(_HAIN, NOTAM="Z{:04d}/26".format(i), Startdatum="{:02d}.01.2025".format(1 + i % 28))
+                for i in range(120)]
+    app.archiv_und_handwerte_schreiben(
+        app.merge_archive(_a, [dict(_HAIN), dict(_JSLC), _lang_f] + _viele_f, set()), _h, _a, _h)
+    # F1: englische Bezeichnungen
+    _k_f = app.archive_key(_HAIN)
+    app.st = _StR()
+    check("F1 Anzeigenamen: Konstante vorhanden",
+          getattr(app, "ARCHIV_FELD_NAME", {}).get("Weltraumbahnhof") == "launch site"
+          and app.ARCHIV_FELD_NAME.get("Trägersystem") == "vehicle")
+    app._archiv_edit_speichern(_k_f, {"Weltraumbahnhof": "WSLC"}, _sp_f, _ve_f)
+    check("F2 Erfolgsmeldung Save englisch", app.st.session_state.get("ref_flash") == "Archive row edited",
+          app.st.session_state.get("ref_flash"))
+    check("F2 Undo-Label Save", app.st.session_state["ref_undo"][-1].get("label") == "Archive row edited",
+          app.st.session_state["ref_undo"][-1])
+    _s_f1 = _StU(); _s_f1.session_state["archiv_edit"] = _k_f
+    _zeichne_u(_s_f1)
+    _res_f = [a[0] for n, a, k in _s_f1.aufrufe if n == "button" and str(a[0]).startswith("Reset ")]
+    check("F1 Reset-Label: launch site statt Weltraumbahnhof",
+          len(_res_f) == 1 and "launch site" in _res_f[0] and "Weltraumbahnhof" not in _res_f[0], _res_f)
+    try:
+        app.archiv_zeile_bearbeiten({s: "" for s in app.ARCHIVE_COLUMNS}, {"Trägersystem": "Nope"}, {}, {}, _sp_f)
+        _msg_f = ""
+    except app.ArchivEingabeFehler as exc:
+        _msg_f = str(exc)
+    check("F1 Fehlermeldung nennt vehicle, nicht Trägersystem", "vehicle" in _msg_f and "Trägersystem" not in _msg_f, _msg_f)
+    try:
+        app.archiv_zeile_bearbeiten({s: "" for s in app.ARCHIVE_COLUMNS}, {"Inklination": "1"}, {}, {}, _sp_f)
+        _msg_f2 = ""
+    except app.ArchivEingabeFehler as exc:
+        _msg_f2 = str(exc)
+    check("F1 Fehlermeldung nicht editierbar: englischer Name", "inclination" in _msg_f2 and "Inklination" not in _msg_f2, _msg_f2)
+    app.st = _StR()
+    app._archiv_reset_klick(_k_f, "Weltraumbahnhof")
+    check("F2 Erfolgsmeldung Reset englisch",
+          app.st.session_state.get("ref_flash") == "Archive field reset to NOLA value", app.st.session_state.get("ref_flash"))
+    # F3: Tooltip nennt Herkunft je Wert
+    app.st = _StR()
+    app._archiv_edit_speichern(app.archive_key(_JSLC), {"Weltraumbahnhof": "TSLC", "Orbit": "GTO"}, _sp_f, _ve_f)
+    _s_f3 = _StU(suche="alsat")
+    _zeichne_u(_s_f3)
+    _md_f3 = [(a[0], k.get("help")) for n, a, k in _s_f3.aufrufe if n == "markdown"]
+    check("F3 Orbit-Tooltip nennt Hand- und berechnete Herkunft",
+          any(str(t).endswith(app.ARCHIV_MARKE_HAND) and str(h) == "NOLA: SSO (orbit set by hand); inclination 98\\.0, "
+              "azimuth 193\\.2 (recomputed from site)" for t, h in _md_f3), [x for x in _md_f3 if x[1]])
+    # F4: Seite zurueck bei geaenderter Suche
+    _s_f4 = _StU(suche="z0"); _s_f4.session_state["archiv_seite"] = 2
+    _zeichne_u(_s_f4)
+    check("F4 geaenderte Suche -> Seite 1", _s_f4.session_state.get("archiv_seite") == 0
+          and any(n == "caption" and str(a[0]).startswith("Page 1 of") for n, a, k in _s_f4.aufrufe))
+    _s_f4b = _StU(suche="z0"); _s_f4b.session_state["archiv_seite"] = 2; _s_f4b.session_state["archiv_suche_alt"] = "z0"
+    _zeichne_u(_s_f4b)
+    check("F4 gleiche Suche -> Seite bleibt", _s_f4b.session_state.get("archiv_seite") == 2
+          and any(n == "caption" and str(a[0]).startswith("Page 3 of") for n, a, k in _s_f4b.aufrufe))
+    # F5: langer Payload wird nicht abgeschnitten
+    _s_f5 = _StU(suche="long001"); _s_f5.session_state["archiv_edit"] = app.archive_key(_lang_f)
+    _zeichne_u(_s_f5)
+    _ti_f = [k for n, a, k in _s_f5.aufrufe if n == "text_input" and a and a[0] == "Payload"]
+    check("F5 Payload-Feld: max_chars >= Laenge des vorhandenen Payloads",
+          len(_ti_f) == 1 and _ti_f[0].get("max_chars", 0) >= 250 and len(_ti_f[0].get("value", "")) == 250, _ti_f)
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_f, _db_orig_f, _lab_orig_f
+
+
+print("== Archiv von Hand bearbeiten: Fix-Runde 2 ==")
+import contextlib as _cl_g
+import inspect as _ins_g
+
+
+class _StG(_StU):
+    """Wie _StU, dazu: Selectbox mit Schluessel-Praefix liefert einen festen Wert (Benutzerwahl)."""
+
+    def __init__(self, wahl=None, **kw):
+        super().__init__(**kw)
+        self._wahl = dict(wahl or {})
+
+    def __getattr__(self, name):
+        basis = super().__getattr__(name)
+        if name != "selectbox":
+            return basis
+
+        def _f(*a, **k):
+            ergebnis = basis(*a, **k)
+            for praefix, wert in self._wahl.items():
+                if str(k.get("key", "")).startswith(praefix):
+                    wert = wert(a[1]) if callable(wert) else wert
+                    return wert if wert in a[1] else ergebnis
+            return ergebnis
+        return _f
+
+
+def _sb_g(st_g, praefix):
+    """(Optionen, index) der Selectbox mit dem Schluessel-Praefix im letzten Lauf."""
+    treffer = [(list(a[1]), k.get("index")) for n, a, k in st_g.aufrufe
+               if n == "selectbox" and str(k.get("key", "")).startswith(praefix)]
+    return treffer[-1] if treffer else (None, None)
+
+
+_st_orig_g, _db_orig_g, _lab_orig_g = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_JSLC)], set()), _h, _a, _h)
+    _k_g = app.archive_key(_JSLC)
+    _kurz_g = app.hashlib.sha1(_k_g.encode()).hexdigest()[:10]
+    # B1: Wahl bleibt bei Nationswechsel
+    _anderes_v = lambda opts: [o for o in opts if o and o != _JSLC["Trägersystem"]][-1]  # noqa: E731
+    _s_g1 = _StG(wahl={"aed_p_": "TSLC", "aed_v_": _anderes_v}, suche="alsat")
+    _s_g1.session_state["archiv_edit"] = _k_g
+    _zeichne_u(_s_g1)
+    _v_wahl = _anderes_v(_sb_g(_s_g1, "aed_v_")[0])
+    _s_g2 = _StG(wahl={"aed_n_": "Russland"}, suche="alsat")
+    _s_g2.session_state.update(_s_g1.session_state)
+    _zeichne_u(_s_g2)
+    _opt_p, _idx_p = _sb_g(_s_g2, "aed_p_")
+    check("B1 Nationswechsel: Platz-Selectbox behaelt die Wahl TSLC (nicht Zeilenwert JSLC)",
+          _opt_p is not None and _opt_p[_idx_p] == "TSLC", (_opt_p and _opt_p[_idx_p], _opt_p and _opt_p[:4]))
+    _opt_v, _idx_v = _sb_g(_s_g2, "aed_v_")
+    check("B1 Nationswechsel: Vehicle-Selectbox behaelt die Wahl",
+          _opt_v is not None and _opt_v[_idx_v] == _v_wahl, (_opt_v and _opt_v[_idx_v], _v_wahl))
+    # ohne Wahl: Zeilenwert
+    _s_g0 = _StG(wahl={"aed_n_": "Russland"}, suche="alsat")
+    _s_g0.session_state["archiv_edit"] = _k_g
+    _zeichne_u(_s_g0)
+    _opt_p0, _idx_p0 = _sb_g(_s_g0, "aed_p_")
+    check("B1 ohne Wahl: Platz-Selectbox steht auf dem Zeilenwert", _opt_p0[_idx_p0] == "JSLC", _opt_p0[_idx_p0])
+    # Cancel verwirft die gemerkte Wahl; ein neu geoeffnetes Formular beginnt beim Zeilenwert
+    _s_g3 = _StG(klick={"aed_c_{}".format(_kurz_g)}, suche="alsat")
+    _s_g3.session_state.update(_s_g2.session_state)
+    _zeichne_u(_s_g3)
+    _rest_g = [k for k in _s_g3.session_state if _kurz_g in str(k)]
+    check("B1 Cancel: gemerkte Wahl verworfen", "archiv_edit" not in _s_g3.session_state and not _rest_g, _rest_g)
+    _s_g4 = _StG(klick={"ed_arc_{}".format(_kurz_g)}, suche="alsat")
+    _s_g4.session_state.update(_s_g2.session_state)
+    _s_g4.session_state.pop("archiv_edit", None)
+    _zeichne_u(_s_g4)
+    _rest_g4 = [k for k in _s_g4.session_state if _kurz_g in str(k)]
+    check("B1 Edit oeffnen: alte Wahl der Zeile verworfen", not _rest_g4, _rest_g4)
+    # Save verwirft die gemerkte Wahl
+    _s_g5 = _StG(klick={"aed_s_{}".format(_kurz_g)}, suche="alsat")
+    _s_g5.session_state.update(_s_g2.session_state)
+    app.st = _s_g5
+    _zeichne_u(_s_g5)
+    _rest_g5 = [k for k in _s_g5.session_state if _kurz_g in str(k) or "aed_" in str(k)]
+    check("B1 Save: gespeichert mit der Wahl, gemerkte Wahl verworfen",
+          "archiv_edit" not in _s_g5.session_state and not _rest_g5
+          and app.archiv_lesen()[lambda d: d["NOTAM"] == _JSLC["NOTAM"]].iloc[0]["Weltraumbahnhof"] == "TSLC",
+          (_rest_g5, _s_g5.session_state.get("ref_flash_error")))
+    # B2: nach Save/Reset/Remove oeffnet der Dialog wieder den Reiter Launch Archive
+    check("B2 Save: Merker fuer den Archiv-Reiter gesetzt", _s_g5.session_state.get("ref_reiter_archiv") is True,
+          dict(_s_g5.session_state))
+    _k_g2 = app.archive_key(app.archiv_lesen()[lambda d: d["NOTAM"] == _JSLC["NOTAM"]].iloc[0].to_dict())
+    _kurz_g2 = app.hashlib.sha1(_k_g2.encode()).hexdigest()[:10]
+    _s_g6 = _StG(klick={"rm_arc_{}".format(_kurz_g2)}, suche="alsat")
+    app.st = _s_g6
+    _e_g6 = _zeichne_u(_s_g6)
+    check("B2 Remove: Merker fuer den Archiv-Reiter gesetzt, rerun app",
+          _e_g6 == "app" and _s_g6.session_state.get("ref_reiter_archiv") is True, (_e_g6, dict(_s_g6.session_state)))
+
+    # Dialog: st.tabs bekommt das aktuelle Archiv-Label als default, nur im Lauf nach der Aktion
+    _tabs_g = []
+
+    class _StDG:
+        def __init__(self, zustand):
+            self.session_state = zustand
+            self.aufrufe = []
+
+        def __getattr__(self, name):
+            def _f(*a, **k):
+                self.aufrufe.append(name)
+                if name == "columns":
+                    return [self for _ in range(a[0] if isinstance(a[0], int) else len(a[0]))]
+                if name == "tabs":
+                    _tabs_g.append((list(a[0]), k.get("default")))
+                    return [_cl_g.nullcontext() for _ in a[0]]
+                if name == "container":
+                    return self
+                return None
+            return _f
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    _orig_dg = (app._spaceport_editor, app._fir_editor, app._vehicle_editor, app._archive_editor,
+                app._sea_launch_editor, app._export_knopf, app.archive_import_allowed, app.archiv_anzeigen,
+                app._seestarts_anzeigen)
+    try:
+        for _n_g in ("_spaceport_editor", "_fir_editor", "_vehicle_editor", "_archive_editor",
+                     "_sea_launch_editor", "_export_knopf"):
+            setattr(app, _n_g, lambda *a, **k: None)
+        app.archive_import_allowed = lambda: False
+        app.archiv_anzeigen = lambda *a, **k: pd.DataFrame([dict(_JSLC)] * 3)
+        app._seestarts_anzeigen = lambda *a, **k: pd.DataFrame(columns=list(app.SEA_LAUNCH_COLUMNS))
+        _zust_g = {"ref_reiter_archiv": True, "ref_flash": "Archive row edited"}
+        app.st = _StDG(_zust_g)
+        _, _e_d1 = _lauf_s(lambda: app._reference_dialog.__wrapped__(sp, fir, veh))
+        app.st = _StDG(_zust_g)
+        _, _e_d2 = _lauf_s(lambda: app._reference_dialog.__wrapped__(sp, fir, veh))
+        check("B2 Dialog nach Archiv-Aktion: st.tabs default = aktuelles Archiv-Label",
+              _e_d1 is None and len(_tabs_g) == 2 and _tabs_g[0][1] == "Launch Archive (3)", (_e_d1, _tabs_g))
+        check("B2 Dialog im Lauf danach: default wieder None", _e_d2 is None and _tabs_g[-1][1] is None, _tabs_g)
+    finally:
+        (app._spaceport_editor, app._fir_editor, app._vehicle_editor, app._archive_editor, app._sea_launch_editor,
+         app._export_knopf, app.archive_import_allowed, app.archiv_anzeigen, app._seestarts_anzeigen) = _orig_dg
+    # Meldungen in einem stets erzeugten Container (Position von st.tabs bleibt gleich)
+    _s_m = _StDG({})
+    app.st = _s_m
+    app._zeige_dialog_meldungen()
+    _s_m2 = _StDG({"ref_flash": "x", "ref_flash_warning": "y"})
+    app.st = _s_m2
+    app._zeige_dialog_meldungen()
+    check("B2 Meldungen: Container auch ohne Meldung, genau ein Element davor",
+          _s_m.aufrufe == ["container"] and _s_m2.aufrufe[:1] == ["container"], (_s_m.aufrufe, _s_m2.aufrufe))
+    check("B2 Meldungen: Ausgabe steht im with st.container()",
+          "with st.container():" in _ins_g.getsource(app._zeige_dialog_meldungen))
+    _src_dlg_g = _ins_g.getsource(app._reference_dialog)
+    check("B2 Dialog: st.tabs mit default", "st.tabs(titel, default=" in _src_dlg_g)
+    # B3: Knoepfe untereinander in einer breiteren Spalte (kein Umbruch mitten im Wort)
+    _src_ed_g = _ins_g.getsource(app._archive_editor)
+    check("B3 Knopfspalte: Edit und Remove untereinander, nicht in zwei Unterspalten",
+          "knopf.columns(2)" not in _src_ed_g and "knopf.button(\"Edit\"" in _src_ed_g
+          and "knopf.button(\"Remove\"" in _src_ed_g)
+    _s_b3 = _StG(suche="z0")
+    app.st = _s_b3
+    _zeichne_u(_s_b3)
+    _br_g = [list(a[0]) for n, a, k in _s_b3.aufrufe if n == "columns" and not isinstance(a[0], int) and len(a[0]) == 9]
+    check("B3 Knopfspalte mindestens 15 Prozent der Zeilenbreite",
+          bool(_br_g) and _br_g[0][-1] / sum(_br_g[0]) >= 0.15, _br_g[:1])
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_g, _db_orig_g, _lab_orig_g
+
+
+print("== Archiv von Hand bearbeiten: Abschlussreview ==")
+# M6: '-' am Anfang nur, wenn der ganze Wert genau '-' ist
+check("M6 Payload: genau '-' erlaubt", app.payload_bereinigen(" - ") == "-")
+for _bad in ("-1+2", "-x", " -x", "--"):
+    try:
+        app.payload_bereinigen(_bad); check("M6 Payload abgelehnt: {!r}".format(_bad), False)
+    except app.ArchivEingabeFehler as _e_m6:
+        check("M6 Payload abgelehnt: {!r}".format(_bad), "-" in str(_e_m6), str(_e_m6))
+check("M6 Payload: '-' mitten im Wert erlaubt", app.payload_bereinigen("Yaogan-50") == "Yaogan-50")
+# M5: Wechsel auf einen Platz ohne Koordinaten - Bahn unbekannt wie ohne Dropzones
+_z_m5a, _m_m5a, _ = app.archiv_zeile_bearbeiten(dict(_JSLC), {"Weltraumbahnhof": "TSLC"}, {},
+                                                app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+_z_m5, _m_m5, _h_m5 = app.archiv_zeile_bearbeiten(_z_m5a, {"Weltraumbahnhof": "NOC"}, _m_m5a,
+                                                  app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+check("M5 A->B->C ohne Koordinaten: Bahn leer, Orbit '-', berechnet markiert (NOLA-Werte von A), Hinweis",
+      _z_m5["Inklination"] == "" and _z_m5["Azimuth"] == "" and _z_m5["Orbit"] == "-"
+      and _m_m5.get("Inklination") == (_JSLC["Inklination"], "berechnet")
+      and _m_m5.get("Azimuth") == (_JSLC["Azimuth"], "berechnet")
+      and _m_m5.get("Orbit") == (_JSLC["Orbit"], "berechnet")
+      and _m_m5.get("Weltraumbahnhof") == ("JSLC", "hand")
+      and any("no coordinates" in h for h in _h_m5), (_z_m5, _m_m5, _h_m5))
+_z_m5h, _m_m5h, _ = app.archiv_zeile_bearbeiten(
+    dict(_JSLC), {"Weltraumbahnhof": "TSLC", "Orbit": "GTO"}, {}, app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+_z_m5h, _m_m5h, _ = app.archiv_zeile_bearbeiten(_z_m5h, {"Weltraumbahnhof": "NOC"}, _m_m5h,
+                                                app.archiv_erlaubt(_sp_nan, _ve_h, "China"), _sp_nan)
+check("M5 ohne Koordinaten: Hand-Orbit bleibt", _z_m5h["Orbit"] == "GTO" and _m_m5h["Orbit"] == ("SSO", "hand")
+      and _z_m5h["Inklination"] == "", (_z_m5h, _m_m5h))
+_z_m5r, _m_m5r = app.archiv_feld_zuruecksetzen(_z_m5, _m_m5, "Weltraumbahnhof")
+check("M5 Reset des Platzes stellt die Bahn wieder her",
+      _m_m5r == {} and all(_z_m5r[s] == _JSLC[s] for s in ("Weltraumbahnhof", "Inklination", "Azimuth", "Orbit")),
+      (_z_m5r, _m_m5r))
+
+# I1: veraltetes Formular
+_st_orig_i, _db_orig_i, _lab_orig_i = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _sp_i, _ve_i = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _I1 = dict(_TSLC, **{"Trägersystem": ""})
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_I1)], set()), _h, _a, _h)
+    _k_i = app.archive_key(_I1)
+    _kurz_i = app.hashlib.sha1(_k_i.encode()).hexdigest()[:10]
+
+    def _zeile_i():
+        return app.archiv_lesen()[lambda d: d["NOTAM"] == _I1["NOTAM"]].iloc[0]
+
+    def _fremd_i(**werte):
+        # anderer Schreiber (anderer Tab, Tageslauf) aendert die Zeile
+        _x, _y = app.archiv_mit_handwerten_lesen()
+        _pos = [i for i, (_, r) in enumerate(_x.iterrows()) if app.archive_key(dict(r)) == _k_i][0]
+        _n = _x.copy()
+        for _sp, _w in werte.items():
+            _n.iat[_pos, _n.columns.get_loc(_sp)] = _w
+        app.archiv_und_handwerte_schreiben(_n, _y, _x, _y)
+
+    _form_i = {f: _I1[f] for f in app.ARCHIV_EDIT_FELDER}
+    # (a) direkt: nur Orbit geaendert, Traegersystem inzwischen fremd gesetzt
+    app.st = _StR()
+    _fremd_i(**{"Trägersystem": "CZ-2D"})
+    _ok_i = app._archiv_edit_speichern(_k_i, dict(_form_i, Orbit="GTO"), _sp_i, _ve_i, angezeigt=dict(_form_i))
+    _r_i = _zeile_i()
+    _mk_i = app.handwerte_index(app.archiv_mit_handwerten_lesen()[1]).get(_k_i, {})
+    check("I1a veraltetes Formular: fremdes Traegersystem bleibt, keine Marke dafuer, Orbit geschrieben",
+          _ok_i is True and _r_i["Trägersystem"] == "CZ-2D" and _r_i["Orbit"] == "GTO"
+          and "Trägersystem" not in _mk_i and _mk_i.get("Orbit") == ("SSO", "hand"), (_ok_i, dict(_r_i), _mk_i))
+    # (c) unveraenderte Felder werden nicht gesendet
+    _gesehen_i = []
+    _orig_bearb_i = app.archiv_zeile_bearbeiten
+    def _merke_i(zeile, neu, *a, **k):
+        _gesehen_i.append(dict(neu))
+        return _orig_bearb_i(zeile, neu, *a, **k)
+    app.archiv_zeile_bearbeiten = _merke_i
+    try:
+        _anz_c = {f: str(_zeile_i()[f]) for f in app.ARCHIV_EDIT_FELDER}
+        app._archiv_edit_speichern(_k_i, dict(_anz_c, Payload="Neu-C"), _sp_i, _ve_i, angezeigt=dict(_anz_c))
+    finally:
+        app.archiv_zeile_bearbeiten = _orig_bearb_i
+    check("I1c nur geaenderte Felder gesendet", _gesehen_i == [{"Payload": "Neu-C"}], _gesehen_i)
+    # (b) fremder Schreiber aendert genau das Feld des Benutzers -> Konflikt, nichts geschrieben
+    _anz_b = {f: str(_zeile_i()[f]) for f in app.ARCHIV_EDIT_FELDER}
+    _fremd_i(Payload="Fremd-B")
+    _stand_b = app.archiv_mit_handwerten_lesen()
+    app.st = _StR()
+    _ok_b = app._archiv_edit_speichern(_k_i, dict(_anz_b, Payload="Mein-B"), _sp_i, _ve_i, angezeigt=dict(_anz_b))
+    _stand_b2 = app.archiv_mit_handwerten_lesen()
+    check("I1b gleiches Feld fremd geaendert: Konflikt, nichts geschrieben",
+          _ok_b is False and app.st.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT
+          and _stand_b2[0].attrs["nola_stand"] == _stand_b[0].attrs["nola_stand"]
+          and _stand_b2[1].attrs["nola_stand"] == _stand_b[1].attrs["nola_stand"]
+          and _zeile_i()["Payload"] == "Fremd-B", (_ok_b, app.st.session_state))
+    # Oberflaeche: Grundlage ist die Zeile, gegen die das Formular gezeichnet wurde
+    _s_i1 = _StG(suche=_I1["NOTAM"][:5].lower())
+    _s_i1.session_state["archiv_edit"] = _k_i
+    app.st = _s_i1
+    _zeichne_u(_s_i1)
+    _gez_i = {f: str(_zeile_i()[f]) for f in app.ARCHIV_EDIT_FELDER}
+    _fremd_i(**{"Trägersystem": "CZ-4C"})
+    _s_i2 = _StG(klick={"aed_s_" + _kurz_i}, wahl={"aed_o_": "RETRO"}, suche=_I1["NOTAM"][:5].lower())
+    _s_i2.session_state.update(_s_i1.session_state)
+    app.st = _s_i2
+    _zeichne_u(_s_i2)
+    _r_i2 = _zeile_i()
+    _mk_i2 = app.handwerte_index(app.archiv_mit_handwerten_lesen()[1]).get(_k_i, {})
+    check("I1 Formular: nach fremder Aenderung nur der geaenderte Orbit geschrieben",
+          _r_i2["Trägersystem"] == "CZ-4C" and _r_i2["Orbit"] == "RETRO" and "Trägersystem" not in _mk_i2
+          and _r_i2["Payload"] == _gez_i["Payload"], (dict(_r_i2), _mk_i2, _s_i2.session_state.get("ref_flash_error")))
+    # Konflikt im Formular: Formular wird gegen die frische Zeile neu aufgebaut
+    _s_i3 = _StG(suche=_I1["NOTAM"][:5].lower())
+    _s_i3.session_state["archiv_edit"] = _k_i
+    app.st = _s_i3
+    _zeichne_u(_s_i3)
+    _fremd_i(Orbit="GTO")
+    _s_i4 = _StG(klick={"aed_s_" + _kurz_i}, wahl={"aed_o_": "SSO"}, suche=_I1["NOTAM"][:5].lower())
+    _s_i4.session_state.update(_s_i3.session_state)
+    app.st = _s_i4
+    _zeichne_u(_s_i4)
+    check("I1 Formular-Konflikt: Meldung, nichts geschrieben, Formular offen, gemerkte Wahl verworfen",
+          _s_i4.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT and _zeile_i()["Orbit"] == "GTO"
+          and _s_i4.session_state.get("archiv_edit") == _k_i
+          and app._archiv_wahl_schluessel(_kurz_i) not in _s_i4.session_state,
+          (_zeile_i()["Orbit"], dict(_s_i4.session_state)))
+    _s_i5 = _StG(suche=_I1["NOTAM"][:5].lower())
+    _s_i5.session_state.update(_s_i4.session_state)
+    app.st = _s_i5
+    _zeichne_u(_s_i5)
+    _opt_o, _idx_o = _sb_g(_s_i5, "aed_o_")
+    check("I1 nach Konflikt: Formular zeigt die frische Zeile", _opt_o[_idx_o] == "GTO", _opt_o[_idx_o])
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_i, _db_orig_i, _lab_orig_i
+
+
+class _StB(_StU):
+    """
+    Wie der Browser: der Wert eines Widgets bleibt je Kennung ueber Laeufe erhalten, auch wenn
+    der session_state-Schluessel geloescht wurde. Kennung wie in Streamlit 1.50: Schluessel +
+    Optionen (selectbox) bzw. Schluessel + max_chars (text_input). Kennungen, die ein ganzer Lauf
+    nicht mehr zeichnet, vergisst er (Widget verschwindet aus der Seite).
+    """
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.browser, self.werte, self._eingabe, self._gezeichnet = {}, {}, {}, set()
+
+    def lauf(self, klick=(), eingabe=None):
+        self.aufrufe, self._klick, self._eingabe = [], set(klick), dict(eingabe or {})
+        self.werte, self._gezeichnet = {}, set()
+        ergebnis = _zeichne_u(self)
+        if ergebnis is None:
+            self.browser = {i: w for i, w in self.browser.items() if i in self._gezeichnet}
+        return ergebnis
+
+    def __getattr__(self, name):
+        basis = super().__getattr__(name)
+        if name not in ("selectbox", "text_input"):
+            return basis
+
+        def _f(*a, **k):
+            schl = k.get("key")
+            if schl is None or schl == "archiv_suche":
+                return basis(*a, **k)
+            self.aufrufe.append((name, a, k))
+            kennung = (name, schl, tuple(a[1]) if name == "selectbox" else k.get("max_chars"))
+            self._gezeichnet.add(kennung)
+            if kennung not in self.browser:
+                self.browser[kennung] = a[1][k.get("index", 0)] if name == "selectbox" else k.get("value", "")
+            for praefix, wert in self._eingabe.items():
+                if str(schl).startswith(praefix):
+                    self.browser[kennung] = wert
+            self.session_state[schl] = self.browser[kennung]
+            self.werte[str(schl)[:6]] = self.browser[kennung]
+            return self.browser[kennung]
+        return _f
+
+
+# I1-Rest: nach einem Konflikt baut das Formular wirklich neu auf (neue Widget-Kennung)
+_st_orig_r2, _db_orig_r2, _lab_orig_r2 = app.st, app.DB_PATH, app.local_admin_allowed
+try:
+    app.DB_PATH = _kopie_der_test_db()
+    app.local_admin_allowed = lambda: True
+    _sp_r2, _ve_r2 = app.referenz_lesen("startplaetze"), app.referenz_lesen("traegersysteme")
+    _R2 = dict(_TSLC, NOTAM="B0901/26", **{"Trägersystem": "CZ-4C"})
+    _a, _h = app.archiv_mit_handwerten_lesen()
+    app.archiv_und_handwerte_schreiben(app.merge_archive(_a, [dict(_R2)], set()), _h, _a, _h)
+    _k_r2 = app.archive_key(_R2)
+    _kurz_r2 = app.hashlib.sha1(_k_r2.encode()).hexdigest()[:10]
+
+    def _zeile_r2():
+        return app.archiv_lesen()[lambda d: d["NOTAM"] == _R2["NOTAM"]].iloc[0]
+
+    def _fremd_r2(**werte):
+        _x, _y = app.archiv_mit_handwerten_lesen()
+        _pos = [i for i, (_, r) in enumerate(_x.iterrows()) if app.archive_key(dict(r)) == _k_r2][0]
+        _n = _x.copy()
+        for _sp, _w in werte.items():
+            _n.iat[_pos, _n.columns.get_loc(_sp)] = _w
+        app.archiv_und_handwerte_schreiben(_n, _y, _x, _y)
+
+    _b_r2 = _StB(suche="b0901")
+    _b_r2.lauf(klick={"ed_arc_" + _kurz_r2})
+    _b_r2.lauf()
+    check("R2 Formular offen", _b_r2.werte.get("aed_o_") == "SSO" and _b_r2.werte.get("aed_v_") == "CZ-4C",
+          _b_r2.werte)
+    _fremd_r2(**{"Trägersystem": "CZ-2D", "Orbit": "GTO"})
+    _b_r2.lauf(klick={"aed_s_" + _kurz_r2}, eingabe={"aed_o_": "RETRO"})
+    _r_r2 = _zeile_r2()
+    check("R2 Save gegen fremde Aenderung: Konflikt, nichts geschrieben, Formular offen",
+          _b_r2.session_state.get("ref_flash_warning") == app.nola_db.KONFLIKT_TEXT
+          and _r_r2["Orbit"] == "GTO" and _r_r2["Trägersystem"] == "CZ-2D"
+          and _b_r2.session_state.get("archiv_edit") == _k_r2, (dict(_r_r2), _b_r2.session_state))
+    _b_r2.session_state.pop("ref_flash_warning", None)
+    _b_r2.lauf()
+    check("R2 nach Konflikt: Widgets zeigen die frische Zeile (Vehicle CZ-2D, Orbit GTO)",
+          _b_r2.werte.get("aed_v_") == "CZ-2D" and _b_r2.werte.get("aed_o_") == "GTO", _b_r2.werte)
+    _stand_r2 = app.archiv_mit_handwerten_lesen()
+    _b_r2.lauf(klick={"aed_s_" + _kurz_r2})
+    _stand_r2b = app.archiv_mit_handwerten_lesen()
+    _r_r2b = _zeile_r2()
+    _mk_r2 = app.handwerte_index(_stand_r2b[1]).get(_k_r2, {})
+    check("R2 zweites Save ohne Eingabe: nichts zurueckgeschrieben, keine Marke",
+          _r_r2b["Trägersystem"] == "CZ-2D" and _r_r2b["Orbit"] == "GTO" and not _mk_r2
+          and _stand_r2b[0].attrs["nola_stand"] == _stand_r2[0].attrs["nola_stand"]
+          and _stand_r2b[1].attrs["nola_stand"] == _stand_r2[1].attrs["nola_stand"],
+          (dict(_r_r2b), _mk_r2))
+    # B1 mit Browser-Verhalten: Wahl bleibt bei Nationswechsel, auch nach einem Konflikt
+    _b_r2.lauf(klick={"ed_arc_" + _kurz_r2})
+    _b_r2.lauf(eingabe={"aed_p_": "JSLC"})
+    _b_r2.lauf(eingabe={"aed_n_": "Russland"})
+    check("R2 B1: Platzwahl bleibt bei Nationswechsel", _b_r2.werte.get("aed_p_") == "JSLC", _b_r2.werte)
+    _fremd_r2(Payload="Fremd-R2")
+    _b_r2.lauf(klick={"aed_s_" + _kurz_r2}, eingabe={"aed_l_": "Mein-R2"})
+    _b_r2.session_state.pop("ref_flash_warning", None)
+    _b_r2.lauf()
+    check("R2 nach Konflikt: gemerkte Wahl und Nation verworfen, frische Werte",
+          _b_r2.werte.get("aed_n_") == "China" and _b_r2.werte.get("aed_p_") == "TSLC"
+          and _b_r2.werte.get("aed_l_") == "Fremd-R2" and _zeile_r2()["Payload"] == "Fremd-R2", _b_r2.werte)
+    _alt_r2 = [k for k in _b_r2.session_state if str(k).startswith("aed_") and _kurz_r2 in str(k)
+               and k != app._archiv_wahl_schluessel(_kurz_r2)]
+    check("R2 alte Widget-Schluessel aufgeraeumt (nur eine Revision im Zustand)",
+          len({str(k).rsplit("_", 1)[-1] for k in _alt_r2}) == 1 and len(_alt_r2) == 5, _alt_r2)
+    # Edit oeffnet immer mit neuen Kennungen: eine vorige Eingabe kommt nicht zurueck
+    _b_r2.lauf(eingabe={"aed_o_": "RETRO"})
+    _b_r2.lauf(klick={"aed_c_" + _kurz_r2})
+    _b_r2.lauf()
+    _b_r2.lauf(klick={"ed_arc_" + _kurz_r2})
+    _b_r2.lauf()
+    check("R2 Edit nach Cancel: Formular zeigt die Zeile, nicht die alte Eingabe",
+          _b_r2.werte.get("aed_o_") == "GTO", _b_r2.werte)
+finally:
+    app.st, app.DB_PATH, app.local_admin_allowed = _st_orig_r2, _db_orig_r2, _lab_orig_r2
+
 
 print()
 print("ERGEBNIS:", "ALLE TESTS BESTANDEN" if ok else "FEHLER VORHANDEN")

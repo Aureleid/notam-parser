@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -2026,6 +2026,8 @@ BACKUP_DIR = nola_db.ECHTER_SICHERUNGSORDNER
 #: Alte Datei des Startarchivs - nur noch Quelle des Umzugs und Format des Exports;
 #: das Archiv selbst schreibt die Anwendung in nola.db (Tabelle startarchiv) fort.
 ARCHIVE_CSV = APP_DIR / "startarchiv_updated.csv"
+#: Handwerte des Startarchivs - nur Format des Exports und Quelle des Umzugs.
+ARCHIVE_HANDWERTE_CSV = APP_DIR / "archiv_handwerte.csv"
 
 
 def is_public_deployment(app_dir: Path = APP_DIR) -> bool:
@@ -4824,6 +4826,7 @@ def merge_archive(
     bestand: pd.DataFrame,
     neue: Sequence[Dict[str, Any]],
     entfernt: Optional[Set[str]] = None,
+    handwerte: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> pd.DataFrame:
     """
     Fuehrt neu erkannte Starts mit dem vorhandenen Archiv zusammen.
@@ -4835,6 +4838,8 @@ def merge_archive(
     Wert); ein neuer, nicht leerer Wert ueberschreibt ihn.
     Von Hand geloeschte Zeilen kommen nicht zurueck, solange ihr Schluessel in
     `entfernt` steht.
+    Von Hand gesetzte Spalten (`handwerte`: {Schluessel: Spalten}) uebernimmt ein
+    Lauf aus dem Bestand.
     """
     entfernt = entfernt or set()
     zeilen: List[Dict[str, Any]] = []
@@ -4857,11 +4862,273 @@ def merge_archive(
             for spalte in ("Payload", "Tr\u00e4gersystem"):
                 if not row[spalte]:
                     row[spalte] = alt[spalte]
+            for spalte in (handwerte or {}).get(schluessel, ()):
+                if spalte in alt:  # Marke auf eine unbekannte Spalte: nichts zu schuetzen
+                    row[spalte] = alt[spalte]
             zeilen[index[schluessel]] = row
         else:
             index[schluessel] = len(zeilen)
             zeilen.append(row)
     return pd.DataFrame(zeilen, columns=list(ARCHIVE_COLUMNS))
+
+
+#: Felder, die der Benutzer im Reiter Launch Archive von Hand aendern kann.
+ARCHIV_EDIT_FELDER = ("Nation", "Weltraumbahnhof", "Trägersystem", "Payload", "Orbit")
+#: Bahnwerte, die ein Platzwechsel neu berechnet.
+BAHN_SPALTEN = ("Inklination", "Azimuth", "Orbit")
+#: Auswahl fuer das Orbit-Feld - die Kurzformen des Archivs.
+ORBIT_AUSWAHL = ("SSO", "HIGH-INC", "LEO/MEO", "GTO", "RETRO", "-")
+PAYLOAD_MAX = 200
+#: Englische Anzeigenamen der Archivspalten fuer die Oberflaeche.
+ARCHIV_FELD_NAME = {
+    "Nation": "nation", "Weltraumbahnhof": "launch site", "Trägersystem": "vehicle",
+    "Payload": "payload", "Orbit": "orbit", "Inklination": "inclination", "Azimuth": "azimuth",
+}
+
+
+def archiv_feld_name(spalte: str) -> str:
+    """Anzeigename einer Archivspalte (englisch); unbekannte Namen bleiben."""
+    return ARCHIV_FELD_NAME.get(spalte, spalte)
+
+#: Anfaenge, die Excel beim Oeffnen der Export-CSV als Formel liest.
+_PAYLOAD_FORMEL = ("=", "+", "@", "\t", "\r")
+#: Unterhalb dieser Entfernung liegt eine Zone auf dem Platz - keine Richtung ableitbar.
+_ZONE_AUF_PLATZ_KM = 1.0
+
+Marken = Dict[str, Tuple[str, str]]
+
+
+class ArchivEingabeFehler(ValueError):
+    """Ein Wert im Bearbeiten-Formular ist nicht erlaubt - nichts wurde geschrieben."""
+
+
+def handwerte_index(handwerte: pd.DataFrame) -> Dict[str, Marken]:
+    """{Schluessel: {Spalte: (nola_wert, herkunft)}} aus der Tabelle archiv_handwerte."""
+    index: Dict[str, Marken] = {}
+    if handwerte is None or handwerte.empty:
+        return index
+    for _, r in handwerte.iterrows():
+        index.setdefault(str(r["schluessel"]), {})[str(r["spalte"])] = (
+            str(r["nola_wert"] or ""), str(r["herkunft"]))
+    return index
+
+
+def handwerte_mit(handwerte: pd.DataFrame, schluessel: str, marken: Marken, jetzt: str,
+                  geaendert: Optional[Iterable[str]] = None) -> pd.DataFrame:
+    """
+    Tabelle mit den Marken einer Zeile ersetzt. `geaendert` nennt die Spalten,
+    deren Wert in dieser Aenderung neu gesetzt wurde: sie bekommen `jetzt` (Zeitpunkt
+    der letzten Handaenderung). Uebrige Marken behalten ihren Zeitpunkt, neue
+    Marken bekommen `jetzt`.
+    """
+    geaendert = set(geaendert or ())
+    spalten = list(nola_db.FACHTABELLEN["archiv_handwerte"])
+    alt = handwerte_index(handwerte).get(schluessel, {})
+    zeit = {}
+    if handwerte is not None and not handwerte.empty:
+        for _, r in handwerte[handwerte["schluessel"] == schluessel].iterrows():
+            zeit[str(r["spalte"])] = str(r["geaendert_utc"])
+    andere = [] if handwerte is None or handwerte.empty else [
+        {s: r[s] for s in spalten} for _, r in handwerte.iterrows() if str(r["schluessel"]) != schluessel]
+    eigene = [
+        {"schluessel": schluessel, "spalte": sp, "nola_wert": nola, "herkunft": herkunft,
+         "geaendert_utc": zeit[sp] if (sp in zeit and sp not in geaendert
+                                       and alt.get(sp) == (nola, herkunft)) else jetzt}
+        for sp, (nola, herkunft) in sorted(marken.items())
+    ]
+    return pd.DataFrame(andere + eigene, columns=spalten)
+
+
+def handwerte_bereinigen(handwerte: pd.DataFrame, archiv: pd.DataFrame) -> pd.DataFrame:
+    """Nur Marken, deren Zeile noch im Archiv steht - Markierungen folgen der Zeile."""
+    if handwerte is None or handwerte.empty:
+        return handwerte
+    schluessel = {archive_key(dict(r)) for _, r in archiv.iterrows()}
+    return handwerte[handwerte["schluessel"].isin(schluessel)].reset_index(drop=True)
+
+
+def payload_bereinigen(text: str) -> str:
+    """Zeilenumbrueche zu Leerzeichen; zu lang oder formelartig -> ArchivEingabeFehler."""
+    wert = " ".join(str(text or "").replace("\r", "\n").split("\n")).strip()
+    roh = str(text or "").lstrip(" ")
+    # '-' am Anfang nur als ganzer Wert: Excel liest z. B. -1+2 als Formel
+    if (roh.startswith(_PAYLOAD_FORMEL) or wert.startswith(_PAYLOAD_FORMEL[:3])
+            or (wert.startswith("-") and wert != "-")):
+        raise ArchivEingabeFehler(
+            "Payload must not start with =, +, @, - (except a lone -), a tab or a carriage return.")
+    if len(wert) > PAYLOAD_MAX:
+        raise ArchivEingabeFehler("Payload is longer than {} characters.".format(PAYLOAD_MAX))
+    return wert
+
+
+def _zonen(dropzones: str) -> List[Tuple[float, float]]:
+    """'lat lon; lat lon' -> Punkte; unlesbare Teile fallen weg."""
+    punkte = []
+    for teil in str(dropzones or "").split(";"):
+        zahlen = teil.split()
+        if len(zahlen) != 2:
+            continue
+        try:
+            lat, lon = float(zahlen[0]), float(zahlen[1])
+        except ValueError:
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            punkte.append((lat, lon))
+    return punkte
+
+
+def bahn_aus_platz(lat: float, lon: float, dropzones: str) -> Tuple[str, str, str, str]:
+    """
+    Inklination, Azimuth und Orbit eines Archivstarts von einem anderen Platz aus -
+    dasselbe Verfahren wie die Pipeline (Kreismittel der Zonen-Azimute).
+    Rueckgabe: (Inklination, Azimuth, Orbit, Hinweis); ohne Rechnung ("", "", "-", Grund).
+    """
+    zonen = _zonen(dropzones)
+    if not zonen:
+        return "", "", "-", "no drop zones to compute the orbit from"
+    if any(surface_distance_km(lat, lon, a, b) < _ZONE_AUF_PLATZ_KM for a, b in zonen):
+        return "", "", "-", "zone on the launch site"
+    azimut = _circular_mean([initial_bearing_deg(lat, lon, a, b) for a, b in zonen])
+    inklination = estimate_inclination_deg(lat, azimut)
+    return ("{:.1f}".format(inklination), "{:.1f}".format(azimut),
+            orbit_short(classify_orbit(inklination)), "")
+
+
+def archiv_erlaubt(spaceports: pd.DataFrame, vehicles: pd.DataFrame, nation: str) -> Dict[str, List[str]]:
+    """Auswahllisten des Formulars; Plaetze und Traeger der Nation zuerst."""
+    codes = [str(c) for c in spaceports["Kurzel"]]
+    laender = [str(l) for l in spaceports["Land"]]
+    plaetze = [c for c, l in zip(codes, laender) if l == nation] + [
+        c for c, l in zip(codes, laender) if l != nation]
+    return {
+        "Nation": list(TARGET_NATIONS),
+        "Weltraumbahnhof": plaetze,
+        "Trägersystem": [v for v in vehicle_options(vehicles, nation) if v != VEHICLE_SEPARATOR],
+        "Orbit": list(ORBIT_AUSWAHL),
+    }
+
+
+def _platz_der_referenz(spaceports: pd.DataFrame, code: str) -> Optional[pd.Series]:
+    treffer = spaceports[spaceports["Kurzel"].astype(str) == str(code)]
+    if treffer.empty:
+        return None
+    r = treffer.iloc[0]
+    try:
+        if not (math.isfinite(float(r["Latitude"])) and math.isfinite(float(r["Longitude"]))):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return r
+
+
+def archiv_zeile_bearbeiten(
+    zeile: Dict[str, str],
+    neu: Dict[str, str],
+    marken: Marken,
+    erlaubt: Dict[str, Sequence[str]],
+    spaceports: pd.DataFrame,
+) -> Tuple[Dict[str, str], Marken, List[str]]:
+    """
+    Wendet die Formularwerte auf eine Archivzeile an. Nur geaenderte Felder
+    werden markiert; der NOLA-Wert ist der vor der ersten Handaenderung. Ein
+    Feld zurueck auf seinen NOLA-Wert verliert die Markierung. Ein Platzwechsel
+    berechnet Inklination, Azimuth und (ohne Hand-Orbit) Orbit neu; geht das nicht
+    (keine brauchbaren Dropzones, Platz ohne Koordinaten), werden sie leer bzw. "-"
+    und als berechnet markiert - der Reset des Platzes stellt sie zurueck.
+    Unerlaubte Werte: ArchivEingabeFehler, nichts geaendert.
+    Rueckgabe: (neue Zeile, neue Marken, Hinweise).
+    """
+    zeile = {s: str(zeile.get(s, "") or "") for s in ARCHIVE_COLUMNS}
+    werte: Dict[str, str] = {}
+    for feld, wert in neu.items():
+        if feld not in ARCHIV_EDIT_FELDER:
+            raise ArchivEingabeFehler("{} cannot be edited.".format(archiv_feld_name(feld)))
+        wert = str(wert if wert is not None else "")
+        if feld == "Payload":
+            if wert != zeile["Payload"]:
+                wert = payload_bereinigen(wert)
+        elif wert != zeile[feld] and wert not in erlaubt.get(feld, ()):
+            raise ArchivEingabeFehler("{} is not an allowed value for {}.".format(wert, archiv_feld_name(feld)))
+        werte[feld] = wert
+    geaendert = {f: w for f, w in werte.items() if w != zeile[f]}
+    marken = dict(marken)
+    hinweise: List[str] = []
+    if not geaendert:
+        return zeile, marken, hinweise
+
+    def setze(spalte: str, wert: str, herkunft: str) -> None:
+        nola = marken[spalte][0] if spalte in marken else zeile[spalte]
+        if wert == nola:
+            marken.pop(spalte, None)
+        else:
+            marken[spalte] = (nola, herkunft)
+        zeile[spalte] = wert
+
+    for feld, wert in geaendert.items():
+        if feld != "Orbit":
+            setze(feld, wert, "hand")
+    if "Weltraumbahnhof" in geaendert:
+        if "Weltraumbahnhof" not in marken:
+            # zurueck auf den urspruenglichen Platz: berechnete Werte zurueck
+            for spalte, (nola, herkunft) in list(marken.items()):
+                if herkunft == "berechnet":
+                    zeile[spalte] = nola
+                    marken.pop(spalte)
+        else:
+            port = _platz_der_referenz(spaceports, zeile["Weltraumbahnhof"])
+            if port is None:
+                # Bahn vom neuen Platz unbekannt - wie ohne Dropzones: leer und "-",
+                # nicht die Werte des alten Platzes stehen lassen; Reset des Platzes stellt zurueck
+                ink, azi, orbit = "", "", "-"
+                hinweise.append("launch site has no coordinates in the reference - orbit not recomputed")
+            else:
+                ink, azi, orbit, hinweis = bahn_aus_platz(
+                    float(port["Latitude"]), float(port["Longitude"]), zeile["Dropzones"])
+                if hinweis:
+                    hinweise.append(hinweis)
+            setze("Inklination", ink, "berechnet")
+            setze("Azimuth", azi, "berechnet")
+            if "Orbit" not in geaendert and marken.get("Orbit", ("", ""))[1] != "hand":
+                setze("Orbit", orbit, "berechnet")
+    if "Orbit" in geaendert:
+        setze("Orbit", geaendert["Orbit"], "hand")
+    if "Weltraumbahnhof" in geaendert or "Nation" in geaendert:
+        # Platz passt nicht zur Nation: nur ein Hinweis, einmal fuer alle Aenderungen
+        ort = spaceports[spaceports["Kurzel"].astype(str) == zeile["Weltraumbahnhof"]]
+        if not ort.empty and str(ort.iloc[0]["Land"]) != zeile["Nation"]:
+            hinweise.append("launch site {} belongs to {}, the nation is {}".format(
+                zeile["Weltraumbahnhof"], nation_label(str(ort.iloc[0]["Land"])), nation_label(zeile["Nation"])))
+    return zeile, marken, hinweise
+
+
+def archiv_feld_zuruecksetzen(zeile: Dict[str, str], marken: Marken, spalte: str) -> Tuple[Dict[str, str], Marken]:
+    """Ein Feld auf seinen NOLA-Wert; der Platz nimmt alle berechneten Werte mit."""
+    zeile = dict(zeile)
+    marken = dict(marken)
+    if spalte not in marken:
+        return zeile, marken
+    zeile[spalte] = marken.pop(spalte)[0]
+    if spalte == "Weltraumbahnhof":
+        for sp, (nola, herkunft) in list(marken.items()):
+            if herkunft == "berechnet":
+                zeile[sp] = nola
+                marken.pop(sp)
+    return zeile, marken
+
+
+def ueberschneidende_schluessel(archiv: pd.DataFrame) -> Set[str]:
+    """Zeilen, die mit einer anderen Zeile desselben Startdatums eine NOTAM-Kennung teilen."""
+    nach_datum: Dict[str, List[Tuple[str, Set[str]]]] = {}
+    for _, r in archiv.iterrows():
+        kennungen = {t.strip().upper() for t in str(r["NOTAM"]).split(",") if t.strip()}
+        nach_datum.setdefault(str(r["Startdatum"]).strip(), []).append((archive_key(dict(r)), kennungen))
+    treffer: Set[str] = set()
+    for zeilen in nach_datum.values():
+        for i, (ka, ia) in enumerate(zeilen):
+            for kb, ib in zeilen[i + 1:]:
+                if ia & ib:
+                    treffer.update((ka, kb))
+    return treffer
 
 
 #: Spalten des Seestart-Protokolls.
@@ -5120,7 +5387,11 @@ def archiv_schreiben(
     neu: pd.DataFrame, vorher: pd.DataFrame, db: Optional[Path] = None,
     wartezeit: float = nola_db.WARTEZEIT,
 ) -> str:
-    """Ersetzt das Archiv - nur, wenn es noch dem Stand von `vorher` entspricht."""
+    """
+    Ersetzt das Archiv - nur, wenn es noch dem Stand von `vorher` entspricht.
+    Nur noch fuer Tests; schreibt ohne Handwerte - Produktionswege nutzen
+    archiv_und_handwerte_schreiben.
+    """
     stand = vorher.attrs.get("nola_stand")
     if not stand:
         raise ValueError("archiv_schreiben needs `vorher` as read by archiv_lesen")
@@ -5131,17 +5402,68 @@ def archiv_schreiben(
 def archiv_und_importzustand_schreiben(
     neu: pd.DataFrame, vorher: pd.DataFrame, zustand: Dict[str, Any],
     zustand_erwartet: Optional[str], db: Optional[Path] = None,
+    handwerte: Optional[Tuple[pd.DataFrame, pd.DataFrame]] = None,
 ) -> Tuple[str, str]:
     """
-    Wie archiv_schreiben, dazu der Importzustand in derselben Transaktion
-    (Bestaetigen/Entfernen im Archiv-Import). Rueckgabe: neue Staende (Archiv, Zustand).
+    Bestaetigen/Entfernen im Archiv-Import: Startarchiv (Standvergleich mit `vorher`)
+    und Importzustand in EINER Transaktion ueber nola_db.ersetze_archiv_und_importzustand;
+    weicht ein Stand ab, wird nichts geschrieben (Konflikt). Rueckgabe: neue Staende (Archiv, Zustand).
+    `handwerte = (neu_hw, vorher_hw)`: die Markierungen werden in derselben
+    Transaktion mit Standvergleich ersetzt (vorher_hw wie von archiv_mit_handwerten_lesen).
     """
     stand = vorher.attrs.get("nola_stand")
     if not stand:
         raise ValueError("archiv_und_importzustand_schreiben needs `vorher` as read by archiv_lesen")
+    hw = None
+    if handwerte is not None:
+        neu_hw, vorher_hw = handwerte
+        stand_hw = vorher_hw.attrs.get("nola_stand")
+        if not stand_hw:
+            raise ValueError(
+                "archiv_und_importzustand_schreiben needs `handwerte` as read by archiv_mit_handwerten_lesen")
+        hw = (_handwerte_spalten(neu_hw), stand_hw)
     with _db(db) as conn:
         return nola_db.ersetze_archiv_und_importzustand(
-            conn, neu[list(ARCHIVE_COLUMNS)], stand, zustand, zustand_erwartet)
+            conn, neu[list(ARCHIVE_COLUMNS)], stand, zustand, zustand_erwartet, handwerte=hw)
+
+
+def _handwerte_spalten(df: pd.DataFrame) -> pd.DataFrame:
+    """Handwerte in der Spaltenfolge der Tabelle; leer auch ohne Spalten."""
+    spalten = list(nola_db.FACHTABELLEN["archiv_handwerte"])
+    return pd.DataFrame(columns=spalten) if df is None or df.empty else df[spalten]
+
+
+def archiv_mit_handwerten_lesen(
+    db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Startarchiv und Handwerte aus EINER Momentaufnahme; Lesefehler -> ArchiveUnreadable."""
+    try:
+        with _db(db, wartezeit) as conn:
+            beide = nola_db.lese_tabellen(conn, ("startarchiv", "archiv_handwerte"))
+    except nola_db.DbFehler as exc:
+        raise ArchiveUnreadable(
+            "The launch archive could not be read from the database ({}). It was left "
+            "untouched and not updated.".format(exc)
+        ) from exc
+    return beide["startarchiv"], beide["archiv_handwerte"]
+
+
+def archiv_und_handwerte_schreiben(
+    neu: pd.DataFrame, neu_hw: pd.DataFrame, vorher: pd.DataFrame, vorher_hw: pd.DataFrame,
+    db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT,
+) -> Dict[str, str]:
+    """
+    Archiv und Handwerte gemeinsam - nur, wenn beide noch dem gelesenen Stand
+    entsprechen (sonst nola_db.Konflikt, keine geschrieben). Rueckgabe: neue Staende je Tabelle.
+    """
+    stand, stand_hw = vorher.attrs.get("nola_stand"), vorher_hw.attrs.get("nola_stand")
+    if not stand or not stand_hw:
+        raise ValueError("archiv_und_handwerte_schreiben needs `vorher` as read by archiv_mit_handwerten_lesen")
+    with _db(db, wartezeit) as conn:
+        return nola_db.ersetze_tabellen_geprueft(conn, {
+            "startarchiv": (neu[list(ARCHIVE_COLUMNS)], stand),
+            "archiv_handwerte": (_handwerte_spalten(neu_hw), stand_hw),
+        })
 
 
 def seestarts_lesen(db: Optional[Path] = None, wartezeit: float = nola_db.WARTEZEIT) -> pd.DataFrame:
@@ -5750,24 +6072,42 @@ def _spalten_von(tabelle: str) -> Tuple[str, ...]:
     return nola_db.FACHTABELLEN[tabelle]
 
 
-def _push_undo(tabelle: str, vorher: pd.DataFrame, nachher_stand: str, label: str) -> Dict[str, Any]:
-    """Merkt den Tabelleninhalt vor und den Stand nach einer Aenderung."""
+def _push_undo(
+    tabelle: str, vorher: pd.DataFrame, nachher_stand: str, label: str,
+    weitere: Optional[Sequence[Tuple[str, pd.DataFrame, str]]] = None,
+) -> Dict[str, Any]:
+    """
+    Merkt den Tabelleninhalt vor und den Stand nach einer Aenderung. `weitere`:
+    Tabellen, die in derselben Transaktion geaendert wurden (Tabelle, vorher, Stand nachher).
+    """
     stapel = st.session_state.setdefault("ref_undo", [])
     eintrag = {
         "tabelle": tabelle,
-        "zeilen": vorher[list(_spalten_von(tabelle))].to_dict("records"),
+        "zeilen": _undo_zeilen(tabelle, vorher),
         "nachher": nachher_stand,
         "label": label,
     }
+    if weitere:
+        eintrag["weitere"] = [
+            {"tabelle": t, "zeilen": _undo_zeilen(t, df), "nachher": n} for t, df, n in weitere
+        ]
     stapel.append(eintrag)
     del stapel[:-UNDO_LIMIT]
     return eintrag
 
 
+def _undo_zeilen(tabelle: str, df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Zeilen fuer den Undo-Stapel; eine leere Tabelle auch ohne Spalten."""
+    if df is None or df.empty:
+        return []
+    return df[list(_spalten_von(tabelle))].to_dict("records")
+
+
 def _undo_reference() -> Optional[str]:
     """
     Nimmt die letzte Aenderung zurueck - nur, wenn die Tabelle seitdem
-    unveraendert ist. Sonst faellt der Eintrag vom Stapel (dieser Stand kehrt
+    unveraendert ist (bei einem Eintrag mit `weitere`: alle seine Tabellen, alle
+    oder keine zurueck). Sonst faellt der Eintrag vom Stapel (dieser Stand kehrt
     nicht zurueck) und UndoRefused nennt den Grund. Bei einem Lesefehler bleibt
     der Eintrag liegen.
     """
@@ -5781,10 +6121,18 @@ def _undo_reference() -> Optional[str]:
     )
     try:
         with _db() as conn:
-            nola_db.ersetze_tabelle(
-                conn, tabelle, pd.DataFrame(letzter["zeilen"], columns=list(_spalten_von(tabelle))),
-                letzter["nachher"],
-            )
+            teile = [letzter] + list(letzter.get("weitere", []))
+            if len(teile) == 1:
+                nola_db.ersetze_tabelle(
+                    conn, tabelle, pd.DataFrame(letzter["zeilen"], columns=list(_spalten_von(tabelle))),
+                    letzter["nachher"],
+                )
+            else:
+                nola_db.ersetze_tabellen_geprueft(conn, {
+                    t["tabelle"]: (
+                        pd.DataFrame(t["zeilen"], columns=list(_spalten_von(t["tabelle"]))), t["nachher"])
+                    for t in teile
+                })
     except nola_db.Konflikt as exc:
         stapel.pop()
         raise UndoRefused(verweigert) from exc
@@ -5828,16 +6176,23 @@ def _zeige_db_meldung() -> None:
 
 
 def _zeige_dialog_meldungen() -> None:
-    """Erfolg, Warnung und Fehler der letzten Dialog-Aktion - entschaerft (Labels enthalten DB-Schluessel)."""
-    flash = st.session_state.pop("ref_flash", None)
-    if flash:
-        st.success(_md_plain(flash))
-    warnung = st.session_state.pop("ref_flash_warning", None)
-    if warnung:
-        st.warning(_md_plain(warnung))
-    fehler = st.session_state.pop("ref_flash_error", None)
-    if fehler:
-        st.error(_md_plain(fehler))
+    """
+    Erfolg, Warnung und Fehler der letzten Dialog-Aktion - entschaerft (Labels enthalten DB-Schluessel).
+
+    Der Container entsteht immer, auch ohne Meldung: so behaelt das folgende
+    st.tabs seine Position, und der Dialog springt nicht auf den ersten Reiter,
+    wenn die Meldung im naechsten Lauf wegfaellt.
+    """
+    with st.container():
+        flash = st.session_state.pop("ref_flash", None)
+        if flash:
+            st.success(_md_plain(flash))
+        warnung = st.session_state.pop("ref_flash_warning", None)
+        if warnung:
+            st.warning(_md_plain(warnung))
+        fehler = st.session_state.pop("ref_flash_error", None)
+        if fehler:
+            st.error(_md_plain(fehler))
 
 
 def _write_reference(
@@ -5889,12 +6244,25 @@ def _add_reference_row(
     )
 
 
-def _reference_row(werte: Sequence[str], breiten: Sequence[float], header: bool = False):
+def _reference_row(werte: Sequence[str], breiten: Sequence[float], header: bool = False,
+                   hilfen: Optional[Sequence[Optional[str]]] = None):
     """Zeichnet eine Tabellenzeile und liefert die Spalte fuer die Schaltflaeche."""
     cols = st.columns(list(breiten))
-    for col, wert in zip(cols, werte):
-        col.markdown(("**{}**" if header else "{}").format(wert))
+    for i, (col, wert) in enumerate(zip(cols, werte)):
+        hilfe = hilfen[i] if hilfen and i < len(hilfen) else None
+        col.markdown(("**{}**" if header else "{}").format(wert), help=hilfe)
     return cols[-1]
+
+
+#: Zeilen je Seite im Reiter Launch Archive.
+ARCHIV_SEITE = 50
+
+
+def _archiv_sortiert(archiv: pd.DataFrame) -> pd.DataFrame:
+    """Neuestes Startdatum zuerst (Datum geparst, nicht als Text); unlesbare Daten ans Ende."""
+    datum = pd.to_datetime(archiv["Startdatum"], format="%d.%m.%Y", errors="coerce")
+    return archiv.assign(_d=datum).sort_values("_d", ascending=False, na_position="last",
+                                               kind="stable").drop(columns="_d")
 
 
 def _spaceport_editor(spaceports: pd.DataFrame) -> None:
@@ -6127,6 +6495,7 @@ def _ref_dialog_geschlossen() -> None:
     sonst oeffnete main() den Dialog beim naechsten Durchlauf wieder (nola-o25).
     """
     st.session_state["ref_dialog_open"] = False
+    st.session_state.pop(REF_REITER_ARCHIV, None)
 
 
 @st.dialog("Reference Data", width="large", on_dismiss=_ref_dialog_geschlossen)
@@ -6151,7 +6520,9 @@ def _reference_dialog(
     mit_import = archive_import_allowed()
     if mit_import:
         titel.append("Archive Import")
-    reiter = st.tabs(titel)
+    # nach einer Archiv-Aktion (rerun der ganzen App) wieder den Reiter Launch Archive zeigen;
+    # das Label traegt die Zahl, daher das aktuelle Label - nur in diesem einen Lauf
+    reiter = st.tabs(titel, default=titel[3] if st.session_state.pop(REF_REITER_ARCHIV, False) else None)
     with reiter[0]:
         _spaceport_editor(spaceports)
     with reiter[1]:
@@ -6159,7 +6530,7 @@ def _reference_dialog(
     with reiter[2]:
         _vehicle_editor(vehicles)
     with reiter[3]:
-        _archive_editor()
+        _archive_editor(spaceports, vehicles)
     with reiter[4]:
         _sea_launch_editor()
     if mit_import:
@@ -6529,7 +6900,8 @@ def _update_archive(
     # schreibt erneut fort.
     for _ in range(2):
         try:
-            bestand = archiv_lesen(wartezeit=WARTEZEIT_AUTOMATISCH)
+            # Markierungen aus derselben Momentaufnahme: von Hand gesetzte Spalten bleiben
+            bestand, bestand_hw = archiv_mit_handwerten_lesen(wartezeit=WARTEZEIT_AUTOMATISCH)
         except ArchiveUnreadable as exc:
             # Nie ueber ein unlesbares Archiv schreiben; die Auswertung laeuft weiter.
             st.warning("Launch archive: {}".format(_md_plain(exc)))
@@ -6551,11 +6923,14 @@ def _update_archive(
             bestand,
             zeilen,
             set(st.session_state.get("archiv_removed", set())),
+            {k: set(v) for k, v in handwerte_index(bestand_hw).items()},
         )
         if neu.to_csv(index=False) == bestand.to_csv(index=False):
             return
         try:
-            archiv_schreiben(neu, vorher=bestand, wartezeit=WARTEZEIT_AUTOMATISCH)
+            # Handwerte unveraendert, aber mit Standvergleich: eine inzwischen gesetzte
+            # oder entfernte Markierung ist ein Konflikt -> neu lesen
+            archiv_und_handwerte_schreiben(neu, bestand_hw, bestand, bestand_hw, wartezeit=WARTEZEIT_AUTOMATISCH)
             return
         except nola_db.Konflikt:
             continue
@@ -6729,14 +7104,16 @@ def _remove_archive_row(schluessel: str) -> None:
     denselben Start sofort wieder an, solange sein NOTAM in der Tagesdatei steht.
     """
     try:
-        bestand = archiv_lesen()
+        bestand, bestand_hw = archiv_mit_handwerten_lesen()
     except ArchiveUnreadable as exc:
         # Meldung fuer den naechsten Durchlauf - der Aufrufer zeichnet sofort neu
         _melde_db_dialog("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     behalten = bestand[[archive_key(dict(r)) != schluessel for _, r in bestand.iterrows()]]
+    # Markierungen folgen der Zeile - in derselben Transaktion
+    behalten_hw = handwerte_bereinigen(bestand_hw, behalten)
     try:
-        neu_stand = archiv_schreiben(behalten, vorher=bestand)
+        neu = archiv_und_handwerte_schreiben(behalten, behalten_hw, bestand, bestand_hw)
     except nola_db.Konflikt:
         _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
         return
@@ -6744,7 +7121,8 @@ def _remove_archive_row(schluessel: str) -> None:
         _melde_db_dialog("error", "Launch archive: {} Nothing was removed.".format(exc))
         return
     # Stand direkt nach dieser Aenderung - Rueckgaengig nur, solange er gilt
-    _push_undo("startarchiv", bestand, neu_stand, "Archivzeile entfernt")
+    _push_undo("startarchiv", bestand, neu["startarchiv"], "Archivzeile entfernt",
+               weitere=[("archiv_handwerte", bestand_hw, neu["archiv_handwerte"])])
     st.session_state.setdefault("archiv_removed", set()).add(schluessel)
     grund = _persist_workspace(im_dialog=True)
     if grund:
@@ -6753,18 +7131,162 @@ def _remove_archive_row(schluessel: str) -> None:
     st.session_state["ref_flash"] = "Archivzeile entfernt"
 
 
-def _archive_editor() -> None:
-    """Tabelle des Startarchivs mit Entfernen-Funktion."""
+ARCHIV_EDIT_NUR_LOKAL = "Editing the launch archive is only possible on this computer."
+ARCHIV_ZEILE_FEHLT = "This launch is no longer in the archive - nothing was changed."
+#: Marken in der Tabelle als Strichsymbole (wie der Bearbeiten-Knopf) - keine Piktogramme
+#: (Symbolvokabular): Handwert, aus dem neuen Platz berechnet, moegliche Doppelzeile.
+ARCHIV_MARKE_HAND = ":material/edit:"
+ARCHIV_MARKE_BERECHNET = ":material/autorenew:"
+ARCHIV_MARKE_DOPPELT = ":material/warning:"
+
+
+def _archiv_aendern(
+    schluessel: str,
+    aendern: Callable[[Dict[str, str], Marken], Tuple[Dict[str, str], Marken, List[str]]],
+    label: str,
+    bei_konflikt: Optional[Callable[[], None]] = None,
+) -> bool:
+    """
+    Gemeinsamer Weg fuer Speichern und Reset: lesen, anwenden, Zeile und Marken
+    in EINER Transaktion schreiben, ein Undo-Eintrag. Meldungen im Dialog.
+    `aendern` darf nola_db.Konflikt werfen (Zeile seit dem Zeichnen fremd geaendert);
+    jeder Konflikt ruft `bei_konflikt` auf (z. B. Formular neu aufbauen).
+    """
+    if not local_admin_allowed():  # auch hier, nicht nur in der Oberflaeche (fail-closed)
+        _melde_db_dialog("error", ARCHIV_EDIT_NUR_LOKAL)
+        return False
     try:
-        archiv = archiv_lesen()
+        bestand, bestand_hw = archiv_mit_handwerten_lesen()
+    except ArchiveUnreadable as exc:
+        _melde_db_dialog("error", "Launch archive: {} Nothing was changed.".format(exc))
+        return False
+    positionen = [i for i, (_, r) in enumerate(bestand.iterrows()) if archive_key(dict(r)) == schluessel]
+    if not positionen:
+        _melde_db_dialog("warning", ARCHIV_ZEILE_FEHLT)
+        return False
+    pos = positionen[0]
+    zeile = {s: str(bestand.iloc[pos][s]) for s in ARCHIVE_COLUMNS}
+    alte_marken = handwerte_index(bestand_hw).get(schluessel, {})
+    try:
+        neue_zeile, marken, hinweise = aendern(zeile, alte_marken)
+    except ArchivEingabeFehler as exc:
+        _melde_db_dialog("error", str(exc))
+        return False
+    except nola_db.Konflikt:
+        _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
+        if bei_konflikt is not None:
+            bei_konflikt()
+        return False
+    if neue_zeile == zeile and marken == alte_marken:
+        # nichts geaendert: kein Schreiben, kein leerer Undo-Eintrag
+        st.session_state["ref_flash"] = "Nothing changed."
+        return True
+    neu = bestand.copy()
+    for spalte in ARCHIVE_COLUMNS:
+        neu.iat[pos, neu.columns.get_loc(spalte)] = neue_zeile[spalte]
+    geaendert = {s for s in ARCHIVE_COLUMNS if neue_zeile[s] != zeile[s]}
+    neu_hw = handwerte_mit(bestand_hw, schluessel, marken, datetime.now(timezone.utc).isoformat(), geaendert)
+    try:
+        staende = archiv_und_handwerte_schreiben(neu, neu_hw, bestand, bestand_hw)
+    except nola_db.Konflikt:
+        _melde_db_dialog("warning", nola_db.KONFLIKT_TEXT)
+        if bei_konflikt is not None:
+            bei_konflikt()
+        return False
+    except nola_db.DbFehler as exc:
+        _melde_db_dialog("error", "Launch archive: {} Nothing was changed.".format(exc))
+        return False
+    _push_undo("startarchiv", bestand, staende["startarchiv"], label,
+               weitere=[("archiv_handwerte", bestand_hw, staende["archiv_handwerte"])])
+    if hinweise:
+        _melde_db_dialog("warning", "Saved. " + "; ".join(hinweise) + ".")
+    st.session_state["ref_flash"] = label
+    return True
+
+
+def _archiv_edit_speichern(
+    schluessel: str, neu: Dict[str, str], spaceports: pd.DataFrame, vehicles: pd.DataFrame,
+    angezeigt: Optional[Dict[str, str]] = None,
+    bei_konflikt: Optional[Callable[[], None]] = None,
+) -> bool:
+    """
+    Save im Bearbeiten-Formular. `angezeigt`: die Werte der Zeile, gegen die das
+    Formular gezeichnet wurde. Dann gilt nur als Aenderung, was der Benutzer dort
+    geaendert hat; hat ein anderer Schreiber eines dieser Felder seitdem geaendert,
+    ist das ein Konflikt (nichts geschrieben). Ohne `angezeigt`: alle Felder aus `neu`.
+    """
+    if angezeigt is not None:
+        gesendet = {f: w for f, w in neu.items() if str(w if w is not None else "") != str(angezeigt.get(f, ""))}
+    else:
+        gesendet = dict(neu)
+
+    def aendern(zeile: Dict[str, str], marken: Marken) -> Tuple[Dict[str, str], Marken, List[str]]:
+        if angezeigt is not None and any(zeile[f] != str(angezeigt.get(f, "")) for f in gesendet if f in zeile):
+            raise nola_db.Konflikt("changed", nola_db.KONFLIKT_TEXT)
+        # Auswahllisten der Nation, die im Formular stand
+        erlaubt = archiv_erlaubt(spaceports, vehicles, str(neu.get("Nation", zeile["Nation"])))
+        return archiv_zeile_bearbeiten(zeile, gesendet, marken, erlaubt, spaceports)
+    return _archiv_aendern(schluessel, aendern, "Archive row edited", bei_konflikt=bei_konflikt)
+
+
+def _archiv_reset_klick(schluessel: str, spalte: str) -> bool:
+    """Reset to NOLA value fuer ein markiertes Feld."""
+    def aendern(zeile: Dict[str, str], marken: Marken) -> Tuple[Dict[str, str], Marken, List[str]]:
+        z, m = archiv_feld_zuruecksetzen(zeile, marken, spalte)
+        return z, m, []
+    return _archiv_aendern(schluessel, aendern, "Archive field reset to NOLA value")
+
+
+#: Merker: der naechste Lauf des Referenzdialogs oeffnet den Reiter Launch Archive.
+REF_REITER_ARCHIV = "ref_reiter_archiv"
+
+
+def _archiv_neu_zeichnen() -> None:
+    """Nach Save, Reset oder Remove: ganze App neu (Meldung, Undo), Dialog wieder im Archiv-Reiter."""
+    st.session_state[REF_REITER_ARCHIV] = True
+    st.rerun(scope="app")
+
+
+def _archiv_wahl_schluessel(kurz: str) -> str:
+    """Schluessel der im Formular gemerkten Wahl (Platz, Vehicle) einer Zeile."""
+    return "aed_wahl_{}".format(kurz)
+
+
+#: Revision der Formular-Widgets (zaehlt bei jedem Oeffnen per Edit und bei jedem Konflikt hoch).
+ARCHIV_EDIT_REV = "archiv_edit_rev"
+#: Teile der Widget-Schluessel im Formular (Nation, Platz, Vehicle, Payload, Orbit).
+_ARCHIV_WIDGET_TEILE = ("n", "p", "v", "l", "o")
+
+
+def _archiv_widgets_neu(kurz: str) -> None:
+    """
+    Formular einer Zeile mit neuen Widgets: Der Browser behaelt den Wert eines Widgets,
+    solange dessen Kennung gleich bleibt (Streamlit 1.50: Schluessel + Optionen bzw.
+    max_chars) - Loeschen des session_state-Schluessels reicht nicht. Eine neue Revision
+    im Schluessel gibt neue Kennungen; die alten Schluessel und die gemerkte Wahl fallen weg.
+    """
+    st.session_state[ARCHIV_EDIT_REV] = int(st.session_state.get(ARCHIV_EDIT_REV, 0)) + 1
+    st.session_state.pop(_archiv_wahl_schluessel(kurz), None)
+    alt = tuple("aed_{}_{}_".format(teil, kurz) for teil in _ARCHIV_WIDGET_TEILE)
+    for schl in [k for k in st.session_state.keys() if str(k).startswith(alt)]:
+        st.session_state.pop(schl, None)
+
+
+def _archive_editor(spaceports: pd.DataFrame, vehicles: pd.DataFrame) -> None:
+    """Tabelle des Startarchivs: Blaettern, Marken, Bearbeiten (nur lokal), Entfernen."""
+    try:
+        archiv, handwerte = archiv_mit_handwerten_lesen()
     except ArchiveUnreadable as exc:
         st.error(_md_plain("Launch archive: {}".format(exc)))
         return
+    darf = local_admin_allowed()
     st.caption(
-        "This table is written by the application itself: every recognised launch "
-        "gets a row, payload or not. You add the payload under *NOTAM Data* - it is "
-        "never overwritten by a later run. That is why there is no form to add a "
-        "row here, only to remove one."
+        "This table is written by the application itself: every recognised launch gets a row. "
+        + ("Edit corrects nation, site, vehicle, payload and orbit - a corrected field ({}) is never "
+           "overwritten by a later run; {} marks orbit values recomputed for a new site, {} rows that "
+           "share NOTAM ids with another row.".format(ARCHIV_MARKE_HAND, ARCHIV_MARKE_BERECHNET,
+                                                       ARCHIV_MARKE_DOPPELT)
+           if darf else "Editing is only possible on the computer NOLA runs on.")
     )
     if archiv.empty:
         st.info(
@@ -6772,47 +7294,168 @@ def _archive_editor() -> None:
             "analysed, the launch archive in `nola.db` fills itself."
         )
         return
+    marken = handwerte_index(handwerte)
+    doppelt = ueberschneidende_schluessel(archiv)
     suche = st.text_input(
         "Search", key="archiv_suche", placeholder="NOTAM, nation, launch site, payload …"
     ).strip().lower()
-    zeilen = archiv
+    zeilen = _archiv_sortiert(archiv)
     if suche:
-        maske = archiv.apply(
-            lambda r: suche in " ".join(str(v).lower() for v in r), axis=1
-        )
-        zeilen = archiv[maske]
-    breiten = (1.5, 1.0, 1.1, 0.9, 1.0, 1.2, 0.8, 0.9, 1.0)
-    _reference_row(
-        ("NOTAM", "Datum", "Zeit", "Nation", "Platz", "Vehicle", "Payload", "Orbit", ""),
-        breiten,
-        header=True,
-    )
+        zeilen = zeilen[zeilen.apply(lambda r: suche in " ".join(str(v).lower() for v in r), axis=1)]
+    if suche != st.session_state.get("archiv_suche_alt", ""):
+        # neue Suche: wieder von der ersten Seite
+        st.session_state["archiv_seite"] = 0
+        st.session_state["archiv_suche_alt"] = suche
+    seiten = max(1, -(-len(zeilen) // ARCHIV_SEITE))
+    seite = max(0, min(int(st.session_state.get("archiv_seite", 0)), seiten - 1))
+    # Knopfspalte breit genug fuer "Remove" ohne Umbruch im Wort (Knoepfe untereinander)
+    breiten = (1.4, 0.95, 0.7, 0.85, 0.95, 1.05, 1.15, 0.85, 1.6)
+    _reference_row(("NOTAM", "Datum", "Zeit", "Nation", "Platz", "Vehicle", "Payload", "Orbit", ""),
+                   breiten, header=True)
     st.caption("{} of {} launches".format(len(zeilen), len(archiv)))
-    for _, r in zeilen.head(60).iterrows():
+
+    def zelle(text: str, schluessel: str, spalte: str) -> Tuple[str, Optional[str]]:
+        marke = marken.get(schluessel, {}).get(spalte)
+        if not marke:
+            return _md_plain(text), None
+        zeichen = ARCHIV_MARKE_HAND if marke[1] == "hand" else ARCHIV_MARKE_BERECHNET
+        return "{} {}".format(_md_plain(text), zeichen), "NOLA: {}".format(_md_plain(marke[0] or "-"))
+
+    def bahn_zelle(text: str, schluessel: str) -> Tuple[str, Optional[str]]:
+        # Inklination und Azimuth haben keine eigene Spalte: ihre Neuberechnung zeigt die Orbit-Zelle
+        eigene = marken.get(schluessel, {})
+        werte = ["{} {}".format(name, _md_plain(eigene[sp][0] or "-"))
+                 for sp, name in (("Inklination", "inclination"), ("Azimuth", "azimuth")) if sp in eigene]
+        if "Orbit" not in eigene and not werte:
+            return _md_plain(text), None
+        von_hand = eigene.get("Orbit", ("", ""))[1] == "hand"
+        if von_hand:
+            # Herkunft je Wert: Orbit von Hand, Inklination/Azimuth aus dem Platz berechnet
+            tip = "NOLA: {} (orbit set by hand)".format(_md_plain(eigene["Orbit"][0] or "-"))
+            if werte:
+                tip += "; " + ", ".join(werte) + " (recomputed from site)"
+        else:
+            tip = "NOLA: " + ", ".join(([_md_plain(eigene["Orbit"][0] or "-")] if "Orbit" in eigene else []) + werte)
+        zeichen = ARCHIV_MARKE_HAND if von_hand else ARCHIV_MARKE_BERECHNET
+        return "{} {}".format(_md_plain(text), zeichen), tip
+
+    offen = st.session_state.get("archiv_edit")
+    for _, r in zeilen.iloc[seite * ARCHIV_SEITE:(seite + 1) * ARCHIV_SEITE].iterrows():
         schluessel = archive_key(dict(r))
+        kurz = hashlib.sha1(schluessel.encode()).hexdigest()[:10]
+        notam = _md_plain(str(r["NOTAM"])[:24]) + (" " + ARCHIV_MARKE_DOPPELT if schluessel in doppelt else "")
+        felder = [zelle(str(r["Nation"])[:12], schluessel, "Nation"),
+                  zelle(str(r["Weltraumbahnhof"]), schluessel, "Weltraumbahnhof"),
+                  zelle(str(r["Trägersystem"])[:14] or "-", schluessel, "Trägersystem"),
+                  zelle(str(r["Payload"])[:16] or "-", schluessel, "Payload"),
+                  bahn_zelle(str(r["Orbit"]), schluessel)]
         knopf = _reference_row(
-            (
-                _md_plain(str(r["NOTAM"])[:24]),
-                _md_plain(str(r["Startdatum"])),
-                _md_plain(str(r["Startzeit"])),
-                _md_plain(str(r["Nation"])[:12]),
-                _md_plain(str(r["Weltraumbahnhof"])),
-                _md_plain(str(r["Trägersystem"])[:14] or "-"),
-                _md_plain(str(r["Payload"])[:16] or "-"),
-                _md_plain(str(r["Orbit"])),
-                "",
-            ),
+            (notam, _md_plain(str(r["Startdatum"])), _md_plain(str(r["Startzeit"])))
+            + tuple(t for t, _ in felder) + ("",),
             breiten,
+            hilfen=(("Shares NOTAM ids with another row of the same date - possible duplicate."
+                     if schluessel in doppelt else None), None, None)
+            + tuple(h for _, h in felder) + (None,),
         )
-        if knopf.button(
-            "Remove",
-            key="rm_arc_{}".format(hashlib.sha1(schluessel.encode()).hexdigest()[:10]),
-            use_container_width=True,
-        ):
+        if darf and knopf.button("Edit", key="ed_arc_{}".format(kurz), use_container_width=True):
+            # hoechstens ein Formular offen: neu zeichnen, damit ein frueher offenes verschwindet;
+            # eine alte, nie gespeicherte Wahl oder Eingabe dieser Zeile gilt nicht mehr
+            st.session_state["archiv_edit"] = schluessel
+            _archiv_widgets_neu(kurz)
+            st.rerun(scope="fragment")
+        if knopf.button("Remove", key="rm_arc_{}".format(kurz), use_container_width=True):
             _remove_archive_row(schluessel)
-            st.rerun(scope="app")
-    if len(zeilen) > 60:
-        st.info("Only the first 60 matches are shown - narrow the search.")
+            _archiv_neu_zeichnen()
+        if darf and offen == schluessel:
+            _archiv_formular(dict(r), marken.get(schluessel, {}), spaceports, vehicles, kurz)
+    if seiten > 1:
+        z, m, v = st.columns((1, 2, 1))
+        if z.button("◀ Prev", key="archiv_prev", disabled=seite == 0):
+            st.session_state["archiv_seite"] = seite - 1
+            st.rerun(scope="fragment")
+        m.caption("Page {} of {}".format(seite + 1, seiten))
+        if v.button("Next ▶", key="archiv_next", disabled=seite >= seiten - 1):
+            st.session_state["archiv_seite"] = seite + 1
+            st.rerun(scope="fragment")
+
+
+def _archiv_formular(zeile: Dict[str, Any], marken: Marken, spaceports: pd.DataFrame,
+                     vehicles: pd.DataFrame, kurz: str) -> None:
+    """Bearbeiten unter der Zeile - normale Widgets (kein Formular), damit die Listen der Nation folgen."""
+    schluessel = archive_key(zeile)
+
+    def auswahl(liste: Sequence[str], aktuell: str) -> List[str]:
+        # der aktuelle Wert der Zeile bleibt immer waehlbar
+        return list(liste) + ([aktuell] if aktuell not in liste else [])
+
+    # Die Listen fuer Platz und Vehicle werden je Nation umsortiert; damit wechselt Streamlit
+    # die Selectbox (Kennung haengt an den Optionen) und faellt auf index zurueck. Die schon
+    # getroffene Wahl wird deshalb selbst gemerkt und als index weitergegeben.
+    wahl_schluessel = _archiv_wahl_schluessel(kurz)
+    wahl = dict(st.session_state.get(wahl_schluessel) or {})
+    rev = int(st.session_state.get(ARCHIV_EDIT_REV, 0))
+
+    def wkey(teil: str) -> str:
+        # Widget-Schluessel mit Revision (siehe _archiv_widgets_neu)
+        return "aed_{}_{}_{}".format(teil, kurz, rev)
+
+    # Grundlage des Formulars: die Zeile beim ersten Zeichnen (auch nach X/Escape) - die
+    # Widgets behalten ihren Wert, ein spaeterer fremder Wert darf beim Save nicht als
+    # Handaenderung gelten (siehe _archiv_edit_speichern, angezeigt)
+    basis = dict(wahl.get("angezeigt") or {f: str(zeile[f]) for f in ARCHIV_EDIT_FELDER})
+
+    def vorwahl(optionen: List[str], spalte: str) -> int:
+        gemerkt = wahl.get(spalte)
+        return optionen.index(gemerkt) if gemerkt in optionen else optionen.index(basis[spalte])
+
+    def schliessen() -> None:
+        st.session_state.pop("archiv_edit", None)
+        st.session_state.pop(wahl_schluessel, None)
+
+    def neu_aufbauen() -> None:
+        # Konflikt: Formular bleibt offen und zeigt beim naechsten Lauf die frische Zeile -
+        # unter neuen Widget-Kennungen, sonst behielte der Browser die alten Werte
+        _archiv_widgets_neu(kurz)
+
+    with st.container(border=True):
+        nationen = auswahl(TARGET_NATIONS, basis["Nation"])
+        nation = st.selectbox("Nation", nationen, index=nationen.index(basis["Nation"]),
+                              format_func=nation_label, key=wkey("n"))
+        erlaubt = archiv_erlaubt(spaceports, vehicles, nation)
+        plaetze = auswahl(erlaubt["Weltraumbahnhof"], basis["Weltraumbahnhof"])
+        platz = st.selectbox("Launch site", plaetze, index=vorwahl(plaetze, "Weltraumbahnhof"),
+                             key=wkey("p"))
+        traeger = auswahl(erlaubt["Trägersystem"], basis["Trägersystem"])
+        vehicle = st.selectbox("Vehicle", traeger, index=vorwahl(traeger, "Trägersystem"),
+                               format_func=lambda v: v or VEHICLE_NONE_LABEL, key=wkey("v"))
+        st.session_state[wahl_schluessel] = {"Weltraumbahnhof": platz, "Trägersystem": vehicle,
+                                             "angezeigt": basis}
+        payload = st.text_input("Payload", value=basis["Payload"], max_chars=max(PAYLOAD_MAX, len(basis["Payload"])),
+                                key=wkey("l"))
+        st.caption("Inclination {} / azimuth {} - recomputed when the launch site changes.".format(
+            _md_plain(str(zeile["Inklination"]) or "-"), _md_plain(str(zeile["Azimuth"]) or "-")))
+        orbits = auswahl(ORBIT_AUSWAHL, basis["Orbit"])
+        orbit = st.selectbox("Orbit", orbits, index=orbits.index(basis["Orbit"]),
+                             key=wkey("o"))
+        # Reset nur fuer Handwerte; berechnete Werte setzt der Reset des Platzes mit zurueck
+        for spalte, (nola, herkunft) in sorted(marken.items()):
+            if herkunft == "hand" and st.button(
+                    "Reset {} to NOLA value ({})".format(archiv_feld_name(spalte), _md_plain(nola or "-")),
+                    key="aed_r_{}_{}".format(kurz, hashlib.sha1(spalte.encode()).hexdigest()[:6])):
+                if _archiv_reset_klick(schluessel, spalte):
+                    schliessen()
+                _archiv_neu_zeichnen()
+        speichern, abbrechen = st.columns(2)
+        if speichern.button("Save", key="aed_s_{}".format(kurz), type="primary", use_container_width=True):
+            if _archiv_edit_speichern(schluessel, {"Nation": nation, "Weltraumbahnhof": platz,
+                                                   "Trägersystem": vehicle, "Payload": payload,
+                                                   "Orbit": orbit}, spaceports, vehicles,
+                                      angezeigt=basis, bei_konflikt=neu_aufbauen):
+                schliessen()
+            _archiv_neu_zeichnen()
+        if abbrechen.button("Cancel", key="aed_c_{}".format(kurz), use_container_width=True):
+            schliessen()
+            st.rerun(scope="fragment")
 
 
 _RE_MD_ZEICHEN = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~$:/=])")

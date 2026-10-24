@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROJEKT_DB = Path(__file__).resolve().parent / "nola.db"
 #: Einzige Definition des Sicherungsordners (iCloud Drive) - app.BACKUP_DIR verweist darauf.
 ECHTER_SICHERUNGSORDNER = (
@@ -53,6 +53,7 @@ FACHTABELLEN: Dict[str, Tuple[str, ...]] = {
         "Datum", "Zeit", "Nation", "Breite", "Länge", "Radius (km)", "Azimut",
         "Inklination", "Orbit", "Dropzones", "NOTAM", "Nächster bekannter Platz",
     ),
+    "archiv_handwerte": ("schluessel", "spalte", "nola_wert", "herkunft", "geaendert_utc"),
 }
 
 
@@ -65,6 +66,29 @@ IMPORTTABELLEN: Tuple[str, ...] = (
 #: Alle Tabellen, die _schema_sql anlegt - einzige Liste fuer zaehle und pruefe_sicherung.
 #: test_nola_db prueft, dass sie genau den Tabellen der angelegten Datei entspricht.
 ALLE_TABELLEN: Tuple[str, ...] = ("meta",) + tuple(FACHTABELLEN) + ARBEITSTABELLEN + IMPORTTABELLEN
+
+#: Spalten des Startarchivs, die von Hand gesetzt (oder nach Platzwechsel neu berechnet) werden koennen.
+HANDWERT_SPALTEN: Tuple[str, ...] = (
+    "Nation", "Weltraumbahnhof", "Trägersystem", "Payload", "Orbit", "Inklination", "Azimuth",
+)
+#: Herkunft eines Handwerts: von Hand gesetzt oder aus dem neuen Platz berechnet.
+HANDWERT_HERKUNFT: Tuple[str, ...] = ("hand", "berechnet")
+
+
+def _handwerte_sql() -> str:
+    """Eine Anweisung - dient Neuanlage (_schema_sql) und Umbau (SCHRITTE[1])."""
+    spalten = ", ".join("'{}'".format(s) for s in HANDWERT_SPALTEN)  # Konstanten, keine Eingabe
+    herkunft = ", ".join("'{}'".format(h) for h in HANDWERT_HERKUNFT)
+    return (
+        "CREATE TABLE IF NOT EXISTS archiv_handwerte (\n"
+        "  schluessel TEXT NOT NULL CHECK (trim(schluessel) <> ''),\n"
+        "  spalte TEXT NOT NULL CHECK (spalte IN ({})),\n"
+        "  nola_wert TEXT,\n"
+        "  herkunft TEXT NOT NULL CHECK (herkunft IN ({})),\n"
+        "  geaendert_utc TEXT NOT NULL,\n"
+        "  PRIMARY KEY (schluessel, spalte)\n"
+        ")".format(spalten, herkunft)
+    )
 
 
 class DbFehler(Exception):
@@ -220,7 +244,9 @@ CREATE TABLE archiv_import_review (
   pos INTEGER NOT NULL, schluessel TEXT NOT NULL,
   PRIMARY KEY (art, pos)
 );
+{hw};
 """.format(
+        hw=_handwerte_sql(),
         sp=spalten("startplaetze", {
             "Kurzel": _voll("Kurzel"), "Latitude": _zahl("Latitude", -90, 90),
             "Longitude": _zahl("Longitude", -180, 180),
@@ -360,8 +386,8 @@ def schema_version(conn: sqlite3.Connection) -> int:
         raise DbFehler("database corrupt", "schema_version is not a number") from exc
 
 
-#: Umbauschritte: SCHRITTE[n] hebt Version n auf n + 1. Noch keine.
-SCHRITTE: Dict[int, str] = {}
+#: Umbauschritte: SCHRITTE[n] hebt Version n auf n + 1.
+SCHRITTE: Dict[int, str] = {1: _handwerte_sql()}
 
 
 def pruefe_schema(conn: sqlite3.Connection, sichern: Callable[[], Optional[Path]]) -> None:
@@ -429,7 +455,7 @@ def _als_text(wert: Any) -> Optional[str]:
 
 
 #: Tabellen, die wie die alten CSV-Leser (app.read_archive_strict, frueher load_sea_launches) "" statt NaN liefern.
-_LEER_ALS_TEXT = frozenset({"startarchiv", "seestarts"})
+_LEER_ALS_TEXT = frozenset({"startarchiv", "seestarts", "archiv_handwerte"})
 
 
 def lese_tabelle(conn: sqlite3.Connection, tabelle: str) -> pd.DataFrame:
@@ -503,6 +529,48 @@ def ersetze_tabellen(
                     "ON CONFLICT(schluessel) DO UPDATE SET wert = excluded.wert",
                     (schluessel, wert),
                 )
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+
+
+def lese_tabellen(conn: sqlite3.Connection, tabellen: Sequence[str]) -> Dict[str, pd.DataFrame]:
+    """
+    Mehrere Fachtabellen aus EINER Momentaufnahme (Lesetransaktion) - wer sie
+    spaeter gemeinsam ersetzt, gibt die Staende an ersetze_tabellen_geprueft.
+    """
+    for tabelle in tabellen:
+        if tabelle not in FACHTABELLEN:
+            raise ValueError("unknown table {}".format(tabelle))
+    try:
+        conn.execute("BEGIN")
+        try:
+            return {t: lese_tabelle(conn, t) for t in tabellen}
+        finally:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")  # nur gelesen
+    except sqlite3.Error as exc:
+        raise _uebersetze(exc) from exc
+
+
+def ersetze_tabellen_geprueft(
+    conn: sqlite3.Connection, tabellen: Dict[str, Tuple[pd.DataFrame, str]]
+) -> Dict[str, str]:
+    """
+    Ersetzt mehrere Fachtabellen in EINER Schreibtransaktion - nur, wenn jede
+    noch ihrem erwarteten Stand entspricht. Weicht einer ab: Konflikt, keine
+    geschrieben (Ursache ARCHIV_GEAENDERT fuer das Startarchiv, sonst "changed").
+    Rueckgabe: die neuen Staende je Tabelle.
+    """
+    for tabelle in tabellen:
+        if tabelle not in FACHTABELLEN:
+            raise ValueError("unknown table {}".format(tabelle))
+    try:
+        with _transaktion(conn):
+            for tabelle, (_, erwartet) in tabellen.items():
+                if _stand(_zeilen(conn, tabelle)) != erwartet:
+                    raise Konflikt(
+                        ARCHIV_GEAENDERT if tabelle == "startarchiv" else "changed", KONFLIKT_TEXT)
+            return {t: _ersetze_in_transaktion(conn, t, df) for t, (df, _) in tabellen.items()}
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
 
@@ -866,6 +934,7 @@ def ersetze_archiv_und_importzustand(
     archiv_erwartet: str,
     state: Dict[str, Any],
     state_erwartet: Optional[str],
+    handwerte: Optional[Tuple[pd.DataFrame, str]] = None,
 ) -> Tuple[str, str]:
     """
     Bestaetigen/Entfernen im Archiv-Import: Startarchiv und Importzustand in EINER
@@ -873,13 +942,20 @@ def ersetze_archiv_und_importzustand(
     ersetze_tabelle, Zustand wie speichere_importzustand), wird keiner geschrieben
     (Konflikt; Ursache ARCHIV_GEAENDERT bzw. "changed").
     `state_erwartet=None` schreibt den Zustand ohne Vergleich (Zustand ohne Stand).
+    Mit `handwerte` (DataFrame, erwarteter Stand) wird auch archiv_handwerte in
+    derselben Transaktion ersetzt; weicht dessen Stand ab, ist das fuer den Import
+    eine Aenderung am Archiv (Ursache ARCHIV_GEAENDERT).
     Rueckgabe: die neuen Staende (Archiv, Zustand).
     """
     try:
         with _transaktion(conn):
             if _stand(_zeilen(conn, "startarchiv")) != archiv_erwartet:
                 raise Konflikt(ARCHIV_GEAENDERT, KONFLIKT_TEXT)
+            if handwerte is not None and _stand(_zeilen(conn, "archiv_handwerte")) != handwerte[1]:
+                raise Konflikt(ARCHIV_GEAENDERT, KONFLIKT_TEXT)
             neu_archiv = _ersetze_in_transaktion(conn, "startarchiv", archiv_df)
+            if handwerte is not None:
+                _ersetze_in_transaktion(conn, "archiv_handwerte", handwerte[0])
             neu_zustand = _speichere_importzustand_in_transaktion(conn, state, state_erwartet)
     except sqlite3.Error as exc:
         raise _uebersetze(exc) from exc
@@ -1002,8 +1078,9 @@ def pruefe_sicherung(pfad: Path) -> Tuple[str, Optional[Dict[str, int]]]:
         try:
             if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 return "corrupt", None
+            vorhanden = {n for (n,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
             return "ok", {
-                t: int(conn.execute("SELECT count(*) FROM {}".format(_q(t))).fetchone()[0])
+                t: int(conn.execute("SELECT count(*) FROM {}".format(_q(t))).fetchone()[0]) if t in vorhanden else 0
                 for t in tuple(FACHTABELLEN) + ARBEITSTABELLEN
             }
         finally:

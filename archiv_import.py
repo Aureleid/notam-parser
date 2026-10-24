@@ -1218,19 +1218,30 @@ def _archiv_lesen(archiv: Optional[Path] = None) -> pd.DataFrame:
         raise ImportStateError(str(exc)) from exc
 
 
+def _archiv_und_handwerte_lesen(archiv: Optional[Path] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Wie _archiv_lesen, dazu die Handwerte aus derselben Momentaufnahme."""
+    try:
+        return app.archiv_mit_handwerten_lesen(archiv)
+    except app.ArchiveUnreadable as exc:
+        raise ImportStateError(str(exc)) from exc
+
+
 def _archiv_und_zustand_schreiben(
     archiv: Optional[Path], neu: pd.DataFrame, vorher: pd.DataFrame,
     kuenftig: Dict[str, Any], state: Dict[str, Any],
+    handwerte: Optional[Tuple[pd.DataFrame, pd.DataFrame]] = None,
 ) -> str:
     """
     Schreibt Archiv und den kuenftigen Importzustand in EINER Transaktion - nur,
     wenn das Archiv seit dem Lesen von `vorher` und der Zustand seit dem Laden
     von `state` unveraendert sind; sonst ImportStateError, nichts geschrieben.
     `state` selbst bleibt unberuehrt. Rueckgabe: der neue Stand des Zustands.
+    `handwerte = (neu_hw, vorher_hw)`: die Markierungen in derselben Transaktion;
+    eine fremde Aenderung an ihnen gilt als Aenderung am Archiv.
     """
     try:
         _, stand = app.archiv_und_importzustand_schreiben(
-            neu, vorher, kuenftig, getattr(state, "nola_stand", None), db=archiv)
+            neu, vorher, kuenftig, getattr(state, "nola_stand", None), db=archiv, handwerte=handwerte)
     except app.nola_db.Konflikt as exc:
         if exc.ursache == app.nola_db.ARCHIV_GEAENDERT:
             raise ImportStateError(
@@ -1290,13 +1301,16 @@ def remove_orphan(state: Dict[str, Any], key: str, archiv: Optional[Path] = None
     Die einzige Stelle, an der der Import eine Archivzeile loescht - nur auf Anweisung.
     Archiv und Vermerk 'removed' in EINER Transaktion (wie confirm_many).
     """
-    bestand = _archiv_lesen(archiv)
+    bestand, bestand_hw = _archiv_und_handwerte_lesen(archiv)
     gefiltert = bestand[
         [app.archive_key(dict(r)) != key for _, r in bestand.iterrows()]
     ].reset_index(drop=True)
     neu = {key: {"status": "removed"}}
-    # Archiv und Vermerk zusammen: kein fremder Reiter kann sie auseinanderlaufen lassen
-    stand = _archiv_und_zustand_schreiben(archiv, gefiltert, bestand, _mit_entscheidungen(state, neu), state)
+    # Archiv, Markierungen (folgen der Zeile) und Vermerk zusammen: kein fremder
+    # Reiter kann sie auseinanderlaufen lassen
+    stand = _archiv_und_zustand_schreiben(
+        archiv, gefiltert, bestand, _mit_entscheidungen(state, neu), state,
+        handwerte=(app.handwerte_bereinigen(bestand_hw, gefiltert), bestand_hw))
     _archiv_pruefen(archiv, set(), {key})
     state["entscheidungen"].update(neu)
     _stand_merken(state, stand)
@@ -1472,8 +1486,10 @@ def confirm_many(
     """
     if not auswahl:
         return 0
-    bestand = _archiv_lesen(archiv)
+    bestand, bestand_hw = _archiv_und_handwerte_lesen(archiv)
     gelesen = bestand  # ungefiltert, sein Stand schuetzt den Schreibvorgang
+    # Von Hand gesetzte Felder ergaenzt und ueberschreibt der Import nicht
+    marken = app.handwerte_index(bestand_hw)
     ergaenzen = [a for a in auswahl if a[0].get("im_archiv")]
     anlegen = [a for a in auswahl if not a[0].get("im_archiv")]
     # Ergaenzen: nur Traegersystem und Payload der vorhandenen Zeile(n)
@@ -1491,7 +1507,7 @@ def confirm_many(
                     "written - please reload the tab.".format(ziel)
                 )
             for spalte, wert in (("Tr\u00e4gersystem", rakete), ("Payload", payload)):
-                if wert:
+                if wert and spalte not in marken.get(ziel, {}):
                     werte.setdefault(ziel, {})[spalte] = wert
     if werte:
         bestand = bestand.copy()
@@ -1533,10 +1549,13 @@ def confirm_many(
         if kand.get("im_archiv"):
             neu[kand["key"]]["ergaenzt"] = list(kand["im_archiv"])
             neu[kand["key"]]["vorher"] = {z: dict(vorher_werte[z]) for z in kand["im_archiv"]}
-    # Archiv und Entscheidungen zusammen: kein fremder Reiter kann sie auseinanderlaufen lassen
+    neues_archiv = app.merge_archive(
+        bestand, zeilen, entfernt=set(), handwerte={k: set(v) for k, v in marken.items()})
+    # Archiv, Markierungen und Entscheidungen zusammen: kein fremder Reiter kann sie
+    # auseinanderlaufen lassen; ersetzte Zeilen verlieren dabei ihre Markierungen
     stand = _archiv_und_zustand_schreiben(
-        archiv, app.merge_archive(bestand, zeilen, entfernt=set()), gelesen,
-        _mit_entscheidungen(state, neu), state)
+        archiv, neues_archiv, gelesen, _mit_entscheidungen(state, neu), state,
+        handwerte=(app.handwerte_bereinigen(bestand_hw, neues_archiv), bestand_hw))
     geschrieben = {app.archive_key(r) for r in zeilen}
     _archiv_pruefen(archiv, geschrieben | set(werte), ersetzt - geschrieben, werte)
     state["entscheidungen"].update(neu)
